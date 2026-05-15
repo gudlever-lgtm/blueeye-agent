@@ -34,6 +34,39 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now blueeye-agent
 ```
 
+### Docker (inkl. Raspberry Pi 4/5)
+
+Image'et er baseret på `node:20-slim` og virker både på almindelige x86-64-værter
+og på Raspberry Pi 4/5 med 64-bit OS (arm64).
+
+Opret først en `.env` (se `.env.example`). Sæt **altid** `AGENT_ID` eksplicit —
+ellers bliver det containerens tilfældige hostname, som ændrer sig ved hver
+genstart.
+
+Med docker compose:
+
+```bash
+docker compose up -d --build
+```
+
+Eller rå `docker run`:
+
+```bash
+docker build -t blueeye-agent .
+docker run -d --restart unless-stopped \
+  --cap-add=NET_RAW \
+  -e SERVER_URL=ws://server-ip:4000 \
+  -e AGENT_ID=min-unikke-agent-id \
+  blueeye-agent
+```
+
+`--cap-add=NET_RAW` (i compose: `cap_add: [NET_RAW]`) er nødvendig for at ICMP
+(`ping`) og `traceroute` kan sende rå pakker.
+
+For mere præcise latency-målinger kan `network_mode: host` aktiveres i
+`docker-compose.yml` — så deler agenten vært-netværket direkte i stedet for
+Dockers bridge-netværk.
+
 ## Test-typer
 
 | Type         | Værktøj            | Beskrivelse                    |

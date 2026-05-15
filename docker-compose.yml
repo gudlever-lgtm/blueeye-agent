@@ -1,0 +1,8 @@
+services:
+  blueeye-agent:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    cap_add:
+      - NET_RAW
+    # network_mode: host  # giver mere præcise latency-målinger (agenten deler vært-netværket direkte)
