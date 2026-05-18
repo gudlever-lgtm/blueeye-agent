@@ -1,16 +1,18 @@
 [Unit]
-Description=BlueEye Agent
+Description=BlueEye Network Agent
+Documentation=https://github.com/gudlever-lgtm/blueeye-agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=blueeye
+# Adjust paths for the target device (e.g. a Cisco switch guest shell).
 WorkingDirectory=/opt/blueeye-agent
-EnvironmentFile=/etc/blueeye-agent/env
-ExecStart=/usr/bin/node /opt/blueeye-agent/index.js
+EnvironmentFile=/opt/blueeye-agent/.env
+ExecStart=/usr/bin/python3 /opt/blueeye-agent/main.py
 Restart=always
-RestartSec=5
+RestartSec=10
+User=blueeye
 
 [Install]
 WantedBy=multi-user.target
