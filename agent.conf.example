@@ -1,0 +1,8 @@
+; BlueEye agent configuration. Copy to /etc/blueeye/agent.conf and adjust.
+; Environment variables (BLUEEYE_SERVER_URL, BLUEEYE_AGENT_TOKEN,
+; BLUEEYE_POLL_INTERVAL) override these values.
+
+[agent]
+server_url = https://blueeye.example.com
+token = paste-the-one-time-token-from-the-UI-here
+poll_interval = 60

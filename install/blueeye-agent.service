@@ -1,0 +1,26 @@
+[Unit]
+Description=BlueEye Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blueeye
+Group=blueeye
+EnvironmentFile=-/etc/blueeye/agent.env
+WorkingDirectory=/opt/blueeye
+ExecStart=/usr/bin/python3 /opt/blueeye/blueeye_agent.py
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/opt/blueeye
+ReadWritePaths=/var/log/blueeye
+# icmplib's unprivileged datagram-socket mode needs CAP_NET_RAW on most distros.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
