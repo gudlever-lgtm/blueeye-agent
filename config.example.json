@@ -1,0 +1,8 @@
+{
+  "serverUrl": "http://localhost:3000",
+  "enrollmentCode": "paste-the-one-time-enrollment-code-here-for-first-start",
+  "tokenPath": "./.blueeye-agent/token",
+  "heartbeatMs": 15000,
+  "reconnectBaseMs": 1000,
+  "reconnectMaxMs": 30000
+}

@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Local runtime config & secrets
+blueeye-agent.config.json
+.env
+.env.local
+
+# Stored agent token (must never be committed)
+*.token
+.blueeye-agent/
+
+# Logs
+*.log
+logs/
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
