@@ -83,6 +83,10 @@ Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
   interface rx/tx-bytes, pakker og rater. Kør containeren med
   `network_mode: host` for at måle hele værtens trafik (ellers måles containerens
   egne interfaces).
+- **Løbende rapportering:** uafhængigt af server-kommandoer måler agenten
+  trafik og indsender resultatet på et fast interval
+  (`BLUEEYE_REPORT_INTERVAL_MS`, default 60s; `0` slår det fra). Det er sådan
+  serveren får kontinuerlige data uden at nogen trykker "Kør test".
 - Indsender resultater via `POST /agents/results { results: [...] }` med
   Bearer-token.
 - **Reconnect** ved tabt forbindelse med eksponentiel backoff (+ jitter).

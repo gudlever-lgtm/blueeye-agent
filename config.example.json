@@ -4,5 +4,7 @@
   "tokenPath": "./.blueeye-agent/token",
   "heartbeatMs": 15000,
   "reconnectBaseMs": 1000,
-  "reconnectMaxMs": 30000
+  "reconnectMaxMs": 30000,
+  "reportIntervalMs": 60000,
+  "reportSampleMs": 1000
 }

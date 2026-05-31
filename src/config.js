@@ -40,7 +40,22 @@ function loadConfig({ env = process.env } = {}) {
     factor: 2,
   };
 
-  return { configPath, serverUrl, enrollmentCode, tokenPath, heartbeatMs, backoff };
+  // Continuous reporting: how often the agent measures and submits traffic on
+  // its own (0 disables it; default 60s). The sampling window per measurement
+  // is reportSampleMs.
+  const reportIntervalMs = toInt(env.BLUEEYE_REPORT_INTERVAL_MS, file.reportIntervalMs ?? 60000);
+  const reportSampleMs = toInt(env.BLUEEYE_REPORT_SAMPLE_MS, file.reportSampleMs ?? 1000);
+
+  return {
+    configPath,
+    serverUrl,
+    enrollmentCode,
+    tokenPath,
+    heartbeatMs,
+    backoff,
+    reportIntervalMs,
+    reportSampleMs,
+  };
 }
 
 // Removes `enrollmentCode` from the JSON config file so the one-time code is
