@@ -78,11 +78,20 @@ Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
 - Lytter efter server-kommandoer. En **run-test**-kommando (fx
   `{ type: "command", command: { name: "run-test", intervalMs: 1000 } }`) får
   agenten til at **måle netværkstrafik** og indsende resultatet.
-- **Trafik-måling** ([`src/trafficMonitor.js`](src/trafficMonitor.js)): læser
-  `/proc/net/dev` to gange `intervalMs` fra hinanden og rapporterer pr.
-  interface rx/tx-bytes, pakker og rater. Kør containeren med
-  `network_mode: host` for at måle hele værtens trafik (ellers måles containerens
-  egne interfaces).
+- **Trafik-kilder** — agenten kan måle trafik på to måder, og **serveren vælger
+  hvilken pr. agent** (matchet på agent-id via tokenet):
+  - `proc` ([`src/trafficMonitor.js`](src/trafficMonitor.js)): læser
+    `/proc/net/dev` to gange `intervalMs` fra hinanden, pr. interface rx/tx-bytes
+    og rater. Kør containeren med `network_mode: host` for at måle hele værtens
+    trafik (ellers måles containerens egne interfaces).
+  - `snmp` ([`src/snmpMonitor.js`](src/snmpMonitor.js)): poller en Cisco-enheds
+    IF-MIB high-capacity octet-tællere (ifHCInOctets/ifHCOutOctets) over SNMP —
+    nyttigt når agenten kører ved siden af enheden, eller på IOS uden `/proc`.
+- **Capabilities + config:** ved opstart sender agenten sine muligheder
+  (`{ sources: [...] }`) til `POST /agents/me/capabilities` og henter sin
+  tildelte kilde fra `GET /agents/me/config`. Den genhenter config ved hver
+  (gen)tilslutning, så ændringer i dashboardet slår igennem. Begge kilder giver
+  samme resultat-format, så server/dashboard behandler dem ens.
 - **Løbende rapportering:** uafhængigt af server-kommandoer måler agenten
   trafik og indsender resultatet på et fast interval
   (`BLUEEYE_REPORT_INTERVAL_MS`, default 60s; `0` slår det fra). Det er sådan

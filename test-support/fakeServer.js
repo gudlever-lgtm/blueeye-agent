@@ -73,6 +73,32 @@ function startFakeServer(options = {}) {
       return;
     }
 
+    if (req.method === 'GET' && req.url === '/agents/me/config') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid agent token' }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ agentId: issuedAgentId, monitorConfig }));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/agents/me/capabilities') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid agent token' }));
+        return;
+      }
+      const body = await readJson(req);
+      receivedCapabilities.push(body.capabilities);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ agentId: issuedAgentId, capabilities: body.capabilities }));
+      return;
+    }
+
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not Found' }));
   });
@@ -120,6 +146,7 @@ function startFakeServer(options = {}) {
         url: `http://127.0.0.1:${port}`,
         enrollments,
         receivedResults,
+        receivedCapabilities,
         socketCount: () => sockets.size,
         sendCommandToAll,
         dropAllSockets,
