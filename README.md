@@ -76,8 +76,13 @@ Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
 - Åbner en WebSocket til `/ws/agent` med tokenet i `Authorization: Bearer`-headeren.
 - Sender periodisk heartbeat, så serveren holder `last_seen` frisk.
 - Lytter efter server-kommandoer. En **run-test**-kommando (fx
-  `{ type: "command", command: { name: "run-test" } }`) får agenten til at køre
-  en test og indsende resultatet.
+  `{ type: "command", command: { name: "run-test", intervalMs: 1000 } }`) får
+  agenten til at **måle netværkstrafik** og indsende resultatet.
+- **Trafik-måling** ([`src/trafficMonitor.js`](src/trafficMonitor.js)): læser
+  `/proc/net/dev` to gange `intervalMs` fra hinanden og rapporterer pr.
+  interface rx/tx-bytes, pakker og rater. Kør containeren med
+  `network_mode: host` for at måle hele værtens trafik (ellers måles containerens
+  egne interfaces).
 - Indsender resultater via `POST /agents/results { results: [...] }` med
   Bearer-token.
 - **Reconnect** ved tabt forbindelse med eksponentiel backoff (+ jitter).
@@ -103,7 +108,8 @@ blueeye-agent/
 │   ├── apiClient.js           # REST (postResults) med Bearer
 │   ├── agentClient.js         # WebSocket: connect, heartbeat, reconnect, hård fejl
 │   ├── command.js             # Genkend "run test"-kommandoer
-│   ├── testRunner.js          # Kør en test, producér resultat
+│   ├── trafficMonitor.js      # Måler netværkstrafik via /proc/net/dev
+│   ├── testRunner.js          # Kør en test (trafik-måling), producér resultat
 │   └── runtime.js             # Binder WS + REST + kommando-håndtering sammen
 ├── test/                      # Tests (node --test)
 └── test-support/              # fakeServer (kontrakt-tro blueeye-server-stub)

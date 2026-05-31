@@ -1,22 +1,17 @@
 'use strict';
 
-const os = require('os');
+const { sampleTraffic } = require('./trafficMonitor');
 
-// Runs a "test" in response to a server command. For now this is a lightweight,
-// always-safe system diagnostic; the result payload is what gets reported back
-// to the server. The shape is intentionally generic so the server can store it
-// as JSON.
-async function runTest(command = {}) {
-  const name = (command && (command.name || command.test)) || 'system-check';
+// Runs a "test" in response to a server command. The test measures real network
+// traffic on the host (per-interface bytes/packets and rates over a short
+// sampling window) and returns it as the result payload. The traffic sampler is
+// injectable so tests don't touch /proc or wait.
+async function runTest(command = {}, { sampler = sampleTraffic } = {}) {
+  const name = (command && (command.name || command.test)) || 'traffic';
+  const intervalMs = command && Number.isInteger(command.intervalMs) ? command.intervalMs : 1000;
   const startedAt = new Date().toISOString();
 
-  const metrics = {
-    uptimeSec: Math.round(os.uptime()),
-    loadavg: os.loadavg(),
-    freeMemBytes: os.freemem(),
-    totalMemBytes: os.totalmem(),
-    cpuCount: os.cpus().length,
-  };
+  const traffic = await sampler({ intervalMs });
 
   return {
     name,
@@ -24,7 +19,7 @@ async function runTest(command = {}) {
     ok: true,
     startedAt,
     finishedAt: new Date().toISOString(),
-    metrics,
+    traffic,
   };
 }
 

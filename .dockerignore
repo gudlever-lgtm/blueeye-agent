@@ -1,0 +1,12 @@
+node_modules
+.git
+.gitignore
+*.token
+.blueeye-agent/
+blueeye-agent.config.json
+.env
+*.log
+test
+test-support
+Dockerfile
+.dockerignore
