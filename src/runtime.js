@@ -91,6 +91,9 @@ function createAgentRuntime({
     try {
       const mc = (await api.getConfig()) || { source: 'proc' };
       monitorConfig = mc;
+      // Dispose the previous sampler's background lifecycle (e.g. a netflow
+      // UDP socket) before swapping in the new source.
+      if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
       currentSampler = samplerFactory(monitorConfig);
       effectiveIntervalMs =
         Number.isInteger(mc.intervalMs) && mc.intervalMs > 0 ? mc.intervalMs : config.reportIntervalMs;
@@ -168,6 +171,7 @@ function createAgentRuntime({
     },
     stop() {
       stopReporting();
+      if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
       client.stop();
     },
     // Exposed for tests / manual triggering.
