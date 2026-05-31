@@ -138,7 +138,9 @@ function createAgentRuntime({
   });
   client.on('connected', (m) => emitter.emit('connected', m));
   client.on('close', (code) => emitter.emit('close', code));
-  client.on('fatal', (reason) => emitter.emit('fatal', reason));
+  // A WS-origin fatal (e.g. 401 handshake) must fully shut the runtime down too
+  // — stop reporting + mark fatal — not just re-emit, so no timers linger.
+  client.on('fatal', (reason) => handleFatal(reason));
 
   client.on('command', async (command) => {
     if (!isRunTestCommand(command)) {

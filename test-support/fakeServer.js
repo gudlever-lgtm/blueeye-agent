@@ -42,6 +42,8 @@ function startFakeServer(options = {}) {
 
   const enrollments = [];
   const receivedResults = [];
+  const receivedCapabilities = [];
+  const monitorConfig = options.monitorConfig || { source: 'proc' };
   const sockets = new Set();
 
   const server = http.createServer(async (req, res) => {
