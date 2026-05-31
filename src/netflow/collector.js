@@ -2,13 +2,19 @@
 
 const dgram = require('dgram');
 const { parseV5 } = require('./parseV5');
+const { parseTemplated } = require('./parseTemplated');
 const { aggregateFlows } = require('./aggregate');
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 
-// Listens for NetFlow v5 export packets on a UDP port and accumulates the flow
-// records. drain() returns an aggregated snapshot of everything received since
-// the last drain and clears the buffer — so each report covers one interval.
+// Listens for NetFlow export packets (v5 fixed-format, and v9/IPFIX
+// template-based) on a UDP port and accumulates the flow records. drain()
+// returns an aggregated snapshot of everything received since the last drain and
+// clears the buffer — so each report covers one interval.
+//
+// v9/IPFIX templates are learned from Template FlowSets and remembered across
+// packets in `templates`, so data records are decoded once their template is
+// known.
 //
 // The socket factory is injectable so tests can feed packets without real UDP.
 function createNetflowCollector({
@@ -22,11 +28,13 @@ function createNetflowCollector({
   let buffer = [];
   let received = 0;
   let dropped = 0;
+  const templates = new Map(); // v9/IPFIX template cache, persisted across packets
 
   function handlePacket(msg) {
     let parsed;
     try {
-      parsed = parseV5(msg);
+      const version = Buffer.isBuffer(msg) && msg.length >= 2 ? msg.readUInt16BE(0) : 0;
+      parsed = version === 9 || version === 10 ? parseTemplated(msg, templates) : parseV5(msg);
     } catch (err) {
       dropped += 1;
       logger.debug(`NetFlow: dropped a packet (${err.message})`);
