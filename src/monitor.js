@@ -3,21 +3,36 @@
 const { sampleTraffic } = require('./trafficMonitor');
 const { sampleSnmp } = require('./snmpMonitor');
 const { createNetflowCollector } = require('./netflow/collector');
+const { createSflowCollector } = require('./sflow/collector');
+
+// Wraps a UDP flow collector (netflow/sflow) as a sampler: start it in the
+// background and drain() its aggregated snapshot each interval. Carries a
+// .stop() for the socket lifecycle.
+function collectorSampler(collector) {
+  Promise.resolve(collector.start()).catch(() => {});
+  const sampler = async () => collector.drain();
+  sampler.stop = () => collector.stop();
+  return sampler;
+}
 
 // Builds a traffic sampler from a server-assigned monitor config. Every sampler
-// is a callable `async ({ intervalMs }) => snapshot`; some (netflow) also carry
-// a `.stop()` for their background lifecycle. Callers must call `sampler.stop?.()`
-// when replacing or disposing a sampler.
+// is a callable `async ({ intervalMs }) => snapshot`; collector-backed ones
+// (netflow/sflow) also carry a `.stop()` for their background lifecycle.
+// Callers must call `sampler.stop?.()` when replacing or disposing a sampler.
 //
 //   { source: 'proc' }                          -> local /proc/net/dev (rate)
 //   { source: 'snmp', snmp: { host, ... } }     -> device interface counters (rate)
-//   { source: 'netflow', netflow: { port } }    -> NetFlow collector (per-port/protocol)
+//   { source: 'netflow', netflow: { port } }    -> NetFlow v5/v9/IPFIX collector
+//   { source: 'sflow', sflow: { port } }        -> sFlow v5 collector (sampled)
 //
-// proc/snmp produce a per-interface byte-rate snapshot; netflow produces a
-// flow summary (byPort/byProtocol/topTalkers). Both are stored under the same
+// proc/snmp produce a per-interface byte-rate snapshot; netflow/sflow produce a
+// flow summary (byPort/byProtocol/topTalkers). All are stored under the same
 // `traffic` field; the server reads whichever fields are present. Unknown
-// sources fall back to proc. The collector factory is injectable for tests.
-function createSampler(monitorConfig = { source: 'proc' }, { netflowFactory = createNetflowCollector } = {}) {
+// sources fall back to proc. Collector factories are injectable for tests.
+function createSampler(
+  monitorConfig = { source: 'proc' },
+  { netflowFactory = createNetflowCollector, sflowFactory = createSflowCollector } = {}
+) {
   const cfg = monitorConfig || {};
 
   if (cfg.source === 'snmp' && cfg.snmp) {
@@ -26,13 +41,12 @@ function createSampler(monitorConfig = { source: 'proc' }, { netflowFactory = cr
 
   if (cfg.source === 'netflow') {
     const nf = cfg.netflow || {};
-    const collector = netflowFactory({ port: nf.port || 2055, bindAddress: nf.bindAddress || '0.0.0.0' });
-    // Start collecting immediately (bind happens in the background); each sample
-    // drains whatever arrived in the interval.
-    Promise.resolve(collector.start()).catch(() => {});
-    const sampler = async () => collector.drain();
-    sampler.stop = () => collector.stop();
-    return sampler;
+    return collectorSampler(netflowFactory({ port: nf.port || 2055, bindAddress: nf.bindAddress || '0.0.0.0' }));
+  }
+
+  if (cfg.source === 'sflow') {
+    const sf = cfg.sflow || {};
+    return collectorSampler(sflowFactory({ port: sf.port || 6343, bindAddress: sf.bindAddress || '0.0.0.0' }));
   }
 
   return ({ intervalMs }) => sampleTraffic({ intervalMs });

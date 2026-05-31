@@ -6,22 +6,22 @@ const assert = require('node:assert/strict');
 const { detectCapabilities } = require('../src/capabilities');
 const { createSampler } = require('../src/monitor');
 
-test('detectCapabilities reports proc, snmp and netflow when available', () => {
-  const caps = detectCapabilities({ canReadProc: () => true, hasSnmp: () => true, hasNetflow: () => true, version: '1.2.3' });
-  assert.deepEqual(caps.sources, ['proc', 'snmp', 'netflow']);
+test('detectCapabilities reports proc, snmp, netflow and sflow when available', () => {
+  const caps = detectCapabilities({ canReadProc: () => true, hasSnmp: () => true, hasNetflow: () => true, hasSflow: () => true, version: '1.2.3' });
+  assert.deepEqual(caps.sources, ['proc', 'snmp', 'netflow', 'sflow']);
   assert.equal(caps.agentVersion, '1.2.3');
 });
 
 test('detectCapabilities omits sources that are unavailable', () => {
-  const noNf = { hasNetflow: () => false };
-  assert.deepEqual(detectCapabilities({ canReadProc: () => true, hasSnmp: () => false, ...noNf }).sources, ['proc']);
-  assert.deepEqual(detectCapabilities({ canReadProc: () => false, hasSnmp: () => true, ...noNf }).sources, ['snmp']);
-  assert.deepEqual(detectCapabilities({ canReadProc: () => false, hasSnmp: () => false, ...noNf }).sources, []);
+  const noFlow = { hasNetflow: () => false, hasSflow: () => false };
+  assert.deepEqual(detectCapabilities({ canReadProc: () => true, hasSnmp: () => false, ...noFlow }).sources, ['proc']);
+  assert.deepEqual(detectCapabilities({ canReadProc: () => false, hasSnmp: () => true, ...noFlow }).sources, ['snmp']);
+  assert.deepEqual(detectCapabilities({ canReadProc: () => false, hasSnmp: () => false, ...noFlow }).sources, []);
 });
 
-test('detectCapabilities includes netflow by default (built-in collector)', () => {
+test('detectCapabilities includes netflow and sflow by default (built-in collectors)', () => {
   const caps = detectCapabilities({ canReadProc: () => false, hasSnmp: () => false });
-  assert.deepEqual(caps.sources, ['netflow']);
+  assert.deepEqual(caps.sources, ['netflow', 'sflow']);
 });
 
 test('createSampler returns a proc sampler by default and for source proc', () => {
@@ -58,6 +58,26 @@ test('createSampler builds a netflow sampler that starts/drains/stops', async ()
   const snap = await sampler({ intervalMs: 10 });
   assert.equal(snap.source, 'netflow');
 
+  sampler.stop();
+  assert.equal(stopped, 1);
+});
+
+test('createSampler builds an sflow sampler that starts/drains/stops', async () => {
+  let started = 0;
+  let stopped = 0;
+  const fakeCollector = {
+    start: async () => { started += 1; },
+    drain: () => ({ source: 'sflow', totals: { bytes: 0, flows: 0 }, byPort: [], byProtocol: [], topTalkers: [] }),
+    stop: () => { stopped += 1; },
+  };
+  const sampler = createSampler(
+    { source: 'sflow', sflow: { port: 6343 } },
+    { sflowFactory: () => fakeCollector }
+  );
+  assert.equal(typeof sampler.stop, 'function');
+  assert.equal(started, 1);
+  const snap = await sampler({ intervalMs: 10 });
+  assert.equal(snap.source, 'sflow');
   sampler.stop();
   assert.equal(stopped, 1);
 });

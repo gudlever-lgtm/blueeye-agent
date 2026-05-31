@@ -7,20 +7,24 @@ const fs = require('fs');
 //   - 'proc': /proc/net/dev is readable (Linux host / on-device Linux).
 //   - 'snmp': the optional `net-snmp` module is installed (poll a device's
 //     interface counters over SNMP).
-//   - 'netflow': always available — a built-in UDP collector for NetFlow v5
-//     flow exports (vendor-neutral; the device must be configured to export
-//     flows to this agent). v9/IPFIX/sFlow can be added behind the same source.
+//   - 'netflow': always available — a built-in UDP collector for NetFlow
+//     v5/v9/IPFIX flow exports (vendor-neutral; the device must export flows to
+//     this agent).
+//   - 'sflow': always available — a built-in UDP collector for sFlow v5 sampled
+//     exports (Arista/HPE and many switches).
 // Detection is injectable for tests.
 function detectCapabilities({
   canReadProc = defaultCanReadProc,
   hasSnmp = defaultHasSnmp,
   hasNetflow = () => true,
+  hasSflow = () => true,
   version = readVersion(),
 } = {}) {
   const sources = [];
   if (canReadProc()) sources.push('proc');
   if (hasSnmp()) sources.push('snmp');
   if (hasNetflow()) sources.push('netflow');
+  if (hasSflow()) sources.push('sflow');
   return { sources, agentVersion: version };
 }
 
