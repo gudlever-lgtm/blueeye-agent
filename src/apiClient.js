@@ -31,7 +31,51 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     }
   }
 
-  return { postResults };
+  // Fetches this agent's server-assigned monitoring config. Returns the
+  // monitorConfig object (e.g. { source: 'proc' } or { source: 'snmp', ... }).
+  async function getConfig() {
+    const res = await fetchImpl(`${serverUrl}/agents/me/config`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 401) {
+      const err = new Error('Agent token rejected (HTTP 401) while fetching config.');
+      err.code = 'TOKEN_REJECTED';
+      throw err;
+    }
+    if (!res.ok) {
+      const err = new Error(`Failed to fetch config: HTTP ${res.status}.`);
+      err.code = 'HTTP_ERROR';
+      throw err;
+    }
+    const body = await res.json();
+    return body.monitorConfig || { source: 'proc' };
+  }
+
+  // Reports what this agent can do (e.g. { sources: ['proc','snmp'] }).
+  async function postCapabilities(capabilities) {
+    const res = await fetchImpl(`${serverUrl}/agents/me/capabilities`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ capabilities }),
+    });
+    if (res.status === 401) {
+      const err = new Error('Agent token rejected (HTTP 401) while reporting capabilities.');
+      err.code = 'TOKEN_REJECTED';
+      throw err;
+    }
+    if (!res.ok) {
+      const err = new Error(`Failed to report capabilities: HTTP ${res.status}.`);
+      err.code = 'HTTP_ERROR';
+      throw err;
+    }
+    try {
+      return await res.json();
+    } catch {
+      return {};
+    }
+  }
+
+  return { postResults, getConfig, postCapabilities };
 }
 
 module.exports = { createApiClient };

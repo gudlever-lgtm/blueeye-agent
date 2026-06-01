@@ -78,7 +78,7 @@ test('runs a test and submits results on a run-test command', async () => {
     await withTimeout(onceEvent(runtime, 'connected'), 4000, 'no connected message');
 
     const submitted = onceEvent(runtime, 'results-submitted');
-    const sent = server.sendCommandToAll({ name: 'run-test', id: 3 });
+    const sent = server.sendCommandToAll({ name: 'run-test', id: 3, intervalMs: 10 });
     assert.equal(sent, 1);
 
     const { result } = await withTimeout(submitted, 4000, 'results not submitted');

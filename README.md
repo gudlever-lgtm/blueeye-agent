@@ -42,6 +42,28 @@ Ved første opstart enroller agenten sig, gemmer sit token og fjerner
 engangskoden fra config-filen. Efterfølgende opstart bruger det gemte token og
 **springer enrollment over**.
 
+## Installér som Docker-container
+
+`install.sh` henter/opdaterer koden, bygger image'et og kører agenten som en
+restart-on-boot container. Tokenet ligger på en navngivet volume, så det
+genbruges ved genstart/opgradering (engangskoden bruges kun ved første start).
+
+```bash
+# Hent koden
+git clone https://github.com/gudlever-lgtm/blueeye-agent.git
+cd blueeye-agent
+
+# Installér + start som Docker-container (Linux: --network host måler host-trafik)
+BLUEEYE_SERVER_URL=https://server.example \
+BLUEEYE_ENROLLMENT_CODE=<engangskode> \
+./install.sh
+```
+
+Opdatér senere med `git pull` og kør `./install.sh` igen (eller kør scriptet et
+vilkårligt sted — uden et checkout kloner det selv repoet). Valgfrie env:
+`NETWORK_MODE=bridge`, `CONTAINER`, `IMAGE`, `TOKEN_VOLUME`. Styr containeren med
+`docker logs -f blueeye-agent` / `docker restart blueeye-agent`.
+
 ## Konfiguration (fil + env)
 
 Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
@@ -76,8 +98,26 @@ Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
 - Åbner en WebSocket til `/ws/agent` med tokenet i `Authorization: Bearer`-headeren.
 - Sender periodisk heartbeat, så serveren holder `last_seen` frisk.
 - Lytter efter server-kommandoer. En **run-test**-kommando (fx
-  `{ type: "command", command: { name: "run-test" } }`) får agenten til at køre
-  en test og indsende resultatet.
+  `{ type: "command", command: { name: "run-test", intervalMs: 1000 } }`) får
+  agenten til at **måle netværkstrafik** og indsende resultatet.
+- **Trafik-kilder** — agenten kan måle trafik på to måder, og **serveren vælger
+  hvilken pr. agent** (matchet på agent-id via tokenet):
+  - `proc` ([`src/trafficMonitor.js`](src/trafficMonitor.js)): læser
+    `/proc/net/dev` to gange `intervalMs` fra hinanden, pr. interface rx/tx-bytes
+    og rater. Kør containeren med `network_mode: host` for at måle hele værtens
+    trafik (ellers måles containerens egne interfaces).
+  - `snmp` ([`src/snmpMonitor.js`](src/snmpMonitor.js)): poller en Cisco-enheds
+    IF-MIB high-capacity octet-tællere (ifHCInOctets/ifHCOutOctets) over SNMP —
+    nyttigt når agenten kører ved siden af enheden, eller på IOS uden `/proc`.
+- **Capabilities + config:** ved opstart sender agenten sine muligheder
+  (`{ sources: [...] }`) til `POST /agents/me/capabilities` og henter sin
+  tildelte kilde fra `GET /agents/me/config`. Den genhenter config ved hver
+  (gen)tilslutning, så ændringer i dashboardet slår igennem. Begge kilder giver
+  samme resultat-format, så server/dashboard behandler dem ens.
+- **Løbende rapportering:** uafhængigt af server-kommandoer måler agenten
+  trafik og indsender resultatet på et fast interval
+  (`BLUEEYE_REPORT_INTERVAL_MS`, default 60s; `0` slår det fra). Det er sådan
+  serveren får kontinuerlige data uden at nogen trykker "Kør test".
 - Indsender resultater via `POST /agents/results { results: [...] }` med
   Bearer-token.
 - **Reconnect** ved tabt forbindelse med eksponentiel backoff (+ jitter).
@@ -103,7 +143,8 @@ blueeye-agent/
 │   ├── apiClient.js           # REST (postResults) med Bearer
 │   ├── agentClient.js         # WebSocket: connect, heartbeat, reconnect, hård fejl
 │   ├── command.js             # Genkend "run test"-kommandoer
-│   ├── testRunner.js          # Kør en test, producér resultat
+│   ├── trafficMonitor.js      # Måler netværkstrafik via /proc/net/dev
+│   ├── testRunner.js          # Kør en test (trafik-måling), producér resultat
 │   └── runtime.js             # Binder WS + REST + kommando-håndtering sammen
 ├── test/                      # Tests (node --test)
 └── test-support/              # fakeServer (kontrakt-tro blueeye-server-stub)

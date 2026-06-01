@@ -42,6 +42,8 @@ function startFakeServer(options = {}) {
 
   const enrollments = [];
   const receivedResults = [];
+  const receivedCapabilities = [];
+  const monitorConfig = options.monitorConfig || { source: 'proc' };
   const sockets = new Set();
 
   const server = http.createServer(async (req, res) => {
@@ -70,6 +72,32 @@ function startFakeServer(options = {}) {
       receivedResults.push({ token, results: body.results });
       res.writeHead(201, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ inserted: Array.isArray(body.results) ? body.results.length : 0 }));
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/agents/me/config') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid agent token' }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ agentId: issuedAgentId, monitorConfig }));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/agents/me/capabilities') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid agent token' }));
+        return;
+      }
+      const body = await readJson(req);
+      receivedCapabilities.push(body.capabilities);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ agentId: issuedAgentId, capabilities: body.capabilities }));
       return;
     }
 
@@ -120,6 +148,7 @@ function startFakeServer(options = {}) {
         url: `http://127.0.0.1:${port}`,
         enrollments,
         receivedResults,
+        receivedCapabilities,
         socketCount: () => sockets.size,
         sendCommandToAll,
         dropAllSockets,
