@@ -42,6 +42,28 @@ Ved første opstart enroller agenten sig, gemmer sit token og fjerner
 engangskoden fra config-filen. Efterfølgende opstart bruger det gemte token og
 **springer enrollment over**.
 
+## Installér som Docker-container
+
+`install.sh` henter/opdaterer koden, bygger image'et og kører agenten som en
+restart-on-boot container. Tokenet ligger på en navngivet volume, så det
+genbruges ved genstart/opgradering (engangskoden bruges kun ved første start).
+
+```bash
+# Hent koden
+git clone https://github.com/gudlever-lgtm/blueeye-agent.git
+cd blueeye-agent
+
+# Installér + start som Docker-container (Linux: --network host måler host-trafik)
+BLUEEYE_SERVER_URL=https://server.example \
+BLUEEYE_ENROLLMENT_CODE=<engangskode> \
+./install.sh
+```
+
+Opdatér senere med `git pull` og kør `./install.sh` igen (eller kør scriptet et
+vilkårligt sted — uden et checkout kloner det selv repoet). Valgfrie env:
+`NETWORK_MODE=bridge`, `CONTAINER`, `IMAGE`, `TOKEN_VOLUME`. Styr containeren med
+`docker logs -f blueeye-agent` / `docker restart blueeye-agent`.
+
 ## Konfiguration (fil + env)
 
 Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
