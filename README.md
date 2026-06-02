@@ -129,26 +129,9 @@ To adskilte sikkerhedsgrænser: agentens token bruges **kun** mod agent-endpoint
 
 ## Projektstruktur
 
-```
-blueeye-agent/
-├── config.example.json        # Eksempel-config
-├── src/
-│   ├── index.js               # CLI-entrypoint (enroll-or-load -> kør)
-│   ├── config.js              # Indlæs/flet/ryd config (fil + env)
-│   ├── logger.js              # Simpel niveau-logger
-│   ├── system.js              # hostname/platform/arch
-│   ├── tokenStore.js          # Læs/skriv token-fil (0600)
-│   ├── enroll.js              # POST /agents/enroll
-│   ├── bootstrap.js           # ensureToken: skip enroll hvis token findes
-│   ├── apiClient.js           # REST (postResults) med Bearer
-│   ├── agentClient.js         # WebSocket: connect, heartbeat, reconnect, hård fejl
-│   ├── command.js             # Genkend "run test"-kommandoer
-│   ├── trafficMonitor.js      # Måler netværkstrafik via /proc/net/dev
-│   ├── testRunner.js          # Kør en test (trafik-måling), producér resultat
-│   └── runtime.js             # Binder WS + REST + kommando-håndtering sammen
-├── test/                      # Tests (node --test)
-└── test-support/              # fakeServer (kontrakt-tro blueeye-server-stub)
-```
+Se [`codemap.md`](codemap.md) for et aktuelt kort over kildekoden — arkitektur,
+moduler, dataflow, trafik-kilder (proc/snmp/netflow/sflow), probes, server-API
+og teststruktur.
 
 ## Test
 
