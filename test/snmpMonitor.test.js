@@ -46,6 +46,28 @@ test('sampleSnmp clamps counter resets to 0 (no negative deltas)', async () => {
   assert.equal(traffic.interfaces[0].txBytes, 0);
 });
 
+test('sampleSnmp carries error/drop deltas + oper-status/speed through', async () => {
+  const snapshots = [
+    { 1: { name: 'Gi0/0', rxBytes: 0, txBytes: 0, rxErrors: 2, txErrors: 1, rxDrop: 5, txDrop: 0, operStatus: 'up', speedMbps: 1000 } },
+    { 1: { name: 'Gi0/0', rxBytes: 0, txBytes: 0, rxErrors: 5, txErrors: 4, rxDrop: 9, txDrop: 0, operStatus: 'up', speedMbps: 1000 } },
+  ];
+  let call = 0;
+  const traffic = await sampleSnmp({
+    snmp: { host: '10.0.0.1' },
+    intervalMs: 1000,
+    readCounters: async () => snapshots[call++],
+    sleepFn: async () => {},
+    now: (() => { const v = [0, 1000]; let i = 0; return () => v[i++]; })(),
+  });
+  const gi00 = traffic.interfaces[0];
+  assert.equal(gi00.rxErrors, 3); // 5 - 2
+  assert.equal(gi00.txErrors, 3); // 4 - 1
+  assert.equal(gi00.rxDrop, 4); // 9 - 5
+  assert.equal(gi00.operStatus, 'up');
+  assert.equal(gi00.speedMbps, 1000);
+  assert.equal(traffic.totals.rxErrors, 3);
+});
+
 test('toNumber handles numbers and 64-bit Buffers', () => {
   assert.equal(toNumber(1234), 1234);
   const buf = Buffer.alloc(8);
