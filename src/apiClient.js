@@ -51,6 +51,30 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     return body.monitorConfig || { source: 'proc' };
   }
 
+  // Posts active-probe results (ping/tcp/dns/traceroute) for this agent.
+  async function postProbeResults(results) {
+    const res = await fetchImpl(`${serverUrl}/agents/probe-results`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ results }),
+    });
+    if (res.status === 401) {
+      const err = new Error('Agent token rejected (HTTP 401) while posting probe results.');
+      err.code = 'TOKEN_REJECTED';
+      throw err;
+    }
+    if (!res.ok) {
+      const err = new Error(`Failed to post probe results: HTTP ${res.status}.`);
+      err.code = 'HTTP_ERROR';
+      throw err;
+    }
+    try {
+      return await res.json();
+    } catch {
+      return {};
+    }
+  }
+
   // Reports what this agent can do (e.g. { sources: ['proc','snmp'] }).
   async function postCapabilities(capabilities) {
     const res = await fetchImpl(`${serverUrl}/agents/me/capabilities`, {
@@ -75,7 +99,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     }
   }
 
-  return { postResults, getConfig, postCapabilities };
+  return { postResults, getConfig, postCapabilities, postProbeResults };
 }
 
 module.exports = { createApiClient };
