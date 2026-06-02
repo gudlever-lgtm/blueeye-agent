@@ -53,7 +53,7 @@ function createAgentRuntime({
   let reportTimer = null;
   let fatal = false;
   let monitorConfig = { source: 'proc' };
-  let currentSampler = samplerFactory(monitorConfig);
+  let currentSampler = samplerFactory(monitorConfig, { logger });
   let effectiveIntervalMs = config.reportIntervalMs;
 
   function handleFatal(reason = 'rest-token-rejected') {
@@ -123,7 +123,7 @@ function createAgentRuntime({
       // Dispose the previous sampler's background lifecycle (e.g. a netflow
       // UDP socket) before swapping in the new source.
       if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
-      currentSampler = samplerFactory(monitorConfig);
+      currentSampler = samplerFactory(monitorConfig, { logger });
       effectiveIntervalMs =
         Number.isInteger(mc.intervalMs) && mc.intervalMs > 0 ? mc.intervalMs : config.reportIntervalMs;
       logger.info(`Monitor source: ${monitorConfig.source} (report every ${effectiveIntervalMs}ms).`);

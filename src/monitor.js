@@ -4,12 +4,15 @@ const { sampleTraffic } = require('./trafficMonitor');
 const { sampleSnmp } = require('./snmpMonitor');
 const { createNetflowCollector } = require('./netflow/collector');
 const { createSflowCollector } = require('./sflow/collector');
+const { silentLogger } = require('./logger');
 
 // Wraps a UDP flow collector (netflow/sflow) as a sampler: start it in the
 // background and drain() its aggregated snapshot each interval. Carries a
-// .stop() for the socket lifecycle.
-function collectorSampler(collector) {
-  Promise.resolve(collector.start()).catch(() => {});
+// .stop() for the socket lifecycle. A failed start (e.g. the UDP port is in
+// use) is logged rather than swallowed.
+function collectorSampler(collector, logger) {
+  Promise.resolve(collector.start()).catch((err) =>
+    logger.warn(`flow collector failed to start: ${err.message}`));
   const sampler = async () => collector.drain();
   sampler.stop = () => collector.stop();
   return sampler;
@@ -31,7 +34,7 @@ function collectorSampler(collector) {
 // sources fall back to proc. Collector factories are injectable for tests.
 function createSampler(
   monitorConfig = { source: 'proc' },
-  { netflowFactory = createNetflowCollector, sflowFactory = createSflowCollector } = {}
+  { netflowFactory = createNetflowCollector, sflowFactory = createSflowCollector, logger = silentLogger } = {}
 ) {
   const cfg = monitorConfig || {};
 
@@ -41,12 +44,12 @@ function createSampler(
 
   if (cfg.source === 'netflow') {
     const nf = cfg.netflow || {};
-    return collectorSampler(netflowFactory({ port: nf.port || 2055, bindAddress: nf.bindAddress || '0.0.0.0' }));
+    return collectorSampler(netflowFactory({ port: nf.port || 2055, bindAddress: nf.bindAddress || '0.0.0.0' }), logger);
   }
 
   if (cfg.source === 'sflow') {
     const sf = cfg.sflow || {};
-    return collectorSampler(sflowFactory({ port: sf.port || 6343, bindAddress: sf.bindAddress || '0.0.0.0' }));
+    return collectorSampler(sflowFactory({ port: sf.port || 6343, bindAddress: sf.bindAddress || '0.0.0.0' }), logger);
   }
 
   return ({ intervalMs }) => sampleTraffic({ intervalMs });
