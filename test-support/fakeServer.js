@@ -157,6 +157,10 @@ function startFakeServer(options = {}) {
           new Promise((done) => {
             dropAllSockets();
             wss.close();
+            // Force-close any lingering connections (e.g. undici keep-alive
+            // sockets from the agent's fetch calls) so server.close() resolves
+            // instead of waiting them out — otherwise `node --test` hangs.
+            if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
             server.close(done);
           }),
       });
