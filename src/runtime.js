@@ -9,6 +9,16 @@ const { runProbe } = require('./probes');
 const { createSampler } = require('./monitor');
 const { detectCapabilities } = require('./capabilities');
 
+// One-line, human-readable summary of a probe result for the info log.
+function describeProbeOutcome(result) {
+  if (!result.ok) return 'fejl';
+  if (result.type === 'traceroute') {
+    const hops = result.hopCount ?? (result.hops ? result.hops.length : '?');
+    return `${hops} hops`;
+  }
+  return `${result.rttMs ?? '?'} ms`;
+}
+
 // Ties the WebSocket client and the REST client together:
 //   - reports its capabilities and fetches its server-assigned monitor config
 //     (which traffic source to use: proc or snmp);
@@ -81,9 +91,7 @@ function createAgentRuntime({
     try {
       const result = await runProbe(probeSpec);
       const response = await api.postProbeResults([result]);
-      const outcome = !result.ok ? 'fejl'
-        : result.type === 'traceroute' ? `${result.hopCount ?? (result.hops ? result.hops.length : '?')} hops`
-          : `${result.rttMs ?? '?'} ms`;
+      const outcome = describeProbeOutcome(result);
       logger.info(`Probe ${result.type} → ${result.target}: ${outcome}.`);
       emitter.emit('probe-submitted', { result, response });
       return true;
