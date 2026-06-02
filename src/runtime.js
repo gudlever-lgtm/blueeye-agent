@@ -9,6 +9,16 @@ const { runProbe } = require('./probes');
 const { createSampler } = require('./monitor');
 const { detectCapabilities } = require('./capabilities');
 
+// One-line, human-readable summary of a probe result for the info log.
+function describeProbeOutcome(result) {
+  if (!result.ok) return 'fejl';
+  if (result.type === 'traceroute') {
+    const hops = result.hopCount ?? (result.hops ? result.hops.length : '?');
+    return `${hops} hops`;
+  }
+  return `${result.rttMs ?? '?'} ms`;
+}
+
 // Ties the WebSocket client and the REST client together:
 //   - reports its capabilities and fetches its server-assigned monitor config
 //     (which traffic source to use: proc or snmp);
@@ -43,7 +53,7 @@ function createAgentRuntime({
   let reportTimer = null;
   let fatal = false;
   let monitorConfig = { source: 'proc' };
-  let currentSampler = samplerFactory(monitorConfig);
+  let currentSampler = samplerFactory(monitorConfig, { logger });
   let effectiveIntervalMs = config.reportIntervalMs;
 
   function handleFatal(reason = 'rest-token-rejected') {
@@ -81,9 +91,7 @@ function createAgentRuntime({
     try {
       const result = await runProbe(probeSpec);
       const response = await api.postProbeResults([result]);
-      const outcome = !result.ok ? 'fejl'
-        : result.type === 'traceroute' ? `${result.hopCount ?? (result.hops ? result.hops.length : '?')} hops`
-          : `${result.rttMs ?? '?'} ms`;
+      const outcome = describeProbeOutcome(result);
       logger.info(`Probe ${result.type} → ${result.target}: ${outcome}.`);
       emitter.emit('probe-submitted', { result, response });
       return true;
@@ -101,7 +109,7 @@ function createAgentRuntime({
       await api.postCapabilities(capabilities);
       logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}`);
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') return handleFatal();
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not report capabilities (${err.message}).`);
     }
   }
@@ -110,18 +118,18 @@ function createAgentRuntime({
   // Resilient: only a 401 is fatal; otherwise keep the current source.
   async function loadServerConfig() {
     try {
-      const mc = (await api.getConfig()) || { source: 'proc' };
+      const mc = await api.getConfig();
       monitorConfig = mc;
       // Dispose the previous sampler's background lifecycle (e.g. a netflow
       // UDP socket) before swapping in the new source.
       if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
-      currentSampler = samplerFactory(monitorConfig);
+      currentSampler = samplerFactory(monitorConfig, { logger });
       effectiveIntervalMs =
         Number.isInteger(mc.intervalMs) && mc.intervalMs > 0 ? mc.intervalMs : config.reportIntervalMs;
       logger.info(`Monitor source: ${monitorConfig.source} (report every ${effectiveIntervalMs}ms).`);
       emitter.emit('config', monitorConfig);
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') return handleFatal();
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not fetch monitor config (${err.message}); using ${monitorConfig.source}.`);
     }
   }

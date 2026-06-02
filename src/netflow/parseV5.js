@@ -6,14 +6,11 @@
 //
 // Packet layout: a 24-byte header followed by `count` 48-byte flow records.
 // Reference: Cisco NetFlow v5 record format.
+const { ipv4 } = require('./ip');
+const { PROTO_NAMES } = require('./fields');
+
 const HEADER_BYTES = 24;
 const RECORD_BYTES = 48;
-
-const PROTO_NAMES = { 1: 'icmp', 6: 'tcp', 17: 'udp', 47: 'gre', 50: 'esp' };
-
-function ipv4(buf, offset) {
-  return `${buf[offset]}.${buf[offset + 1]}.${buf[offset + 2]}.${buf[offset + 3]}`;
-}
 
 function parseV5(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < HEADER_BYTES) {

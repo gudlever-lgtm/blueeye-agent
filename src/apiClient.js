@@ -2,6 +2,32 @@
 
 // REST client for agent-authenticated calls. The opaque token is sent as a
 // Bearer credential (the same token used for the WebSocket).
+
+// Throws a coded error for a non-OK agent response: 401 -> TOKEN_REJECTED
+// (fatal upstream), any other failure -> HTTP_ERROR. `gerund`/`verb` keep the
+// exact wording per call ("posting results" / "post results").
+function assertOk(res, gerund, verb) {
+  if (res.status === 401) {
+    const err = new Error(`Agent token rejected (HTTP 401) while ${gerund}.`);
+    err.code = 'TOKEN_REJECTED';
+    throw err;
+  }
+  if (!res.ok) {
+    const err = new Error(`Failed to ${verb}: HTTP ${res.status}.`);
+    err.code = 'HTTP_ERROR';
+    throw err;
+  }
+}
+
+// Parses a JSON body, tolerating an empty/non-JSON response.
+async function jsonOrEmpty(res) {
+  try {
+    return await res.json();
+  } catch {
+    return {};
+  }
+}
+
 function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
   async function postResults(results) {
     const res = await fetchImpl(`${serverUrl}/agents/results`, {
@@ -12,23 +38,8 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
       },
       body: JSON.stringify({ results }),
     });
-
-    if (res.status === 401) {
-      const err = new Error('Agent token rejected (HTTP 401) while posting results.');
-      err.code = 'TOKEN_REJECTED';
-      throw err;
-    }
-    if (!res.ok) {
-      const err = new Error(`Failed to post results: HTTP ${res.status}.`);
-      err.code = 'HTTP_ERROR';
-      throw err;
-    }
-
-    try {
-      return await res.json();
-    } catch {
-      return {};
-    }
+    assertOk(res, 'posting results', 'post results');
+    return jsonOrEmpty(res);
   }
 
   // Fetches this agent's server-assigned monitoring config. Returns the
@@ -37,16 +48,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     const res = await fetchImpl(`${serverUrl}/agents/me/config`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (res.status === 401) {
-      const err = new Error('Agent token rejected (HTTP 401) while fetching config.');
-      err.code = 'TOKEN_REJECTED';
-      throw err;
-    }
-    if (!res.ok) {
-      const err = new Error(`Failed to fetch config: HTTP ${res.status}.`);
-      err.code = 'HTTP_ERROR';
-      throw err;
-    }
+    assertOk(res, 'fetching config', 'fetch config');
     const body = await res.json();
     return body.monitorConfig || { source: 'proc' };
   }
@@ -58,21 +60,8 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ results }),
     });
-    if (res.status === 401) {
-      const err = new Error('Agent token rejected (HTTP 401) while posting probe results.');
-      err.code = 'TOKEN_REJECTED';
-      throw err;
-    }
-    if (!res.ok) {
-      const err = new Error(`Failed to post probe results: HTTP ${res.status}.`);
-      err.code = 'HTTP_ERROR';
-      throw err;
-    }
-    try {
-      return await res.json();
-    } catch {
-      return {};
-    }
+    assertOk(res, 'posting probe results', 'post probe results');
+    return jsonOrEmpty(res);
   }
 
   // Reports what this agent can do (e.g. { sources: ['proc','snmp'] }).
@@ -82,21 +71,8 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ capabilities }),
     });
-    if (res.status === 401) {
-      const err = new Error('Agent token rejected (HTTP 401) while reporting capabilities.');
-      err.code = 'TOKEN_REJECTED';
-      throw err;
-    }
-    if (!res.ok) {
-      const err = new Error(`Failed to report capabilities: HTTP ${res.status}.`);
-      err.code = 'HTTP_ERROR';
-      throw err;
-    }
-    try {
-      return await res.json();
-    } catch {
-      return {};
-    }
+    assertOk(res, 'reporting capabilities', 'report capabilities');
+    return jsonOrEmpty(res);
   }
 
   return { postResults, getConfig, postCapabilities, postProbeResults };

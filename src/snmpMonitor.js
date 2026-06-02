@@ -33,7 +33,8 @@ function toNumber(value) {
     try {
       return Number(value.readBigUInt64BE(value.length - 8));
     } catch {
-      return Number(value.toString('hex') ? parseInt(value.toString('hex'), 16) : 0);
+      const hex = value.toString('hex');
+      return hex ? parseInt(hex, 16) : 0;
     }
   }
   const n = Number(value);
@@ -42,7 +43,7 @@ function toNumber(value) {
 
 // Walks one IF-MIB column and returns { [ifIndex]: value }. The ifIndex is the
 // last component of each returned OID.
-function walkColumn(session, baseOid, snmp) {
+function walkColumn(session, baseOid) {
   return new Promise((resolve, reject) => {
     const out = {};
     session.subtree(
@@ -78,11 +79,11 @@ async function defaultReadCounters(snmp) {
     // Core columns are required (no traffic sample without name + octets). The
     // health columns are best-effort: a device that doesn't implement one — or a
     // single timed-out walk — must NOT discard the whole sample.
-    const safe = (oid) => walkColumn(session, oid, snmp).catch(() => ({}));
+    const safe = (oid) => walkColumn(session, oid).catch(() => ({}));
     const [names, rx, tx, inErr, outErr, inDisc, outDisc, oper, speed] = await Promise.all([
-      walkColumn(session, OID.ifName, snmp),
-      walkColumn(session, OID.ifHCInOctets, snmp),
-      walkColumn(session, OID.ifHCOutOctets, snmp),
+      walkColumn(session, OID.ifName),
+      walkColumn(session, OID.ifHCInOctets),
+      walkColumn(session, OID.ifHCOutOctets),
       safe(OID.ifInErrors),
       safe(OID.ifOutErrors),
       safe(OID.ifInDiscards),
