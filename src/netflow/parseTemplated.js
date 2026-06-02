@@ -16,6 +16,49 @@ const { applyField, finaliseFlow } = require('./fields');
 //   IPFIX (16 bytes): version(2) length(2) exportTime(4) seq(4) obsDomainId(4)
 // FlowSet: id(2) length(2) then content. id 0 (v9) / 2 (IPFIX) = template,
 // id 1 (v9) / 3 (IPFIX) = options template (skipped), id >= 256 = data.
+
+// Parses a Template FlowSet's records into the shared `templates` cache and
+// returns how many templates were learned.
+function parseTemplateSet(buf, start, end, version, sourceId, templates) {
+  let p = start;
+  let learned = 0;
+  while (p + 4 <= end) {
+    const templateId = buf.readUInt16BE(p);
+    const fieldCount = buf.readUInt16BE(p + 2);
+    p += 4;
+    const fields = [];
+    for (let i = 0; i < fieldCount && p + 4 <= end; i += 1) {
+      const type = buf.readUInt16BE(p);
+      const len = buf.readUInt16BE(p + 2);
+      p += 4;
+      // IPFIX enterprise fields carry an extra 4-byte PEN — skip it.
+      if (version === 10 && (type & 0x8000) !== 0) p += 4;
+      fields.push({ type: type & 0x7fff, length: len });
+    }
+    templates.set(`${version}:${sourceId}:${templateId}`, fields);
+    learned += 1;
+  }
+  return learned;
+}
+
+// Decodes a Data FlowSet's fixed-length records using an already-known template.
+// Returns the flow records (empty when the template has zero total length).
+function parseDataSet(buf, start, end, fields) {
+  const recLen = fields.reduce((s, f) => s + f.length, 0);
+  if (recLen <= 0) return [];
+  const out = [];
+  for (let p = start; p + recLen <= end; p += recLen) {
+    const flow = {};
+    let fo = p;
+    for (const f of fields) {
+      applyField(flow, f.type, buf, fo, f.length);
+      fo += f.length;
+    }
+    out.push(finaliseFlow(flow));
+  }
+  return out;
+}
+
 function parseTemplated(buf, templates = new Map()) {
   if (!Buffer.isBuffer(buf) || buf.length < 16) {
     throw new Error('Templated NetFlow: packet too short');
@@ -51,47 +94,16 @@ function parseTemplated(buf, templates = new Map()) {
     const setLen = buf.readUInt16BE(offset + 2);
     if (setLen < 4 || offset + setLen > buf.length) break; // malformed / padding
     const setEnd = offset + setLen;
-    let p = offset + 4;
+    const content = offset + 4;
 
     if (setId === TEMPLATE_SETID) {
-      // One or more template records.
-      while (p + 4 <= setEnd) {
-        const templateId = buf.readUInt16BE(p);
-        const fieldCount = buf.readUInt16BE(p + 2);
-        p += 4;
-        const fields = [];
-        for (let i = 0; i < fieldCount && p + 4 <= setEnd; i += 1) {
-          const type = buf.readUInt16BE(p);
-          const len = buf.readUInt16BE(p + 2);
-          p += 4;
-          // IPFIX enterprise fields carry an extra 4-byte PEN — skip it.
-          if (version === 10 && (type & 0x8000) !== 0) p += 4;
-          fields.push({ type: type & 0x7fff, length: len });
-        }
-        templates.set(`${version}:${sourceId}:${templateId}`, fields);
-        templatesLearned += 1;
-      }
+      templatesLearned += parseTemplateSet(buf, content, setEnd, version, sourceId, templates);
     } else if (setId === OPTIONS_SETID) {
       // Options templates — not needed for flow records; skip the whole set.
     } else if (setId >= 256) {
       const fields = templates.get(`${version}:${sourceId}:${setId}`);
-      if (!fields) {
-        skippedNoTemplate += 1;
-      } else {
-        const recLen = fields.reduce((s, f) => s + f.length, 0);
-        if (recLen > 0) {
-          while (p + recLen <= setEnd) {
-            const flow = {};
-            let fo = p;
-            for (const f of fields) {
-              applyField(flow, f.type, buf, fo, f.length);
-              fo += f.length;
-            }
-            flows.push(finaliseFlow(flow));
-            p += recLen;
-          }
-        }
-      }
+      if (!fields) skippedNoTemplate += 1;
+      else for (const flow of parseDataSet(buf, content, setEnd, fields)) flows.push(flow);
     }
 
     offset = setEnd;
