@@ -2,10 +2,20 @@
 
 const fs = require('fs');
 const path = require('path');
+const { parseConfiguredTargets } = require('./probes/targets');
 
 function toInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+// Truthy unless explicitly turned off ("0"/"false"/"no"/"off"). env wins over
+// the JSON file; falls back to `dflt` when neither is set.
+function toBool(envVal, fileVal, dflt) {
+  const v = envVal !== undefined ? envVal : fileVal;
+  if (v === undefined || v === null || v === '') return dflt;
+  if (typeof v === 'boolean') return v;
+  return !['0', 'false', 'no', 'off'].includes(String(v).toLowerCase());
 }
 
 function configPathFrom(env) {
@@ -46,6 +56,16 @@ function loadConfig({ env = process.env } = {}) {
   const reportIntervalMs = toInt(env.BLUEEYE_REPORT_INTERVAL_MS, file.reportIntervalMs ?? 60000);
   const reportSampleMs = toInt(env.BLUEEYE_REPORT_SAMPLE_MS, file.reportSampleMs ?? 1000);
 
+  // Scheduled active probes: the agent periodically pings its default gateway +
+  // DNS servers (auto-discovered) and any configured targets, so fleet health is
+  // populated without anyone triggering a probe. 0 disables it (default 60s).
+  // Metadata only: reachability/timings, never payload.
+  const probeIntervalMs = toInt(env.BLUEEYE_PROBE_INTERVAL_MS, file.probeIntervalMs ?? 60000);
+  const probeCount = toInt(env.BLUEEYE_PROBE_COUNT, file.probeCount ?? 3);
+  const probeAutoGateway = toBool(env.BLUEEYE_PROBE_GATEWAY, file.probeGateway, true);
+  const probeAutoDns = toBool(env.BLUEEYE_PROBE_DNS, file.probeDns, true);
+  const probeTargets = parseConfiguredTargets(env.BLUEEYE_PROBE_TARGETS ?? file.probeTargets);
+
   return {
     configPath,
     serverUrl,
@@ -55,6 +75,11 @@ function loadConfig({ env = process.env } = {}) {
     backoff,
     reportIntervalMs,
     reportSampleMs,
+    probeIntervalMs,
+    probeCount,
+    probeAutoGateway,
+    probeAutoDns,
+    probeTargets,
   };
 }
 

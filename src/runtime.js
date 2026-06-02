@@ -6,8 +6,13 @@ const { createApiClient } = require('./apiClient');
 const { isRunTestCommand, isRunProbeCommand } = require('./command');
 const { runTest } = require('./testRunner');
 const { runProbe } = require('./probes');
+const { resolveProbeTargets } = require('./probes/targets');
 const { createSampler } = require('./monitor');
 const { detectCapabilities } = require('./capabilities');
+
+// Hard cap on how many targets one scheduled cycle will probe, so a giant
+// configured/nameserver list can't turn into a burst.
+const MAX_SCHEDULED_TARGETS = 16;
 
 // Ties the WebSocket client and the REST client together:
 //   - reports its capabilities and fetches its server-assigned monitor config
@@ -28,6 +33,8 @@ function createAgentRuntime({
   WebSocketImpl,
   samplerFactory = createSampler,
   capabilities = detectCapabilities(),
+  probeRunner = runProbe,
+  resolveTargets = resolveProbeTargets,
 }) {
   const emitter = new EventEmitter();
   const api = createApiClient({ serverUrl: config.serverUrl, token, fetchImpl });
@@ -41,6 +48,7 @@ function createAgentRuntime({
   });
 
   let reportTimer = null;
+  let probeTimer = null;
   let fatal = false;
   let monitorConfig = { source: 'proc' };
   let currentSampler = samplerFactory(monitorConfig);
@@ -79,7 +87,7 @@ function createAgentRuntime({
   // 401 is fatal; other errors are surfaced but non-terminal.
   async function runProbeAndSubmit(probeSpec) {
     try {
-      const result = await runProbe(probeSpec);
+      const result = await probeRunner(probeSpec);
       const response = await api.postProbeResults([result]);
       const outcome = !result.ok ? 'fejl'
         : result.type === 'traceroute' ? `${result.hopCount ?? (result.hops ? result.hops.length : '?')} hops`
@@ -155,6 +163,65 @@ function createAgentRuntime({
     }
   }
 
+  // Resolves the scheduled probe set (gateway + DNS + configured), runs each and
+  // submits the batch in one POST. A 401 is fatal; other errors are non-terminal.
+  // runProbe never throws, so a single bad target can't abort the cycle.
+  async function runScheduledProbes() {
+    if (fatal) return false;
+    let specs;
+    try {
+      specs = await resolveTargets({
+        configured: config.probeTargets,
+        gateway: config.probeAutoGateway,
+        dns: config.probeAutoDns,
+        count: config.probeCount,
+      });
+    } catch (err) {
+      logger.warn(`Could not resolve probe targets (${err.message}).`);
+      return false;
+    }
+    if (!specs || !specs.length) return false;
+    const results = [];
+    for (const spec of specs.slice(0, MAX_SCHEDULED_TARGETS)) {
+      results.push(await probeRunner(spec));
+    }
+    try {
+      const response = await api.postProbeResults(results);
+      logger.info(`Scheduled probes: ${results.length} target(s) submitted.`);
+      emitter.emit('scheduled-probes-submitted', { results, response });
+      return true;
+    } catch (err) {
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+      logger.error(`Failed to submit scheduled probes: ${err.message}`);
+      emitter.emit('command-error', err);
+      return false;
+    }
+  }
+
+  function startScheduledProbes() {
+    if (fatal) return;
+    if (!config.probeIntervalMs || config.probeIntervalMs <= 0) {
+      logger.info('Scheduled probes disabled (interval <= 0).');
+      return;
+    }
+    stopScheduledProbes();
+    logger.info(`Scheduled probes every ${config.probeIntervalMs}ms (gateway/DNS + ${config.probeTargets.length} configured).`);
+    let running = false;
+    probeTimer = setInterval(async () => {
+      if (fatal || running) return;
+      running = true;
+      try { await runScheduledProbes(); } finally { running = false; }
+    }, config.probeIntervalMs);
+    if (probeTimer.unref) probeTimer.unref();
+  }
+
+  function stopScheduledProbes() {
+    if (probeTimer) {
+      clearInterval(probeTimer);
+      probeTimer = null;
+    }
+  }
+
   client.on('open', () => {
     emitter.emit('open');
     // On (re)connect, refresh config so source changes are picked up.
@@ -193,15 +260,18 @@ function createAgentRuntime({
         await loadServerConfig();
         if (fatal) return;
         startReporting();
+        startScheduledProbes();
       })();
     },
     stop() {
       stopReporting();
+      stopScheduledProbes();
       if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
       client.stop();
     },
     // Exposed for tests / manual triggering.
     reportNow: () => runAndSubmit({ name: 'auto-report', intervalMs: config.reportSampleMs }, 'manual'),
+    runScheduledProbesNow: () => runScheduledProbes(),
     getMonitorConfig: () => monitorConfig,
     on: emitter.on.bind(emitter),
     once: emitter.once.bind(emitter),
