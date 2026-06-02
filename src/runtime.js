@@ -3,8 +3,9 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand } = require('./command');
 const { runTest } = require('./testRunner');
+const { runProbe } = require('./probes');
 const { createSampler } = require('./monitor');
 const { detectCapabilities } = require('./capabilities');
 
@@ -69,6 +70,26 @@ function createAgentRuntime({
         return false;
       }
       logger.error(`Failed to measure/submit traffic (${source}): ${err.message}`);
+      emitter.emit('command-error', err);
+      return false;
+    }
+  }
+
+  // Runs one active probe (ping/tcp/dns/traceroute) and submits the result. A
+  // 401 is fatal; other errors are surfaced but non-terminal.
+  async function runProbeAndSubmit(probeSpec) {
+    try {
+      const result = await runProbe(probeSpec);
+      const response = await api.postProbeResults([result]);
+      const outcome = !result.ok ? 'fejl'
+        : result.type === 'traceroute' ? `${result.hopCount ?? (result.hops ? result.hops.length : '?')} hops`
+          : `${result.rttMs ?? '?'} ms`;
+      logger.info(`Probe ${result.type} → ${result.target}: ${outcome}.`);
+      emitter.emit('probe-submitted', { result, response });
+      return true;
+    } catch (err) {
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+      logger.error(`Failed to run/submit probe: ${err.message}`);
       emitter.emit('command-error', err);
       return false;
     }
@@ -146,6 +167,11 @@ function createAgentRuntime({
   client.on('fatal', (reason) => handleFatal(reason));
 
   client.on('command', async (command) => {
+    if (isRunProbeCommand(command)) {
+      logger.info(`Received run-probe command (${command.probe.type}).`);
+      await runProbeAndSubmit(command.probe);
+      return;
+    }
     if (!isRunTestCommand(command)) {
       logger.warn(`Ignoring unrecognised command: ${JSON.stringify(command)}`);
       emitter.emit('command-ignored', command);

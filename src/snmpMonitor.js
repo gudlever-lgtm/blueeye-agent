@@ -8,12 +8,21 @@
 // the optional `net-snmp` dependency or a real device. The default reader lazily
 // requires `net-snmp`.
 
-// IF-MIB (high-capacity) columns, by ifIndex.
+// IF-MIB columns, by ifIndex. High-capacity octets + the health columns
+// (errors/discards/oper-status/speed) network/firewall techs troubleshoot with.
 const OID = {
   ifName: '1.3.6.1.2.1.31.1.1.1.1',
   ifHCInOctets: '1.3.6.1.2.1.31.1.1.1.6',
   ifHCOutOctets: '1.3.6.1.2.1.31.1.1.1.10',
+  ifHighSpeed: '1.3.6.1.2.1.31.1.1.1.15', // Mbps
+  ifOperStatus: '1.3.6.1.2.1.2.2.1.8', // 1=up, 2=down, ...
+  ifInDiscards: '1.3.6.1.2.1.2.2.1.13',
+  ifInErrors: '1.3.6.1.2.1.2.2.1.14',
+  ifOutDiscards: '1.3.6.1.2.1.2.2.1.19',
+  ifOutErrors: '1.3.6.1.2.1.2.2.1.20',
 };
+
+const OPER_STATUS = { 1: 'up', 2: 'down', 3: 'testing', 5: 'dormant', 6: 'notPresent', 7: 'lowerLayerDown' };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -66,17 +75,34 @@ async function defaultReadCounters(snmp) {
     version,
   });
   try {
-    const [names, rx, tx] = await Promise.all([
+    // Core columns are required (no traffic sample without name + octets). The
+    // health columns are best-effort: a device that doesn't implement one — or a
+    // single timed-out walk — must NOT discard the whole sample.
+    const safe = (oid) => walkColumn(session, oid, snmp).catch(() => ({}));
+    const [names, rx, tx, inErr, outErr, inDisc, outDisc, oper, speed] = await Promise.all([
       walkColumn(session, OID.ifName, snmp),
       walkColumn(session, OID.ifHCInOctets, snmp),
       walkColumn(session, OID.ifHCOutOctets, snmp),
+      safe(OID.ifInErrors),
+      safe(OID.ifOutErrors),
+      safe(OID.ifInDiscards),
+      safe(OID.ifOutDiscards),
+      safe(OID.ifOperStatus),
+      safe(OID.ifHighSpeed),
     ]);
     const result = {};
     for (const idx of Object.keys(rx)) {
+      const sp = toNumber(speed[idx]);
       result[idx] = {
         name: names[idx] != null ? String(names[idx]) : `if${idx}`,
         rxBytes: toNumber(rx[idx]),
         txBytes: toNumber(tx[idx]),
+        rxErrors: toNumber(inErr[idx]),
+        txErrors: toNumber(outErr[idx]),
+        rxDrop: toNumber(inDisc[idx]),
+        txDrop: toNumber(outDisc[idx]),
+        operStatus: OPER_STATUS[toNumber(oper[idx])] || null,
+        speedMbps: sp > 0 ? sp : null,
       };
     }
     return result;
@@ -105,14 +131,20 @@ async function sampleSnmp({
 
   const elapsedSec = Math.max((t1 - t0) / 1000, 0.001);
   const interfaces = [];
-  const totals = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0 };
+  const totals = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, rxErrors: 0, txErrors: 0, rxDrop: 0, txDrop: 0 };
+  const delta = (a, b, k) => Math.max((a[k] || 0) - (b[k] || 0), 0);
 
   for (const idx of Object.keys(second)) {
     if (!first[idx]) continue;
-    const rxBytes = Math.max(second[idx].rxBytes - first[idx].rxBytes, 0);
-    const txBytes = Math.max(second[idx].txBytes - first[idx].txBytes, 0);
-    totals.rxBytes += rxBytes;
-    totals.txBytes += txBytes;
+    const rxBytes = delta(second[idx], first[idx], 'rxBytes');
+    const txBytes = delta(second[idx], first[idx], 'txBytes');
+    const rxErrors = delta(second[idx], first[idx], 'rxErrors');
+    const txErrors = delta(second[idx], first[idx], 'txErrors');
+    const rxDrop = delta(second[idx], first[idx], 'rxDrop');
+    const txDrop = delta(second[idx], first[idx], 'txDrop');
+    totals.rxBytes += rxBytes; totals.txBytes += txBytes;
+    totals.rxErrors += rxErrors; totals.txErrors += txErrors;
+    totals.rxDrop += rxDrop; totals.txDrop += txDrop;
     interfaces.push({
       iface: second[idx].name,
       rxBytes,
@@ -121,6 +153,12 @@ async function sampleSnmp({
       txPackets: 0,
       rxBytesPerSec: Math.round(rxBytes / elapsedSec),
       txBytesPerSec: Math.round(txBytes / elapsedSec),
+      rxErrors,
+      txErrors,
+      rxDrop,
+      txDrop,
+      operStatus: second[idx].operStatus ?? null,
+      speedMbps: second[idx].speedMbps ?? null,
     });
   }
 
