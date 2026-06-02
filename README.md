@@ -79,6 +79,17 @@ Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
 | `heartbeatMs`     | `BLUEEYE_HEARTBEAT_MS`       | `15000`                        | Interval for heartbeat-besked       |
 | `reconnectBaseMs` | `BLUEEYE_RECONNECT_BASE_MS`  | `1000`                         | Backoff-basis ved reconnect         |
 | `reconnectMaxMs`  | `BLUEEYE_RECONNECT_MAX_MS`   | `30000`                        | Backoff-loft                        |
+| `probeIntervalMs` | `BLUEEYE_PROBE_INTERVAL_MS`  | `60000`                        | Planlagte probes — `0` slår fra     |
+| `probeCount`      | `BLUEEYE_PROBE_COUNT`        | `3`                            | Antal forsøg pr. planlagt probe     |
+| `probeGateway`    | `BLUEEYE_PROBE_GATEWAY`      | `true`                         | Auto-ping default gateway           |
+| `probeDns`        | `BLUEEYE_PROBE_DNS`          | `true`                         | Auto-ping DNS-servere (resolv.conf) |
+| `probeTargets`    | `BLUEEYE_PROBE_TARGETS`      | (ingen)                        | Ekstra mål, fx `ping:1.1.1.1,tcp:host:443` |
+
+> **Planlagte probes:** agenten kører som standard hvert 60. sekund et lille sæt
+> reachability-probes — den auto-opdagede default gateway + DNS-servere
+> (`/etc/resolv.conf`) plus evt. `probeTargets` — og indsender dem til serveren, så
+> flåde-sundheden er udfyldt uden manuel kørsel. Kun metadata (mål + timings),
+> aldrig pakke-indhold. Sæt `BLUEEYE_PROBE_INTERVAL_MS=0` for at slå det fra.
 
 > Hvis engangskoden gives via env, kan agenten ikke fjerne den derfra — fjern
 > den selv efter første start. (Agenten enroller alligevel ikke igen, så længe

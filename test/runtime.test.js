@@ -92,6 +92,47 @@ test('runs a test and submits results on a run-test command', async () => {
   }
 });
 
+test('scheduled probes resolve targets and submit them as one batch', async () => {
+  const posts = [];
+  const fetchImpl = async (url, opts) => {
+    if (String(url).endsWith('/agents/probe-results')) { posts.push(JSON.parse(opts.body)); return { ok: true, status: 200, json: async () => ({ inserted: 1 }) }; }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const runtime = createAgentRuntime({
+    config: { serverUrl: 'http://x', heartbeatMs: 10000, backoff: { baseMs: 30, maxMs: 120, factor: 2 }, probeIntervalMs: 0, probeCount: 2, probeAutoGateway: true, probeAutoDns: true, probeTargets: [] },
+    token: 'valid', agentId: 1, logger: silentLogger, fetchImpl,
+    resolveTargets: async () => [{ type: 'ping', host: '192.168.0.1', count: 2 }, { type: 'tcp', host: 'h', port: 443, count: 2 }],
+    probeRunner: async (spec) => ({ type: spec.type, target: spec.host, ok: true, rttMs: 5, ts: new Date().toISOString() }),
+  });
+  try {
+    const ok = await runtime.runScheduledProbesNow();
+    assert.equal(ok, true);
+    assert.equal(posts.length, 1); // one batched POST
+    assert.equal(posts[0].results.length, 2);
+    assert.equal(posts[0].results[0].target, '192.168.0.1');
+  } finally {
+    runtime.stop();
+  }
+});
+
+test('a 401 while submitting scheduled probes is fatal', async () => {
+  const fetchImpl = async () => ({ ok: false, status: 401, json: async () => ({}) });
+  const runtime = createAgentRuntime({
+    config: { serverUrl: 'http://x', heartbeatMs: 10000, backoff: { baseMs: 30, maxMs: 120, factor: 2 }, probeIntervalMs: 0, probeCount: 1, probeAutoGateway: false, probeAutoDns: false, probeTargets: [] },
+    token: 'x', agentId: 1, logger: silentLogger, fetchImpl,
+    resolveTargets: async () => [{ type: 'ping', host: '1.1.1.1' }],
+    probeRunner: async (s) => ({ type: 'ping', target: s.host, ok: true }),
+  });
+  try {
+    const fatalEvent = onceEvent(runtime, 'fatal');
+    const ok = await runtime.runScheduledProbesNow();
+    assert.equal(ok, false);
+    await withTimeout(fatalEvent, 1000, 'no fatal emitted');
+  } finally {
+    runtime.stop();
+  }
+});
+
 test('reconnects after a dropped connection (exponential backoff)', async () => {
   const server = await startFakeServer({ validTokens: ['valid'] });
   const runtime = createAgentRuntime({
