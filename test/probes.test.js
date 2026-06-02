@@ -84,6 +84,22 @@ test('parsePing reads partial loss', () => {
   assert.equal(parsePing(out).lossPct, 25);
 });
 
+test('parsePing reads the Windows format (loss + Minimum/Maximum/Average)', () => {
+  const out = [
+    'Pinging 1.2.3.4 with 32 bytes of data:',
+    'Reply from 1.2.3.4: bytes=32 time=11ms TTL=117',
+    'Ping statistics for 1.2.3.4:',
+    '    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),',
+    'Approximate round trip times in milli-seconds:',
+    '    Minimum = 10ms, Maximum = 12ms, Average = 11ms',
+  ].join('\n');
+  const p = parsePing(out);
+  assert.equal(p.lossPct, 0);
+  assert.equal(p.min, 10);
+  assert.equal(p.max, 12);
+  assert.equal(p.avg, 11);
+});
+
 test('parseTraceroute extracts hops, ips and rtt (timeouts -> null ip)', () => {
   const out = ' 1  10.0.0.1  1.2 ms\n 2  * * *\n 3  93.184.216.34  12.5 ms';
   const hops = parseTraceroute(out);

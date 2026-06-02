@@ -81,7 +81,10 @@ function createAgentRuntime({
     try {
       const result = await runProbe(probeSpec);
       const response = await api.postProbeResults([result]);
-      logger.info(`Probe ${result.type} → ${result.target}: ${result.ok ? `${result.rttMs ?? '?'} ms` : 'fejl'}.`);
+      const outcome = !result.ok ? 'fejl'
+        : result.type === 'traceroute' ? `${result.hopCount ?? (result.hops ? result.hops.length : '?')} hops`
+          : `${result.rttMs ?? '?'} ms`;
+      logger.info(`Probe ${result.type} → ${result.target}: ${outcome}.`);
       emitter.emit('probe-submitted', { result, response });
       return true;
     } catch (err) {

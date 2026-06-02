@@ -33,13 +33,14 @@ function defaultReadProc() {
 }
 
 // Best-effort link state + speed for an interface, from sysfs. Returns nulls if
-// unavailable (virtual/down interfaces, non-Linux). Injectable for tests.
-function defaultReadIfaceMeta(iface) {
+// unavailable (virtual/down interfaces, non-Linux). Async so it never blocks the
+// event loop during continuous reporting. Injectable for tests.
+async function defaultReadIfaceMeta(iface) {
   let operStatus = null;
   let speedMbps = null;
-  try { operStatus = fs.readFileSync(`/sys/class/net/${iface}/operstate`, 'utf8').trim() || null; } catch { /* n/a */ }
+  try { operStatus = (await fs.promises.readFile(`/sys/class/net/${iface}/operstate`, 'utf8')).trim() || null; } catch { /* n/a */ }
   try {
-    const s = Number(fs.readFileSync(`/sys/class/net/${iface}/speed`, 'utf8').trim());
+    const s = Number((await fs.promises.readFile(`/sys/class/net/${iface}/speed`, 'utf8')).trim());
     if (Number.isFinite(s) && s > 0) speedMbps = s;
   } catch { /* speed unreadable for many ifaces */ }
   return { operStatus, speedMbps };
@@ -91,7 +92,7 @@ async function sampleTraffic({
     totals.rxPackets += rxPackets; totals.txPackets += txPackets;
     totals.rxErrors += rxErrors; totals.txErrors += txErrors;
     totals.rxDrop += rxDrop; totals.txDrop += txDrop;
-    const meta = readIfaceMeta(iface);
+    const meta = await readIfaceMeta(iface);
     interfaces.push({
       iface,
       rxBytes,

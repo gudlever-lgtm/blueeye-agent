@@ -75,16 +75,20 @@ async function defaultReadCounters(snmp) {
     version,
   });
   try {
+    // Core columns are required (no traffic sample without name + octets). The
+    // health columns are best-effort: a device that doesn't implement one — or a
+    // single timed-out walk — must NOT discard the whole sample.
+    const safe = (oid) => walkColumn(session, oid, snmp).catch(() => ({}));
     const [names, rx, tx, inErr, outErr, inDisc, outDisc, oper, speed] = await Promise.all([
       walkColumn(session, OID.ifName, snmp),
       walkColumn(session, OID.ifHCInOctets, snmp),
       walkColumn(session, OID.ifHCOutOctets, snmp),
-      walkColumn(session, OID.ifInErrors, snmp),
-      walkColumn(session, OID.ifOutErrors, snmp),
-      walkColumn(session, OID.ifInDiscards, snmp),
-      walkColumn(session, OID.ifOutDiscards, snmp),
-      walkColumn(session, OID.ifOperStatus, snmp),
-      walkColumn(session, OID.ifHighSpeed, snmp),
+      safe(OID.ifInErrors),
+      safe(OID.ifOutErrors),
+      safe(OID.ifInDiscards),
+      safe(OID.ifOutDiscards),
+      safe(OID.ifOperStatus),
+      safe(OID.ifHighSpeed),
     ]);
     const result = {};
     for (const idx of Object.keys(rx)) {

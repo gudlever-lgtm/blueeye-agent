@@ -26,15 +26,26 @@ function pingProbe(spec, { exec = execFile, platform = process.platform } = {}) 
 
 // Parses "X% packet loss" and "min/avg/max/mdev = a/b/c/d ms" (mdev optional).
 function parsePing(text) {
-  const loss = text.match(/([\d.]+)\s*%\s*packet loss/i);
-  const rtt = text.match(/=\s*([\d.]+)\/([\d.]+)\/([\d.]+)(?:\/([\d.]+))?\s*ms/);
-  if (!loss && !rtt) return null;
+  // Loss: Linux/macOS "0% packet loss" and Windows "(0% loss)".
+  const loss = text.match(/([\d.]+)\s*%\s*(?:packet\s+)?loss/i);
+  let min; let avg; let max; let mdev = null;
+  // Linux/macOS: "min/avg/max/mdev = a/b/c/d ms" (mdev optional).
+  const unix = text.match(/=\s*([\d.]+)\/([\d.]+)\/([\d.]+)(?:\/([\d.]+))?\s*ms/);
+  if (unix) {
+    min = Number(unix[1]); avg = Number(unix[2]); max = Number(unix[3]);
+    mdev = unix[4] !== undefined ? Number(unix[4]) : null;
+  } else {
+    // Windows: "Minimum = 10ms, Maximum = 12ms, Average = 11ms".
+    const win = text.match(/Minimum\s*=\s*([\d.]+)ms[\s\S]*?Maximum\s*=\s*([\d.]+)ms[\s\S]*?Average\s*=\s*([\d.]+)ms/i);
+    if (win) { min = Number(win[1]); max = Number(win[2]); avg = Number(win[3]); }
+  }
+  if (!loss && min === undefined) return null;
   return {
     lossPct: loss ? round(Number(loss[1])) : 0,
-    min: rtt ? round(Number(rtt[1])) : null,
-    avg: rtt ? round(Number(rtt[2])) : null,
-    max: rtt ? round(Number(rtt[3])) : null,
-    mdev: rtt && rtt[4] !== undefined ? round(Number(rtt[4])) : null,
+    min: min !== undefined ? round(min) : null,
+    avg: avg !== undefined ? round(avg) : null,
+    max: max !== undefined ? round(max) : null,
+    mdev: mdev !== null ? round(mdev) : null,
   };
 }
 
