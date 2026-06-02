@@ -6,20 +6,12 @@
 // we parse the packet ourselves. Returns a flow-ish record or null if it isn't
 // an IP/TCP/UDP packet we can read.
 const { PROTO_NAMES } = require('../netflow/fields');
+const { ipv4, ipv6 } = require('../netflow/ip');
 
 const ETH_HDR = 14;
 const ETHERTYPE_IPV4 = 0x0800;
 const ETHERTYPE_IPV6 = 0x86dd;
 const ETHERTYPE_VLAN = 0x8100;
-
-function ipv4(buf, o) {
-  return `${buf[o]}.${buf[o + 1]}.${buf[o + 2]}.${buf[o + 3]}`;
-}
-function ipv6(buf, o) {
-  const parts = [];
-  for (let i = 0; i < 16; i += 2) parts.push(buf.readUInt16BE(o + i).toString(16));
-  return parts.join(':');
-}
 
 // Reads L4 ports for TCP(6)/UDP(17); other protocols get ports 0.
 function readPorts(buf, o, protocol, end) {

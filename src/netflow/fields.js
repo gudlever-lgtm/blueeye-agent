@@ -1,5 +1,7 @@
 'use strict';
 
+const { ipv4, ipv6 } = require('./ip');
+
 // NetFlow v9 / IPFIX share the same field-type IDs (Information Elements) for
 // the fields we care about. We only decode the handful needed to build the same
 // flow record shape as the v5 parser; everything else is skipped by length.
@@ -30,16 +32,6 @@ function readUInt(buf, off, len) {
   return Number(v);
 }
 
-function readIPv4(buf, off) {
-  return `${buf[off]}.${buf[off + 1]}.${buf[off + 2]}.${buf[off + 3]}`;
-}
-
-function readIPv6(buf, off) {
-  const parts = [];
-  for (let i = 0; i < 16; i += 2) parts.push(buf.readUInt16BE(off + i).toString(16));
-  return parts.join(':');
-}
-
 // Applies one decoded field (by type/length) onto a flow record.
 function applyField(flow, type, buf, off, len) {
   switch (type) {
@@ -59,16 +51,16 @@ function applyField(flow, type, buf, off, len) {
       flow.dstPort = readUInt(buf, off, len);
       break;
     case FIELD.IPV4_SRC_ADDR:
-      if (len >= 4) flow.srcAddr = readIPv4(buf, off);
+      if (len >= 4) flow.srcAddr = ipv4(buf, off);
       break;
     case FIELD.IPV4_DST_ADDR:
-      if (len >= 4) flow.dstAddr = readIPv4(buf, off);
+      if (len >= 4) flow.dstAddr = ipv4(buf, off);
       break;
     case FIELD.IPV6_SRC_ADDR:
-      if (len >= 16) flow.srcAddr = readIPv6(buf, off);
+      if (len >= 16) flow.srcAddr = ipv6(buf, off);
       break;
     case FIELD.IPV6_DST_ADDR:
-      if (len >= 16) flow.dstAddr = readIPv6(buf, off);
+      if (len >= 16) flow.dstAddr = ipv6(buf, off);
       break;
     default:
       break; // unknown/uninteresting field — skipped by length
