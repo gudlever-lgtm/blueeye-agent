@@ -40,7 +40,7 @@ function parseSflow(buf) {
     const sampleLen = buf.readUInt32BE(o + 4);
     const sampleStart = o + 8;
     const sampleEnd = sampleStart + sampleLen;
-    if (sampleLen < 0 || sampleEnd > buf.length) break;
+    if (sampleEnd > buf.length) break;
 
     // sampleType 1 = flow sample, 3 = expanded flow sample. (1=enterprise 0)
     if (sampleType === 1 || sampleType === 3) {
