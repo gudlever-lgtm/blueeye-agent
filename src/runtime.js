@@ -109,7 +109,7 @@ function createAgentRuntime({
       await api.postCapabilities(capabilities);
       logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}`);
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') return handleFatal();
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not report capabilities (${err.message}).`);
     }
   }
@@ -118,7 +118,7 @@ function createAgentRuntime({
   // Resilient: only a 401 is fatal; otherwise keep the current source.
   async function loadServerConfig() {
     try {
-      const mc = (await api.getConfig()) || { source: 'proc' };
+      const mc = await api.getConfig();
       monitorConfig = mc;
       // Dispose the previous sampler's background lifecycle (e.g. a netflow
       // UDP socket) before swapping in the new source.
@@ -129,7 +129,7 @@ function createAgentRuntime({
       logger.info(`Monitor source: ${monitorConfig.source} (report every ${effectiveIntervalMs}ms).`);
       emitter.emit('config', monitorConfig);
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') return handleFatal();
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not fetch monitor config (${err.message}); using ${monitorConfig.source}.`);
     }
   }
