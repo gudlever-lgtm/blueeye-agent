@@ -3,6 +3,8 @@
 const { EventEmitter } = require('events');
 const DefaultWebSocket = require('ws');
 const { computeBackoff } = require('./backoff');
+const { verifyPeerOrDestroy } = require('./httpsClient');
+const { normalizeFingerprint } = require('./fingerprint');
 
 // Derives the WebSocket URL from the HTTP server URL (http->ws, https->wss).
 function toWsUrl(serverUrl, wsPath) {
@@ -30,8 +32,10 @@ function createAgentClient({
   heartbeatMs = 15000,
   backoff = {},
   WebSocketImpl = DefaultWebSocket,
+  certFingerprint = '',
 }) {
   const wsUrl = toWsUrl(serverUrl, wsPath);
+  const pin = normalizeFingerprint(certFingerprint);
   const emitter = new EventEmitter();
 
   let ws = null;
@@ -101,7 +105,16 @@ function createAgentClient({
     };
 
     logger.info(`Connecting to ${wsUrl} ...`);
-    ws = new WebSocketImpl(wsUrl, { headers: { Authorization: `Bearer ${token}` } });
+    const wsOpts = { headers: { Authorization: `Bearer ${token}` } };
+    const pinning = pin && wsUrl.startsWith('wss:');
+    // Pin by verifying the exact leaf cert on secureConnect (Node skips
+    // checkServerIdentity when rejectUnauthorized is false), before the upgrade
+    // request — which carries the token — is sent.
+    if (pinning) wsOpts.rejectUnauthorized = false;
+    ws = new WebSocketImpl(wsUrl, wsOpts);
+    if (pinning && ws._req && typeof ws._req.on === 'function') {
+      ws._req.on('socket', (socket) => socket.on('secureConnect', () => verifyPeerOrDestroy(socket, pin)));
+    }
 
     ws.on('open', () => {
       attempts = 0;

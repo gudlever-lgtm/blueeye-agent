@@ -9,6 +9,7 @@
 // exercised against this faithful stub.
 
 const http = require('http');
+const https = require('https');
 const { WebSocketServer } = require('ws');
 
 function readJson(req) {
@@ -46,7 +47,13 @@ function startFakeServer(options = {}) {
   const monitorConfig = options.monitorConfig || { source: 'proc' };
   const sockets = new Set();
 
-  const server = http.createServer(async (req, res) => {
+  const requestHandler = async (req, res) => {
+    // Companion config (used by the agent to discover URL + fingerprint).
+    if (req.method === 'GET' && req.url === '/enroll/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ serverUrl: options.publicUrl || '', certFingerprint: options.certFingerprint || null }));
+      return;
+    }
     if (req.method === 'POST' && req.url === '/agents/enroll') {
       const body = await readJson(req);
       enrollments.push(body);
@@ -103,7 +110,11 @@ function startFakeServer(options = {}) {
 
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not Found' }));
-  });
+  };
+
+  const server = options.tls
+    ? https.createServer(options.tls, requestHandler)
+    : http.createServer(requestHandler);
 
   const wss = new WebSocketServer({ noServer: true });
   server.on('upgrade', (req, socket, head) => {
@@ -145,7 +156,7 @@ function startFakeServer(options = {}) {
       const { port } = server.address();
       resolve({
         port,
-        url: `http://127.0.0.1:${port}`,
+        url: `${options.tls ? 'https' : 'http'}://127.0.0.1:${port}`,
         enrollments,
         receivedResults,
         receivedCapabilities,

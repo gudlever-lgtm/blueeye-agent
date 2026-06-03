@@ -9,6 +9,7 @@ const { runProbe } = require('./probes');
 const { resolveProbeTargets } = require('./probes/targets');
 const { createSampler } = require('./monitor');
 const { detectCapabilities } = require('./capabilities');
+const { makePinnedFetch } = require('./httpsClient');
 
 // Hard cap on how many targets one scheduled cycle will probe, so a giant
 // configured/nameserver list can't turn into a burst.
@@ -47,7 +48,12 @@ function createAgentRuntime({
   resolveTargets = resolveProbeTargets,
 }) {
   const emitter = new EventEmitter();
-  const api = createApiClient({ serverUrl: config.serverUrl, token, fetchImpl });
+  // When a cert fingerprint is configured and the server is https, pin it on the
+  // REST calls too (the WS client pins separately). Falls back to the injected
+  // fetch (or global fetch) otherwise — so tests that inject a fetch are unaffected.
+  const fp = config.serverCertFingerprint;
+  const effectiveFetch = (fp && /^https:/i.test(config.serverUrl)) ? makePinnedFetch(fp) : fetchImpl;
+  const api = createApiClient({ serverUrl: config.serverUrl, token, fetchImpl: effectiveFetch });
   const client = createAgentClient({
     serverUrl: config.serverUrl,
     token,
@@ -55,6 +61,7 @@ function createAgentRuntime({
     heartbeatMs: config.heartbeatMs,
     backoff: config.backoff,
     WebSocketImpl,
+    certFingerprint: fp,
   });
 
   let reportTimer = null;

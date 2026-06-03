@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { parseConfiguredTargets } = require('./probes/targets');
+const { normalizeFingerprint } = require('./fingerprint');
 
 function toInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -39,6 +40,9 @@ function loadConfig({ env = process.env } = {}) {
 
   const serverUrl = env.BLUEEYE_SERVER_URL || file.serverUrl || 'http://localhost:3000';
   const enrollmentCode = env.BLUEEYE_ENROLLMENT_CODE || file.enrollmentCode || null;
+  // SHA-256 of the server's (or its reverse proxy's) TLS leaf cert. When set and
+  // the server is https, the agent pins it and refuses a mismatching cert.
+  const serverCertFingerprint = normalizeFingerprint(env.BLUEEYE_SERVER_CERT_FINGERPRINT || file.serverCertFingerprint || '');
   const tokenPath =
     env.BLUEEYE_TOKEN_PATH ||
     file.tokenPath ||
@@ -70,6 +74,7 @@ function loadConfig({ env = process.env } = {}) {
     configPath,
     serverUrl,
     enrollmentCode,
+    serverCertFingerprint,
     tokenPath,
     heartbeatMs,
     backoff,
@@ -97,4 +102,24 @@ function clearEnrollmentCode(config) {
   return true;
 }
 
-module.exports = { loadConfig, clearEnrollmentCode };
+// Persists embedded server settings (serverUrl + cert fingerprint) into the
+// JSON config file after enrollment, so the long-running service reaches the
+// right server with pinning — the user never types the URL. Only writes keys
+// with a value; creates the file if needed.
+function writeConfigValues(config, values = {}) {
+  const { configPath } = config;
+  if (!configPath) return false;
+  let file = {};
+  if (fs.existsSync(configPath)) file = readConfigFile(configPath);
+  let changed = false;
+  for (const [k, v] of Object.entries(values)) {
+    if (v === undefined || v === null || v === '') continue;
+    if (file[k] !== v) { file[k] = v; changed = true; }
+  }
+  if (!changed && fs.existsSync(configPath)) return false;
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, `${JSON.stringify(file, null, 2)}\n`);
+  return true;
+}
+
+module.exports = { loadConfig, clearEnrollmentCode, writeConfigValues };
