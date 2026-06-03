@@ -6,12 +6,43 @@ const { createLogger } = require('./logger');
 const { collectSystemInfo } = require('./system');
 const { ensureToken } = require('./bootstrap');
 const { createAgentRuntime } = require('./runtime');
+const { parseArgs, runEnroll, USAGE } = require('./cli');
 
 // CLI entry point. This is the only place that calls process.exit — all the
 // logic lives in injectable modules so it can be tested without spawning a
 // process.
 async function main() {
   const logger = createLogger({ level: process.env.BLUEEYE_LOG_LEVEL || 'info' });
+  const { cmd, opts } = parseArgs(process.argv);
+
+  if (opts.help || cmd === 'help') {
+    process.stdout.write(`${USAGE}\n`);
+    process.exit(0);
+    return;
+  }
+
+  // `blueeye-agent enroll` exchanges a code for a token and exits — it does not
+  // start the long-running runtime.
+  if (cmd === 'enroll') {
+    const config = loadConfig();
+    const systemInfo = collectSystemInfo();
+    try {
+      await runEnroll({ opts, config, systemInfo, logger });
+      process.exit(0);
+    } catch (err) {
+      const detail = err.detail ? ` — ${JSON.stringify(err.detail)}` : '';
+      logger.error(`Enrollment failed: ${err.message}${detail}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (cmd) {
+    logger.error(`Unknown command: ${cmd}\n${USAGE}`);
+    process.exit(1);
+    return;
+  }
+
   const config = loadConfig();
   const systemInfo = collectSystemInfo();
 

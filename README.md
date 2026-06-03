@@ -42,6 +42,31 @@ Ved første opstart enroller agenten sig, gemmer sit token og fjerner
 engangskoden fra config-filen. Efterfølgende opstart bruger det gemte token og
 **springer enrollment over**.
 
+### Nemmest: one-liner fra serveren
+
+I serverens UI (**Enrollment → Tilføj agent**) genereres en færdig kommando med
+koden, server-adressen og checksum allerede sat. Kør den på maskinen:
+
+```bash
+curl -sSL https://<server>/enroll/<CODE>/install.sh | sh
+```
+
+Scriptet henter agent-binæren **fra serveren selv** (virker også i luftgappede
+net), verificerer dens SHA-256, kører `blueeye-agent enroll` og installerer en
+systemd-service. Du indtaster aldrig selv server-adressen.
+
+### Manuelt: `enroll`-kommandoen
+
+```bash
+blueeye-agent enroll --code <CODE> [--server <URL>] [--fingerprint <SHA256>]
+```
+
+Veksler koden til et token og gemmer det (0600). `--server`/`--fingerprint` huskes
+i config-filen, så servicen bagefter rammer den rigtige server med
+**certifikat-pinning**. Mangler `--server`, bruges den indlejrede/konfigurerede
+URL (eller `GET /enroll/config`). Kommandoen er idempotent: findes der allerede et
+token, springes den over (medmindre `--force`).
+
 ## Installér som Docker-container
 
 `install.sh` henter/opdaterer koden, bygger image'et og kører agenten som en
@@ -75,6 +100,7 @@ Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
 | (fil-sti)         | `BLUEEYE_AGENT_CONFIG`       | `./blueeye-agent.config.json`  | Sti til JSON-config                 |
 | `serverUrl`       | `BLUEEYE_SERVER_URL`         | `http://localhost:3000`        | blueeye-server URL                  |
 | `enrollmentCode`  | `BLUEEYE_ENROLLMENT_CODE`    | (ingen)                        | Engangskode — kun ved første start  |
+| `serverCertFingerprint` | `BLUEEYE_SERVER_CERT_FINGERPRINT` | (ingen)             | SHA-256 af serverens TLS-cert — pinnes ved https |
 | `tokenPath`       | `BLUEEYE_TOKEN_PATH`         | `./.blueeye-agent/token`       | Hvor tokenet gemmes (0600)          |
 | `heartbeatMs`     | `BLUEEYE_HEARTBEAT_MS`       | `15000`                        | Interval for heartbeat-besked       |
 | `reconnectBaseMs` | `BLUEEYE_RECONNECT_BASE_MS`  | `1000`                         | Backoff-basis ved reconnect         |
