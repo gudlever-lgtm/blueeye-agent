@@ -95,32 +95,6 @@ Imaget bygges til en **64-bit** platform. `install.sh` detekterer host-arkitektu
 automatisk (`linux/amd64` eller `linux/arm64`); overstyr med `PLATFORM`, fx
 `PLATFORM=linux/arm64 ./install.sh`. 32-bit hosts understøttes ikke.
 
-## Building release binaries (SEA)
-
-The one-liner installer above downloads a pre-built **single-file binary** from
-the server (`/enroll/agent/<platform>`). Those binaries are this repo packaged as
-[Node Single Executable Applications](https://nodejs.org/api/single-executable-applications.html) —
-self-contained, so the target host needs neither Node nor npm.
-
-```bash
-npm ci
-npm run build:sea                 # -> dist/blueeye-agent-linux-amd64, -linux-arm64
-npm run build:sea linux-amd64     # just one target
-```
-
-`scripts/build-sea.sh` bundles the agent with esbuild, turns it into a SEA blob,
-and injects it into the official Node binary for each target arch (so it can
-cross-build both 64-bit arches from one machine). `esbuild`/`postject` are
-fetched on demand via `npx`, so the agent's runtime dependencies stay unchanged.
-
-In CI this runs automatically: pushing a tag `v*` builds the binaries and
-attaches them to a GitHub Release (`.github/workflows/release-agent.yml`).
-Publish a release to a server with
-[`blueeye-server/scripts/fetch-agent-binaries.sh`](https://github.com/gudlever-lgtm/blueeye-server).
-
-> The binaries target **glibc** Linux (the vast majority of distros). On
-> musl-based systems (e.g. Alpine) use the Docker install path above instead.
-
 ## Konfiguration (fil + env)
 
 Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
