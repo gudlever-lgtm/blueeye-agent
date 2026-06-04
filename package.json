@@ -13,7 +13,8 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "build:sea": "bash scripts/build-sea.sh"
   },
   "dependencies": {
     "ws": "^8.18.0"

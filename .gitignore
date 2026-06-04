@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Built release binaries (Node SEA) — produced by scripts/build-sea.sh
+dist/
+
 # Local runtime config & secrets
 blueeye-agent.config.json
 .env
