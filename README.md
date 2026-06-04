@@ -23,6 +23,7 @@ indbyggede `fetch`, så der er ingen ekstern HTTP-SDK.
 ## Krav
 
 - Node.js >= 18 (udviklet og testet på Node 22)
+- 64-bit host (`linux/amd64` eller `linux/arm64`)
 - Adgang til en kørende `blueeye-server`
 
 ## Kom i gang
@@ -88,6 +89,10 @@ Opdatér senere med `git pull` og kør `./install.sh` igen (eller kør scriptet 
 vilkårligt sted — uden et checkout kloner det selv repoet). Valgfrie env:
 `NETWORK_MODE=bridge`, `CONTAINER`, `IMAGE`, `TOKEN_VOLUME`. Styr containeren med
 `docker logs -f blueeye-agent` / `docker restart blueeye-agent`.
+
+Imaget bygges til en **64-bit** platform. `install.sh` detekterer host-arkitekturen
+automatisk (`linux/amd64` eller `linux/arm64`); overstyr med `PLATFORM`, fx
+`PLATFORM=linux/arm64 ./install.sh`. 32-bit hosts understøttes ikke.
 
 ## Konfiguration (fil + env)
 
