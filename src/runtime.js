@@ -17,7 +17,7 @@ const MAX_SCHEDULED_TARGETS = 16;
 
 // One-line, human-readable summary of a probe result for the info log.
 function describeProbeOutcome(result) {
-  if (!result.ok) return 'fejl';
+  if (!result.ok) return 'error';
   if (result.type === 'traceroute') {
     const hops = result.hopCount ?? (result.hops ? result.hops.length : '?');
     return `${hops} hops`;
