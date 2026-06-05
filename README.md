@@ -95,6 +95,33 @@ Imaget bygges til en **64-bit** platform. `install.sh` detekterer host-arkitektu
 automatisk (`linux/amd64` eller `linux/arm64`); overstyr med `PLATFORM`, fx
 `PLATFORM=linux/arm64 ./install.sh`. 32-bit hosts understøttes ikke.
 
+## Uninstalling
+
+An `uninstall.sh` script is shipped **with the agent** — the one-line installer
+drops it in the install directory, so it's already on the machine:
+
+```bash
+sudo sh /opt/blueeye-agent/uninstall.sh            # warns, then asks y/N
+sudo sh /opt/blueeye-agent/uninstall.sh --yes      # no prompt
+sudo sh /opt/blueeye-agent/uninstall.sh --purge    # also remove the Docker image + token volume
+```
+
+It auto-detects how the agent was installed and removes it accordingly:
+
+- **Node install** — stops + disables the `blueeye-agent` systemd service and deletes the unit.
+- **Docker install** — stops + removes the `blueeye-agent` container (`--purge` also drops the image and the `blueeye-agent-data` volume).
+- Removes the install directory `/opt/blueeye-agent` (including the stored token).
+
+It **warns and asks for confirmation first** (skip with `--yes`) and needs `sudo`.
+Env overrides: `SERVICE_NAME`, `BLUEEYE_INSTALL_DIR`, `CONTAINER`, `IMAGE`,
+`TOKEN_VOLUME`.
+
+> This removes the agent **locally only**. To also remove it from the BlueEye
+> server's list, open the dashboard → **Agents → Delete**.
+
+(If you installed from a checkout with the Docker `install.sh`, you can run
+`sudo ./uninstall.sh` from that checkout instead.)
+
 ## Konfiguration (fil + env)
 
 Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
