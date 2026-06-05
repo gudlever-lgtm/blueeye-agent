@@ -8,8 +8,21 @@ const { tcpProbe } = require('../src/probes/tcp');
 const { dnsProbe } = require('../src/probes/dns');
 const { parsePing } = require('../src/probes/ping');
 const { parseTraceroute } = require('../src/probes/traceroute');
+const { httpProbe, normalizeUrl } = require('../src/probes/http');
 const { runProbe } = require('../src/probes');
 const { isRunProbeCommand, isRunTestCommand } = require('../src/command');
+
+// A fake tls.connect: returns an EventEmitter socket exposing the given cert and
+// invokes the secureConnect callback on the next tick.
+function fakeTls(cert) {
+  return (_opts, onSecure) => {
+    const sock = new EventEmitter();
+    sock.getPeerCertificate = () => cert;
+    sock.destroy = () => {};
+    setImmediate(() => onSecure && onSecure());
+    return sock;
+  };
+}
 
 // A fake socket that emits `event` ('connect' | 'error' | 'timeout') on next tick.
 function fakeConnect(event) {
@@ -107,6 +120,45 @@ test('parseTraceroute extracts hops, ips and rtt (timeouts -> null ip)', () => {
   assert.deepEqual(hops[0], { hop: 1, ip: '10.0.0.1', rttMs: 1.2 });
   assert.equal(hops[1].ip, null);
   assert.equal(hops[2].ip, '93.184.216.34');
+});
+
+test('normalizeUrl accepts full URLs and defaults a bare host to https', () => {
+  assert.equal(normalizeUrl('https://example.com/health').href, 'https://example.com/health');
+  assert.equal(normalizeUrl('example.com').href, 'https://example.com/');
+  assert.equal(normalizeUrl('ftp://example.com'), null);
+  assert.equal(normalizeUrl(''), null);
+});
+
+test('httpProbe reports ok + status for a 200 and reads TLS cert expiry', async () => {
+  const NOW = Date.UTC(2026, 0, 1);
+  const validTo = new Date(NOW + 30 * 86400000).toUTCString();
+  const res = await httpProbe(
+    { url: 'https://example.com', count: 2 },
+    { fetchImpl: async () => ({ status: 200 }), tlsConnect: fakeTls({ valid_to: validTo, issuer: { O: 'Test CA' } }), now: () => NOW }
+  );
+  assert.equal(res.type, 'http');
+  assert.equal(res.target, 'https://example.com/');
+  assert.equal(res.ok, true);
+  assert.equal(res.status, 200);
+  assert.equal(res.lossPct, 0);
+  assert.equal(res.certExpiryDays, 30);
+});
+
+test('httpProbe treats a 500 as a failed check (loss, not ok)', async () => {
+  const res = await httpProbe({ url: 'http://x.test', count: 1 }, { fetchImpl: async () => ({ status: 500 }), now: () => 0 });
+  assert.equal(res.ok, false);
+  assert.equal(res.status, 500);
+  assert.equal(res.lossPct, 100);
+});
+
+test('httpProbe counts a network error as loss and leaves status null', async () => {
+  const res = await httpProbe(
+    { url: 'http://x.test', count: 2 },
+    { fetchImpl: async () => { throw new Error('ECONNREFUSED'); }, now: () => 0 }
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.lossPct, 100);
+  assert.equal(res.status, null);
 });
 
 test('runProbe dispatches by type and stamps a ts', async () => {
