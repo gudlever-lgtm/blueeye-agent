@@ -95,6 +95,42 @@ Imaget bygges til en **64-bit** platform. `install.sh` detekterer host-arkitektu
 automatisk (`linux/amd64` eller `linux/arm64`); overstyr med `PLATFORM`, fx
 `PLATFORM=linux/arm64 ./install.sh`. 32-bit hosts understøttes ikke.
 
+## Seeing src/dst traffic (sFlow + hsflowd)
+
+The server's **Destinations** map and **Flows** view are built from per-flow
+src/dst records, which only come from a **NetFlow** or **sFlow** source — the
+default `proc` source reports interface byte-rates only (no addresses). Set the
+agent's source in the dashboard (**Agents → Edit → Traffic source = sflow**), then
+make sure something actually exports sFlow to the agent's collector on UDP 6343.
+
+A plain Linux host emits no sFlow about its own traffic. To turn the host itself
+into an exporter, run **hsflowd** (the Host sFlow daemon), which samples the host
+and ships sFlow to `127.0.0.1:6343` — straight into the agent's collector.
+
+- **Docker agent (the usual install)** — the alpine agent can't install hsflowd
+  onto the host, so run the **hsflowd sidecar** alongside it (host networking +
+  packet-capture caps). Set `SFLOW_DEVICE` to the host's real interface:
+
+  ```bash
+  SFLOW_DEVICE=eth0 docker compose -f docker-compose.hsflowd.yml up -d --build
+  # …or let install.sh do it:
+  ENABLE_HSFLOWD=1 SFLOW_DEVICE=eth0 ./install.sh
+  ```
+
+- **Native (systemd/unmanaged) agent** — the agent self-provisions hsflowd when
+  its `sflow` monitor config includes an `hsflowd` block; it installs the package,
+  writes `/etc/hsflowd.conf`, and starts the service, reporting the actual state.
+
+Confirm sFlow is arriving on the host:
+
+```bash
+sudo tcpdump -ni any udp port 6343   # packets = inbound sFlow; silence = nothing exporting
+```
+
+Once datagrams flow, conversations appear on the server's **Flows** tab within a
+report cycle (~60 s); the **Destinations** map additionally needs geo enabled +
+an EU GeoIP database + the `geo` license feature.
+
 ## Uninstalling
 
 Easiest — a one-liner from the server (mirrors install):

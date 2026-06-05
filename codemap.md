@@ -98,6 +98,8 @@ UDP packet ─▶ collector.js ─▶ parse ─▶ flow records ─▶ aggregate
 | [`netflow/aggregate.js`](src/netflow/aggregate.js) | Folds flow records into per-port/proto/talker summaries (shared by sflow). |
 | [`sflow/parse.js`](src/sflow/parse.js) | Parses sFlow v5 datagrams; scales sampled bytes by sampling rate. |
 | [`sflow/decodePacket.js`](src/sflow/decodePacket.js) | Decodes the sampled raw frame (Eth+IPv4/IPv6+TCP/UDP) to a 5-tuple. |
+| [`sflow/hsflowd.js`](src/sflow/hsflowd.js) | Self-managed hsflowd lifecycle (install/configure/start/stop + state machine) so a host exports sFlow to its own collector. Docker agents defer to the [hsflowd sidecar](docker/hsflowd). |
+| [`sflow/hsflowdConfig.js`](src/sflow/hsflowdConfig.js) | Renders `/etc/hsflowd.conf` (collector, sampling, polling, pcap device). |
 
 ## Active probes
 

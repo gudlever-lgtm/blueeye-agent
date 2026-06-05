@@ -19,6 +19,11 @@ set -euo pipefail
 #   NETWORK_MODE   host|bridge          (host — needed to measure host traffic; Linux)
 #   TOKEN_VOLUME   docker volume name   (blueeye-agent-data)
 #   PLATFORM       target platform      (auto-detected 64-bit: linux/amd64 or linux/arm64)
+#   ENABLE_HSFLOWD 1 to also run the hsflowd sidecar — a host sFlow exporter that
+#                  feeds the agent's collector so a host with no switch still gets
+#                  src/dst flows (needs NETWORK_MODE=host; set the agent's source
+#                  to "sflow" in the dashboard). (default 0)
+#   SFLOW_DEVICE   host interface hsflowd samples (default eth0)
 
 REPO_URL="${REPO_URL:-https://github.com/gudlever-lgtm/blueeye-agent.git}"
 IMAGE="${IMAGE:-blueeye-agent}"
@@ -27,6 +32,9 @@ NETWORK_MODE="${NETWORK_MODE:-host}"
 TOKEN_VOLUME="${TOKEN_VOLUME:-blueeye-agent-data}"
 SERVER_URL="${BLUEEYE_SERVER_URL:-}"
 ENROLL="${BLUEEYE_ENROLLMENT_CODE:-}"
+ENABLE_HSFLOWD="${ENABLE_HSFLOWD:-0}"
+SFLOW_DEVICE="${SFLOW_DEVICE:-eth0}"
+HSFLOWD_CONTAINER="${HSFLOWD_CONTAINER:-blueeye-hsflowd}"
 
 # Resolve the build/run platform. The agent only supports 64-bit; default to the
 # host's 64-bit architecture, but allow an explicit override (e.g. PLATFORM=linux/arm64).
@@ -79,5 +87,29 @@ docker run "${ARGS[@]}" "$IMAGE"
 echo
 echo "BlueEye agent is running. Recent logs:"
 docker logs --tail 20 "$CONTAINER" 2>&1 || true
+
+# 4) Optional: the hsflowd sidecar — a host sFlow exporter that samples this
+#    host and ships sFlow to the agent's collector (127.0.0.1:6343). Only useful
+#    with host networking (otherwise it can neither see the host's traffic nor
+#    reach the collector). Remember to set the agent's source to "sflow".
+if [ "$ENABLE_HSFLOWD" = "1" ]; then
+  if [ "$NETWORK_MODE" != "host" ]; then
+    echo "WARNING: ENABLE_HSFLOWD=1 needs NETWORK_MODE=host — skipping the hsflowd sidecar." >&2
+  else
+    echo
+    echo "Building hsflowd sidecar image ..."
+    docker build --platform "$PLATFORM" -t blueeye-hsflowd "$SRC/docker/hsflowd"
+    docker rm -f "$HSFLOWD_CONTAINER" >/dev/null 2>&1 || true
+    echo "Starting hsflowd sidecar (samples $SFLOW_DEVICE -> 127.0.0.1:6343) ..."
+    docker run -d --name "$HSFLOWD_CONTAINER" --restart unless-stopped \
+      --platform "$PLATFORM" --network host \
+      --cap-add NET_ADMIN --cap-add NET_RAW \
+      -e "SFLOW_DEVICE=$SFLOW_DEVICE" \
+      blueeye-hsflowd
+    echo "hsflowd sidecar started. Verify inbound sFlow on the host with:"
+    echo "    sudo tcpdump -ni any udp port 6343"
+  fi
+fi
+
 echo
 echo "Manage it with:  docker logs -f $CONTAINER   |   docker restart $CONTAINER   |   docker rm -f $CONTAINER"
