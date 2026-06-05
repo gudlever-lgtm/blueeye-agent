@@ -97,8 +97,15 @@ automatisk (`linux/amd64` eller `linux/arm64`); overstyr med `PLATFORM`, fx
 
 ## Uninstalling
 
-An `uninstall.sh` script is shipped **with the agent** — the one-line installer
-drops it in the install directory, so it's already on the machine:
+Easiest — a one-liner from the server (mirrors install):
+
+```bash
+curl -sSL https://<server>/enroll/uninstall.sh | sudo sh            # warns, then asks y/N
+curl -sSL https://<server>/enroll/uninstall.sh | sudo sh -s -- --purge   # pass flags after --
+```
+
+`uninstall.sh` is also shipped **with the agent** — the installer drops it in the
+install directory, so it's already on the machine:
 
 ```bash
 sudo sh /opt/blueeye-agent/uninstall.sh            # warns, then asks y/N
