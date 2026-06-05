@@ -1,0 +1,21 @@
+#!/bin/sh
+# Auto-bump the patch version on every commit, so the server/agent update
+# tracking (Settings -> Updates + the per-agent "update" badge) reflects each
+# change. See CLAUDE.md, "Version every change".
+#
+# Skips when a commit only touches the version files themselves, and never blocks
+# a commit: if npm is unavailable or the bump fails it warns and lets it through.
+changed=$(git diff --cached --name-only | grep -vE '^(package\.json|package-lock\.json)$' || true)
+[ -z "$changed" ] && exit 0
+
+if command -v npm >/dev/null 2>&1; then
+  if npm version patch --no-git-tag-version >/dev/null 2>&1; then
+    git add package.json package-lock.json
+    echo "pre-commit: version bumped to $(node -p "require('./package.json').version" 2>/dev/null)"
+  else
+    echo "pre-commit: version bump skipped (npm version failed)" >&2
+  fi
+else
+  echo "pre-commit: npm not found; version not bumped" >&2
+fi
+exit 0
