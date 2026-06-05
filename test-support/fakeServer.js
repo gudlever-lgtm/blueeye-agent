@@ -47,6 +47,25 @@ function startFakeServer(options = {}) {
   const monitorConfig = options.monitorConfig || { source: 'proc' };
   const sockets = new Set();
 
+  // Agent -> server WebSocket frames (acks, heartbeats), so tests can assert the
+  // agent replied to a command. waitForWsMessage resolves for the first match.
+  const receivedWsMessages = [];
+  const wsWaiters = [];
+  function pushWsMessage(msg) {
+    receivedWsMessages.push(msg);
+    for (let i = wsWaiters.length - 1; i >= 0; i -= 1) {
+      if (wsWaiters[i].pred(msg)) {
+        wsWaiters[i].resolve(msg);
+        wsWaiters.splice(i, 1);
+      }
+    }
+  }
+  function waitForWsMessage(pred) {
+    const found = receivedWsMessages.find(pred);
+    if (found) return Promise.resolve(found);
+    return new Promise((resolve) => wsWaiters.push({ pred, resolve }));
+  }
+
   const requestHandler = async (req, res) => {
     // Companion config (used by the agent to discover URL + fingerprint).
     if (req.method === 'GET' && req.url === '/enroll/config') {
@@ -132,6 +151,11 @@ function startFakeServer(options = {}) {
     wss.handleUpgrade(req, socket, head, (ws) => {
       sockets.add(ws);
       ws.on('close', () => sockets.delete(ws));
+      ws.on('message', (data) => {
+        let msg;
+        try { msg = JSON.parse(data.toString()); } catch { return; }
+        pushWsMessage(msg);
+      });
       ws.send(JSON.stringify({ type: 'connected', agentId: issuedAgentId }));
     });
   });
@@ -163,6 +187,8 @@ function startFakeServer(options = {}) {
         socketCount: () => sockets.size,
         sendCommandToAll,
         dropAllSockets,
+        receivedWsMessages,
+        waitForWsMessage,
         addValidToken: (t) => validTokens.add(t),
         close: () =>
           new Promise((done) => {

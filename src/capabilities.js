@@ -19,13 +19,38 @@ function detectCapabilities({
   hasNetflow = () => true,
   hasSflow = () => true,
   version = readVersion(),
+  managed = detectManaged(),
 } = {}) {
   const sources = [];
   if (canReadProc()) sources.push('proc');
   if (hasSnmp()) sources.push('snmp');
   if (hasNetflow()) sources.push('netflow');
   if (hasSflow()) sources.push('sflow');
-  return { sources, agentVersion: version };
+  // `managed` tells the server how this agent is supervised, so it knows whether
+  // a one-click self-update is possible: 'systemd' (yes), 'docker'/'unmanaged'
+  // (no — the host rebuilds those).
+  return { sources, agentVersion: version, managed };
+}
+
+// How this agent is supervised, which decides whether it can self-update:
+//   - explicit BLUEEYE_RUNTIME (set by the installer) wins;
+//   - a Docker container is detected via /.dockerenv or $container;
+//   - a systemd service sets $INVOCATION_ID;
+//   - otherwise 'unmanaged' (a bare `node src/index.js` nothing would restart).
+function detectManaged({ env = process.env, fileExists = defaultFileExists } = {}) {
+  const explicit = String(env.BLUEEYE_RUNTIME || '').toLowerCase();
+  if (explicit === 'docker' || explicit === 'systemd' || explicit === 'unmanaged') return explicit;
+  if (fileExists('/.dockerenv') || env.container) return 'docker';
+  if (env.INVOCATION_ID) return 'systemd';
+  return 'unmanaged';
+}
+
+function defaultFileExists(p) {
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
+  }
 }
 
 function defaultCanReadProc() {
@@ -54,4 +79,4 @@ function readVersion() {
   }
 }
 
-module.exports = { detectCapabilities };
+module.exports = { detectCapabilities, detectManaged };

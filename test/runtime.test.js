@@ -133,6 +133,93 @@ test('a 401 while submitting scheduled probes is fatal', async () => {
   }
 });
 
+test('replies to a ping command with an ack carrying its live identity', async () => {
+  const server = await startFakeServer({ validTokens: ['valid'] });
+  const runtime = createAgentRuntime({
+    config: makeConfig(server),
+    token: 'valid',
+    agentId: 1,
+    logger: silentLogger,
+    capabilities: { sources: ['proc', 'netflow'], agentVersion: '1.2.3', managed: 'systemd' },
+  });
+  try {
+    runtime.start();
+    await withTimeout(onceEvent(runtime, 'connected'), 4000, 'no connected message');
+    const acked = server.waitForWsMessage((m) => m.type === 'ack');
+    const sent = server.sendCommandToAll({ name: 'ping', id: 'p1' });
+    assert.equal(sent, 1);
+    const ack = await withTimeout(acked, 4000, 'no ack received');
+    assert.equal(ack.id, 'p1');
+    assert.equal(ack.ok, true);
+    assert.equal(ack.agentVersion, '1.2.3');
+    assert.deepEqual(ack.sources, ['proc', 'netflow']);
+    assert.equal(ack.managed, 'systemd');
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});
+
+test('an update command rebuilds and restarts a systemd-managed agent', async () => {
+  const server = await startFakeServer({ validTokens: ['valid'] });
+  const updateCalls = [];
+  let restarted = 0;
+  const selfUpdater = {
+    update: async (opts) => { updateCalls.push(opts); return { ok: true }; },
+    restart: () => { restarted += 1; },
+  };
+  const runtime = createAgentRuntime({
+    config: makeConfig(server),
+    token: 'valid',
+    agentId: 1,
+    logger: silentLogger,
+    capabilities: { sources: ['proc'], agentVersion: '0.0.1', managed: 'systemd' },
+    selfUpdater,
+  });
+  try {
+    runtime.start();
+    await withTimeout(onceEvent(runtime, 'connected'), 4000, 'no connected message');
+    const applied = onceEvent(runtime, 'update-applied');
+    server.sendCommandToAll({ name: 'update', id: 'u1', sha256: 'abc123' });
+    await withTimeout(applied, 4000, 'update not applied');
+    assert.equal(updateCalls.length, 1);
+    assert.equal(updateCalls[0].expectedSha, 'abc123');
+    assert.equal(restarted, 1);
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});
+
+test('an update command is declined by a docker-managed agent', async () => {
+  const server = await startFakeServer({ validTokens: ['valid'] });
+  let updateCalled = 0;
+  const selfUpdater = { update: async () => { updateCalled += 1; return { ok: true }; }, restart: () => {} };
+  const runtime = createAgentRuntime({
+    config: makeConfig(server),
+    token: 'valid',
+    agentId: 1,
+    logger: silentLogger,
+    capabilities: { sources: ['proc'], agentVersion: '0.0.1', managed: 'docker' },
+    selfUpdater,
+  });
+  try {
+    runtime.start();
+    await withTimeout(onceEvent(runtime, 'connected'), 4000, 'no connected message');
+    const skipped = onceEvent(runtime, 'update-skipped');
+    const declined = server.waitForWsMessage((m) => m.type === 'ack' && m.accepted === false);
+    server.sendCommandToAll({ name: 'update', id: 'u2', sha256: 'abc123' });
+    const info = await withTimeout(skipped, 4000, 'not skipped');
+    const ack = await withTimeout(declined, 4000, 'no decline ack');
+    assert.equal(info.reason, 'docker-managed');
+    assert.equal(ack.reason, 'docker-managed');
+    assert.equal(updateCalled, 0);
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});
+
 test('reconnects after a dropped connection (exponential backoff)', async () => {
   const server = await startFakeServer({ validTokens: ['valid'] });
   const runtime = createAgentRuntime({
