@@ -95,6 +95,108 @@ Imaget bygges til en **64-bit** platform. `install.sh` detekterer host-arkitektu
 automatisk (`linux/amd64` eller `linux/arm64`); overstyr med `PLATFORM`, fx
 `PLATFORM=linux/arm64 ./install.sh`. 32-bit hosts understøttes ikke.
 
+## Running as a service
+
+In normal use the agent runs **under a supervisor** so it survives crashes and
+reboots — and, under **systemd**, can be updated with one click from the
+dashboard. The one-liner installer sets this up for you: it installs either a
+**systemd service** or a **Docker container** named `blueeye-agent`.
+
+The underlying start command is:
+
+```bash
+npm start          # = node src/index.js (runs in the foreground)
+```
+
+Run bare like that, the agent is **unmanaged**: nothing restarts it, and the
+dashboard's one-click update can't reach it (it reports `managed: unmanaged`).
+Fine for a quick test — but for a real install, run it as a service.
+
+**systemd (Node install).** Write a unit so the agent runs as a managed service.
+The key line is `BLUEEYE_RUNTIME=systemd`, which makes the agent report itself as
+managed so the dashboard **Update** button works:
+
+```ini
+# /etc/systemd/system/blueeye-agent.service
+[Unit]
+Description=BlueEye monitoring agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/blueeye-agent
+Environment=BLUEEYE_SERVER_URL=https://server.example
+Environment=BLUEEYE_TOKEN_PATH=/opt/blueeye-agent/token
+Environment=BLUEEYE_RUNTIME=systemd
+# Environment=BLUEEYE_SERVER_CERT_FINGERPRINT=<sha256>   # optional: pin the server's TLS cert (https)
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now blueeye-agent     # start now + on every boot
+systemctl status blueeye-agent                # is it running?
+journalctl -u blueeye-agent -f                # follow logs
+```
+
+> `ExecStart` runs `npm start` (i.e. `node src/index.js`). If `npm` isn't on
+> systemd's `PATH`, use the absolute path from `command -v npm` — or point
+> `ExecStart` straight at Node, as the bundled installer does:
+> `ExecStart=/usr/bin/node /opt/blueeye-agent/src/index.js`.
+
+**Docker.** `./install.sh` already runs the container with `--restart
+unless-stopped`, so it returns after a reboot. It reports `managed: docker` —
+update it by rebuilding on the host (see below), not from the dashboard.
+
+## Updating an agent
+
+Updates **reuse the stored token** (the Docker volume, or
+`/opt/blueeye-agent/token`), so you never re-enroll. Which path you use depends
+on how the agent is supervised — check with **Agents → Ping** in the dashboard
+(the toast shows `managed`), or on the host (`docker ps` /
+`systemctl status blueeye-agent`).
+
+**systemd / Node — easiest is the dashboard** (Agents → **Update**, or
+Settings → Updates). Manually, in place — this mirrors the one-click flow:
+
+```bash
+curl -fsSL https://<server>/enroll/agent-source.tgz -o /tmp/agent.tgz
+sudo tar -xzf /tmp/agent.tgz -C /opt/blueeye-agent
+cd /opt/blueeye-agent && sudo npm ci --omit=dev
+sudo systemctl restart blueeye-agent
+```
+
+**Docker — rebuild on the host** (from the checkout you installed from; no
+enrollment code needed):
+
+```bash
+cd /path/to/blueeye-agent && git pull --ff-only
+BLUEEYE_SERVER_URL=https://<server> ./install.sh
+```
+
+**Unmanaged (bare `npm start`)** — nothing restarts it for you; update the
+source and restart it yourself:
+
+```bash
+cd /path/to/blueeye-agent && git pull --ff-only
+npm install --omit=dev        # only if dependencies changed
+# stop the running process, then:
+npm start
+```
+
+> The dashboard Update and the `agent-source.tgz` paths install **whatever the
+> server currently publishes** (its `AGENT_SOURCE_DIR`). After bumping the agent
+> on the server host, refresh it with **Settings → Updates → Reload agent
+> source** (no server restart). The `git pull` paths take whatever is on the
+> branch you pull. After it restarts, the agent reports its new version on
+> reconnect, and the dashboard version line updates.
+
 ## Uninstalling
 
 Easiest — a one-liner from the server (mirrors install):
