@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { detectCapabilities } = require('../src/capabilities');
+const { detectCapabilities, detectManaged } = require('../src/capabilities');
 const { createSampler } = require('../src/monitor');
 
 test('detectCapabilities reports proc, snmp, netflow and sflow when available', () => {
@@ -22,6 +22,24 @@ test('detectCapabilities omits sources that are unavailable', () => {
 test('detectCapabilities includes netflow and sflow by default (built-in collectors)', () => {
   const caps = detectCapabilities({ canReadProc: () => false, hasSnmp: () => false });
   assert.deepEqual(caps.sources, ['netflow', 'sflow']);
+});
+
+test('detectCapabilities reports the managed runtime', () => {
+  const caps = detectCapabilities({ canReadProc: () => false, hasSnmp: () => false, hasNetflow: () => false, hasSflow: () => false, managed: 'systemd' });
+  assert.equal(caps.managed, 'systemd');
+});
+
+test('detectManaged honours an explicit BLUEEYE_RUNTIME override', () => {
+  assert.equal(detectManaged({ env: { BLUEEYE_RUNTIME: 'systemd' }, fileExists: () => false }), 'systemd');
+  assert.equal(detectManaged({ env: { BLUEEYE_RUNTIME: 'docker' }, fileExists: () => false }), 'docker');
+  assert.equal(detectManaged({ env: { BLUEEYE_RUNTIME: 'unmanaged' }, fileExists: () => false }), 'unmanaged');
+});
+
+test('detectManaged detects docker (/.dockerenv) and systemd (INVOCATION_ID)', () => {
+  assert.equal(detectManaged({ env: {}, fileExists: (p) => p === '/.dockerenv' }), 'docker');
+  assert.equal(detectManaged({ env: { container: 'docker' }, fileExists: () => false }), 'docker');
+  assert.equal(detectManaged({ env: { INVOCATION_ID: 'abc' }, fileExists: () => false }), 'systemd');
+  assert.equal(detectManaged({ env: {}, fileExists: () => false }), 'unmanaged');
 });
 
 test('createSampler returns a proc sampler by default and for source proc', () => {

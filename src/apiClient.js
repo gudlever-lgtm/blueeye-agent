@@ -64,6 +64,17 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     return jsonOrEmpty(res);
   }
 
+  // Posts an active throughput ("speed test") result for this agent.
+  async function postSpeedtest(result) {
+    const res = await fetchImpl(`${serverUrl}/speedtest/results`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ result }),
+    });
+    assertOk(res, 'posting speed-test result', 'post speed-test result');
+    return jsonOrEmpty(res);
+  }
+
   // Reports what this agent can do (e.g. { sources: ['proc','snmp'] }).
   async function postCapabilities(capabilities) {
     const res = await fetchImpl(`${serverUrl}/agents/me/capabilities`, {
@@ -75,7 +86,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     return jsonOrEmpty(res);
   }
 
-  return { postResults, getConfig, postCapabilities, postProbeResults };
+  return { postResults, getConfig, postCapabilities, postProbeResults, postSpeedtest };
 }
 
 module.exports = { createApiClient };

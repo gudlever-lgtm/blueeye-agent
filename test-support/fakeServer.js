@@ -44,8 +44,28 @@ function startFakeServer(options = {}) {
   const enrollments = [];
   const receivedResults = [];
   const receivedCapabilities = [];
+  const receivedSpeedtests = [];
   const monitorConfig = options.monitorConfig || { source: 'proc' };
   const sockets = new Set();
+
+  // Agent -> server WebSocket frames (acks, heartbeats), so tests can assert the
+  // agent replied to a command. waitForWsMessage resolves for the first match.
+  const receivedWsMessages = [];
+  const wsWaiters = [];
+  function pushWsMessage(msg) {
+    receivedWsMessages.push(msg);
+    for (let i = wsWaiters.length - 1; i >= 0; i -= 1) {
+      if (wsWaiters[i].pred(msg)) {
+        wsWaiters[i].resolve(msg);
+        wsWaiters.splice(i, 1);
+      }
+    }
+  }
+  function waitForWsMessage(pred) {
+    const found = receivedWsMessages.find(pred);
+    if (found) return Promise.resolve(found);
+    return new Promise((resolve) => wsWaiters.push({ pred, resolve }));
+  }
 
   const requestHandler = async (req, res) => {
     // Companion config (used by the agent to discover URL + fingerprint).
@@ -108,6 +128,34 @@ function startFakeServer(options = {}) {
       return;
     }
 
+    // Speed-test bandwidth + result endpoints (agent token).
+    if (req.method === 'GET' && req.url.startsWith('/speedtest/download')) {
+      const u = new URL(req.url, 'http://localhost');
+      const token = bearer(req, u);
+      if (!token || !validTokens.has(token)) { res.writeHead(401); res.end(); return; }
+      const bytes = Math.min(Number(u.searchParams.get('bytes')) || 1024, 4 * 1024 * 1024);
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(bytes) });
+      res.end(Buffer.alloc(bytes, 0));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/speedtest/upload') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) { res.writeHead(401); res.end(); return; }
+      let received = 0;
+      req.on('data', (c) => { received += c.length; });
+      req.on('end', () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ bytes: received })); });
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/speedtest/results') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) { res.writeHead(401); res.end(); return; }
+      const body = await readJson(req);
+      receivedSpeedtests.push(body.result);
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: receivedSpeedtests.length }));
+      return;
+    }
+
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not Found' }));
   };
@@ -132,6 +180,11 @@ function startFakeServer(options = {}) {
     wss.handleUpgrade(req, socket, head, (ws) => {
       sockets.add(ws);
       ws.on('close', () => sockets.delete(ws));
+      ws.on('message', (data) => {
+        let msg;
+        try { msg = JSON.parse(data.toString()); } catch { return; }
+        pushWsMessage(msg);
+      });
       ws.send(JSON.stringify({ type: 'connected', agentId: issuedAgentId }));
     });
   });
@@ -160,9 +213,12 @@ function startFakeServer(options = {}) {
         enrollments,
         receivedResults,
         receivedCapabilities,
+        receivedSpeedtests,
         socketCount: () => sockets.size,
         sendCommandToAll,
         dropAllSockets,
+        receivedWsMessages,
+        waitForWsMessage,
         addValidToken: (t) => validTokens.add(t),
         close: () =>
           new Promise((done) => {

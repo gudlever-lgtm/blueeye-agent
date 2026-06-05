@@ -3,7 +3,9 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand } = require('./command');
+const { createSelfUpdater } = require('./selfUpdate');
+const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
 const { runProbe } = require('./probes');
 const { resolveProbeTargets } = require('./probes/targets');
@@ -46,8 +48,10 @@ function createAgentRuntime({
   capabilities = detectCapabilities(),
   probeRunner = runProbe,
   resolveTargets = resolveProbeTargets,
+  selfUpdater = null,
 }) {
   const emitter = new EventEmitter();
+  const updater = selfUpdater || createSelfUpdater({ logger });
   // When a cert fingerprint is configured and the server is https, pin it on the
   // REST calls too (the WS client pins separately). Falls back to the injected
   // fetch (or global fetch) otherwise — so tests that inject a fetch are unaffected.
@@ -248,7 +252,84 @@ function createAgentRuntime({
   // — stop reporting + mark fatal — not just re-emit, so no timers linger.
   client.on('fatal', (reason) => handleFatal(reason));
 
+  // Replies to a server "ping" with this agent's live identity, so the dashboard
+  // can confirm the round-trip works (not just that a row says "online").
+  function handlePing(command) {
+    client.send({
+      type: 'ack',
+      id: command && command.id,
+      ok: true,
+      agentVersion: capabilities.agentVersion,
+      sources: capabilities.sources,
+      managed: capabilities.managed,
+    });
+    emitter.emit('pinged', command);
+  }
+
+  // Handles a server "update" command: acknowledge immediately (so the dashboard
+  // learns whether we can self-update), then — only when systemd-managed —
+  // rebuild from the server's verified source bundle and restart. Docker and
+  // unmanaged agents decline; their host rebuilds them.
+  async function handleUpdate(command) {
+    const managed = capabilities.managed;
+    if (managed !== 'systemd') {
+      const reason = managed === 'docker' ? 'docker-managed' : 'unmanaged';
+      client.send({ type: 'ack', id: command && command.id, accepted: false, runtime: managed || 'unmanaged', reason });
+      logger.warn(`Ignoring update command: runtime '${managed}' is not self-updatable (systemd only).`);
+      emitter.emit('update-skipped', { managed, reason });
+      return;
+    }
+    client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: 'systemd' });
+    logger.info('Update accepted; downloading and rebuilding from the server source...');
+    try {
+      await updater.update({
+        serverUrl: config.serverUrl,
+        token,
+        expectedSha: command && command.sha256,
+        fetchImpl: effectiveFetch,
+      });
+      logger.info('Update applied; requesting service restart.');
+      emitter.emit('update-applied');
+      updater.restart(); // systemd stops us (SIGTERM -> graceful exit) then starts the new code
+    } catch (err) {
+      logger.error(`Self-update failed: ${err.message}`);
+      client.send({ type: 'command-result', id: command && command.id, ok: false, error: err.message });
+      emitter.emit('update-error', err);
+    }
+  }
+
+  // Runs an active speed test against the server and submits the result. A 401
+  // is fatal; other errors are surfaced but non-terminal.
+  async function runSpeedtestAndSubmit(command) {
+    try {
+      const bytes = Number.isInteger(command && command.bytes) && command.bytes > 0 ? command.bytes : undefined;
+      const result = await runSpeedtest({ serverUrl: config.serverUrl, token, bytes, fetchImpl: effectiveFetch });
+      const response = await api.postSpeedtest(result);
+      logger.info(`Speed test: down ${result.downMbps ?? '?'} / up ${result.upMbps ?? '?'} Mbps.`);
+      emitter.emit('speedtest-submitted', { result, response });
+      return true;
+    } catch (err) {
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+      logger.error(`Speed test failed: ${err.message}`);
+      emitter.emit('command-error', err);
+      return false;
+    }
+  }
+
   client.on('command', async (command) => {
+    if (isPingCommand(command)) {
+      handlePing(command);
+      return;
+    }
+    if (isUpdateCommand(command)) {
+      await handleUpdate(command);
+      return;
+    }
+    if (isSpeedtestCommand(command)) {
+      logger.info('Received speed-test command; measuring throughput...');
+      await runSpeedtestAndSubmit(command);
+      return;
+    }
     if (isRunProbeCommand(command)) {
       logger.info(`Received run-probe command (${command.probe.type}).`);
       await runProbeAndSubmit(command.probe);
