@@ -18,7 +18,7 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 | Live channel | [`src/agentClient.js`](src/agentClient.js) — WebSocket to `/ws/agent` |
 | REST | [`src/apiClient.js`](src/apiClient.js) — Bearer-authenticated calls |
 | Traffic sources | proc · snmp · netflow · sflow (server picks per agent) |
-| Active probes | ping · tcp · dns · traceroute |
+| Active probes | ping · tcp · dns · traceroute · http |
 | Tests | `node --test` over [`test/`](test) against [`test-support/fakeServer.js`](test-support/fakeServer.js) |
 
 ## Boot sequence
@@ -111,10 +111,12 @@ a runner error resolves to an `ok:false` result stamped with `ts`.
 | `tcp` | [`probes/tcp.js`](src/probes/tcp.js) | times N connect-and-close attempts. |
 | `dns` | [`probes/dns.js`](src/probes/dns.js) | times N resolver lookups. |
 | `traceroute` | [`probes/traceroute.js`](src/probes/traceroute.js) | system `traceroute`/`tracert`, parses hops. |
+| `http` | [`probes/http.js`](src/probes/http.js) | `fetch`es a URL (metadata only); reports HTTP `status` + (https) TLS `certExpiryDays`. |
 | — | [`probes/stats.js`](src/probes/stats.js) | shared `clampInt`/`round`/`summarize`/`fail` helpers. |
 
 All probes return a normalized record: `{ type, target, ok, attempts, success,
-rttMs, minMs, maxMs, jitterMs, lossPct, ... }`.
+rttMs, minMs, maxMs, jitterMs, lossPct, ... }` (http adds `status` +
+`certExpiryDays`).
 
 ## Server API surface (the contract)
 
