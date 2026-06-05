@@ -95,6 +95,40 @@ Imaget bygges til en **64-bit** platform. `install.sh` detekterer host-arkitektu
 automatisk (`linux/amd64` eller `linux/arm64`); overstyr med `PLATFORM`, fx
 `PLATFORM=linux/arm64 ./install.sh`. 32-bit hosts understøttes ikke.
 
+## Uninstalling
+
+Easiest — a one-liner from the server (mirrors install):
+
+```bash
+curl -sSL https://<server>/enroll/uninstall.sh | sudo sh            # warns, then asks y/N
+curl -sSL https://<server>/enroll/uninstall.sh | sudo sh -s -- --purge   # pass flags after --
+```
+
+`uninstall.sh` is also shipped **with the agent** — the installer drops it in the
+install directory, so it's already on the machine:
+
+```bash
+sudo sh /opt/blueeye-agent/uninstall.sh            # warns, then asks y/N
+sudo sh /opt/blueeye-agent/uninstall.sh --yes      # no prompt
+sudo sh /opt/blueeye-agent/uninstall.sh --purge    # also remove the Docker image + token volume
+```
+
+It auto-detects how the agent was installed and removes it accordingly:
+
+- **Node install** — stops + disables the `blueeye-agent` systemd service and deletes the unit.
+- **Docker install** — stops + removes the `blueeye-agent` container (`--purge` also drops the image and the `blueeye-agent-data` volume).
+- Removes the install directory `/opt/blueeye-agent` (including the stored token).
+
+It **warns and asks for confirmation first** (skip with `--yes`) and needs `sudo`.
+Env overrides: `SERVICE_NAME`, `BLUEEYE_INSTALL_DIR`, `CONTAINER`, `IMAGE`,
+`TOKEN_VOLUME`.
+
+> This removes the agent **locally only**. To also remove it from the BlueEye
+> server's list, open the dashboard → **Agents → Delete**.
+
+(If you installed from a checkout with the Docker `install.sh`, you can run
+`sudo ./uninstall.sh` from that checkout instead.)
+
 ## Konfiguration (fil + env)
 
 Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
@@ -107,7 +141,7 @@ Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
 | `serverUrl`       | `BLUEEYE_SERVER_URL`         | `http://localhost:3000`        | blueeye-server URL                  |
 | `enrollmentCode`  | `BLUEEYE_ENROLLMENT_CODE`    | (ingen)                        | Engangskode — kun ved første start  |
 | `serverCertFingerprint` | `BLUEEYE_SERVER_CERT_FINGERPRINT` | (ingen)             | SHA-256 af serverens TLS-cert — pinnes ved https |
-| `tokenPath`       | `BLUEEYE_TOKEN_PATH`         | `./.blueeye-agent/token`       | Hvor tokenet gemmes (0600)          |
+| `tokenPath`       | `BLUEEYE_TOKEN_PATH`         | `<agent-dir>/.blueeye-agent/token` | Hvor tokenet gemmes (0600) — relativt til agentens egen mappe, ikke cwd |
 | `heartbeatMs`     | `BLUEEYE_HEARTBEAT_MS`       | `15000`                        | Interval for heartbeat-besked       |
 | `reconnectBaseMs` | `BLUEEYE_RECONNECT_BASE_MS`  | `1000`                         | Backoff-basis ved reconnect         |
 | `reconnectMaxMs`  | `BLUEEYE_RECONNECT_MAX_MS`   | `30000`                        | Backoff-loft                        |

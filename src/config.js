@@ -43,10 +43,15 @@ function loadConfig({ env = process.env } = {}) {
   // SHA-256 of the server's (or its reverse proxy's) TLS leaf cert. When set and
   // the server is https, the agent pins it and refuses a mismatching cert.
   const serverCertFingerprint = normalizeFingerprint(env.BLUEEYE_SERVER_CERT_FINGERPRINT || file.serverCertFingerprint || '');
+  // Default is resolved relative to the agent's OWN directory, not the current
+  // working directory — so a token written by `blueeye-agent enroll` is found by
+  // the long-running service later even if they were started from different cwds
+  // (e.g. enroll from /var/www, service from /opt/blueeye-agent). Override with
+  // BLUEEYE_TOKEN_PATH (env) or tokenPath (config file).
   const tokenPath =
     env.BLUEEYE_TOKEN_PATH ||
     file.tokenPath ||
-    path.join(path.dirname(configPath), '.blueeye-agent', 'token');
+    path.join(__dirname, '..', '.blueeye-agent', 'token');
   const heartbeatMs = toInt(env.BLUEEYE_HEARTBEAT_MS, file.heartbeatMs ?? 15000);
   const backoff = {
     baseMs: toInt(env.BLUEEYE_RECONNECT_BASE_MS, file.reconnectBaseMs ?? 1000),
