@@ -3,8 +3,9 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand } = require('./command');
 const { createSelfUpdater } = require('./selfUpdate');
+const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
 const { runProbe } = require('./probes');
 const { resolveProbeTargets } = require('./probes/targets');
@@ -297,6 +298,24 @@ function createAgentRuntime({
     }
   }
 
+  // Runs an active speed test against the server and submits the result. A 401
+  // is fatal; other errors are surfaced but non-terminal.
+  async function runSpeedtestAndSubmit(command) {
+    try {
+      const bytes = Number.isInteger(command && command.bytes) && command.bytes > 0 ? command.bytes : undefined;
+      const result = await runSpeedtest({ serverUrl: config.serverUrl, token, bytes, fetchImpl: effectiveFetch });
+      const response = await api.postSpeedtest(result);
+      logger.info(`Speed test: down ${result.downMbps ?? '?'} / up ${result.upMbps ?? '?'} Mbps.`);
+      emitter.emit('speedtest-submitted', { result, response });
+      return true;
+    } catch (err) {
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+      logger.error(`Speed test failed: ${err.message}`);
+      emitter.emit('command-error', err);
+      return false;
+    }
+  }
+
   client.on('command', async (command) => {
     if (isPingCommand(command)) {
       handlePing(command);
@@ -304,6 +323,11 @@ function createAgentRuntime({
     }
     if (isUpdateCommand(command)) {
       await handleUpdate(command);
+      return;
+    }
+    if (isSpeedtestCommand(command)) {
+      logger.info('Received speed-test command; measuring throughput...');
+      await runSpeedtestAndSubmit(command);
       return;
     }
     if (isRunProbeCommand(command)) {

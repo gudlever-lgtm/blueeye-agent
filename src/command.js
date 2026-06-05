@@ -4,6 +4,7 @@ const RUN_TEST = /^run[\s_-]?test$/i;
 const RUN_PROBE = /^run[\s_-]?probe$/i;
 const PING = /^ping$/i;
 const UPDATE = /^(update|self[\s_-]?update|upgrade)$/i;
+const SPEEDTEST = /^speed[\s_-]?test$/i;
 
 function verbOf(command) {
   if (typeof command === 'string') return command.trim();
@@ -38,4 +39,10 @@ function isUpdateCommand(command) {
   return UPDATE.test(verbOf(command));
 }
 
-module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand };
+// Recognises a speed-test command: { name: 'speedtest', bytes? } — download then
+// upload a sized blob to/from the server and report the achieved Mbps.
+function isSpeedtestCommand(command) {
+  return SPEEDTEST.test(verbOf(command));
+}
+
+module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand };

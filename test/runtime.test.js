@@ -160,6 +160,31 @@ test('replies to a ping command with an ack carrying its live identity', async (
   }
 });
 
+test('a speedtest command measures throughput and submits the result', async () => {
+  const server = await startFakeServer({ validTokens: ['valid'] });
+  const runtime = createAgentRuntime({
+    config: makeConfig(server),
+    token: 'valid',
+    agentId: 1,
+    logger: silentLogger,
+  });
+  try {
+    runtime.start();
+    await withTimeout(onceEvent(runtime, 'connected'), 4000, 'no connected message');
+    const submitted = onceEvent(runtime, 'speedtest-submitted');
+    server.sendCommandToAll({ name: 'speedtest', bytes: 4096 });
+    const { result } = await withTimeout(submitted, 5000, 'speedtest not submitted');
+    assert.equal(result.ok, true);
+    assert.equal(result.downBytes, 4096);
+    assert.equal(result.upBytes, 4096);
+    assert.equal(server.receivedSpeedtests.length, 1);
+    assert.equal(server.receivedSpeedtests[0].ok, true);
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});
+
 test('an update command rebuilds and restarts a systemd-managed agent', async () => {
   const server = await startFakeServer({ validTokens: ['valid'] });
   const updateCalls = [];

@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { isRunTestCommand, isPingCommand, isUpdateCommand } = require('../src/command');
+const { isRunTestCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand } = require('../src/command');
 
 test('isRunTestCommand recognises run-test in several shapes', () => {
   assert.equal(isRunTestCommand('run test'), true);
@@ -39,4 +39,13 @@ test('isUpdateCommand recognises update/upgrade and rejects others', () => {
   assert.equal(isUpdateCommand('ping'), false);
   assert.equal(isUpdateCommand({ name: 'run-test' }), false);
   assert.equal(isUpdateCommand(null), false);
+});
+
+test('isSpeedtestCommand recognises speedtest and rejects others', () => {
+  assert.equal(isSpeedtestCommand('speedtest'), true);
+  assert.equal(isSpeedtestCommand('speed-test'), true);
+  assert.equal(isSpeedtestCommand({ name: 'speedtest', bytes: 2048 }), true);
+  assert.equal(isSpeedtestCommand('ping'), false);
+  assert.equal(isSpeedtestCommand({ name: 'run-test' }), false);
+  assert.equal(isSpeedtestCommand(null), false);
 });
