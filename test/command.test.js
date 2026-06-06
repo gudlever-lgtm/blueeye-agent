@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { isRunTestCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand } = require('../src/command');
+const { isRunTestCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand } = require('../src/command');
 
 test('isRunTestCommand recognises run-test in several shapes', () => {
   assert.equal(isRunTestCommand('run test'), true);
@@ -59,4 +59,14 @@ test('isDiagnoseCommand recognises diagnose aliases and rejects others', () => {
   assert.equal(isDiagnoseCommand('ping'), false);
   assert.equal(isDiagnoseCommand({ name: 'run-test' }), false);
   assert.equal(isDiagnoseCommand(null), false);
+});
+
+test('isDeleteCommand recognises delete/uninstall and rejects others', () => {
+  assert.equal(isDeleteCommand('delete'), true);
+  assert.equal(isDeleteCommand('self-delete'), true);
+  assert.equal(isDeleteCommand('uninstall'), true);
+  assert.equal(isDeleteCommand({ name: 'delete', id: 'x', auditId: 1 }), true);
+  assert.equal(isDeleteCommand('update'), false); // must NOT collide with update
+  assert.equal(isDeleteCommand('ping'), false);
+  assert.equal(isDeleteCommand(null), false);
 });

@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const { verifyManifest } = require('./release/verifyManifest');
 
 // Self-update for Node/systemd-managed agents. Given the server URL + token and
 // the expected SHA-256 of the published source bundle, it:
@@ -34,22 +35,52 @@ function createSelfUpdater({
   // Downloads + verifies + installs the new source. Throws (with a `.code`) on
   // any failure; resolves with { ok: true, sha } on success. Does NOT restart —
   // call restart() separately so the result can be acted on first.
-  async function update({ serverUrl, token, expectedSha, fetchImpl }) {
+  async function update({ serverUrl, token, expectedSha, expectedVersion, signature, publicKey, fetchImpl }) {
     const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
     if (!doFetch) throw fail('NO_FETCH', 'no fetch implementation available');
 
+    // A `signature` in the command marks a SIGNED release: download the signed
+    // artifact and verify its Ed25519 signature (authenticity) before anything
+    // touches disk. Without one, fall back to the legacy source bundle (sha256
+    // only) so existing deployments keep working.
+    const signed = !!signature;
     const base = String(serverUrl || '').replace(/\/+$/, '');
-    const url = `${base}/enroll/agent-source.tgz`;
+    const url = `${base}${signed ? '/enroll/agent-release.tgz' : '/enroll/agent-source.tgz'}`;
     logger.info(`[update] downloading ${url}`);
     const res = await doFetch(url, { headers: { Authorization: `Bearer ${token}` } });
     if (!res || !res.ok) throw fail('DOWNLOAD_FAILED', `download failed (HTTP ${res ? res.status : '?'})`);
 
     const buf = Buffer.from(await res.arrayBuffer());
     const sha = crypto.createHash('sha256').update(buf).digest('hex');
-    if (expectedSha && sha !== expectedSha) {
-      throw fail('CHECKSUM_MISMATCH', `checksum mismatch (expected ${expectedSha}, got ${sha}) — refusing to install`);
+    if (signed) {
+      // Fail CLOSED: never install a signed release we can't authenticate.
+      if (!publicKey) throw fail('NO_PUBLIC_KEY', 'no release public key configured — refusing to install a signed release');
+      const header = (name) => (res.headers && typeof res.headers.get === 'function' ? res.headers.get(name) : null);
+      const manifestB64 = header('x-release-manifest');
+      const sig = header('x-release-signature') || signature;
+      if (!manifestB64 || !sig) throw fail('NO_MANIFEST', 'signed release is missing its manifest/signature');
+      let manifest;
+      try {
+        manifest = JSON.parse(Buffer.from(manifestB64, 'base64').toString('utf8'));
+      } catch {
+        throw fail('BAD_MANIFEST', 'release manifest is not valid JSON');
+      }
+      if (!verifyManifest(manifest, sig, publicKey)) {
+        throw fail('SIGNATURE_INVALID', 'release signature did not verify — refusing to install');
+      }
+      if (manifest.sha256 !== sha) {
+        throw fail('CHECKSUM_MISMATCH', `checksum mismatch (manifest ${manifest.sha256}, got ${sha}) — refusing to install`);
+      }
+      if (expectedVersion && manifest.version !== expectedVersion) {
+        throw fail('VERSION_MISMATCH', `version mismatch (expected ${expectedVersion}, got ${manifest.version}) — refusing to install`);
+      }
+      logger.info(`[update] signature OK (v${manifest.version}, sha ${sha.slice(0, 12)}…)`);
+    } else {
+      if (expectedSha && sha !== expectedSha) {
+        throw fail('CHECKSUM_MISMATCH', `checksum mismatch (expected ${expectedSha}, got ${sha}) — refusing to install`);
+      }
+      logger.info(`[update] checksum OK (${sha})`);
     }
-    logger.info(`[update] checksum OK (${sha})`);
 
     const tmp = fsImpl.mkdtempSync(path.join(os.tmpdir(), 'blueeye-update-'));
     const tgz = path.join(tmp, 'agent-source.tgz');

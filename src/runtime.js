@@ -3,8 +3,11 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand } = require('./command');
 const { createSelfUpdater } = require('./selfUpdate');
+const { createSelfDeleter } = require('./selfDelete');
+const { createActionLog } = require('./actionLog');
+const { resolveReleasePublicKey } = require('./release/publicKey');
 const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
 const { runProbe } = require('./probes');
@@ -65,10 +68,19 @@ function createAgentRuntime({
   probeRunner = runProbe,
   resolveTargets = resolveProbeTargets,
   selfUpdater = null,
+  selfDeleter = null,
+  actionLog = null,
   hsflowdManager = null,
 }) {
   const emitter = new EventEmitter();
   const updater = selfUpdater || createSelfUpdater({ logger });
+  const deleter = selfDeleter || createSelfDeleter({ logger });
+  // Local, server-independent action trail. Path comes from the env at
+  // provisioning (BLUEEYE_ACTION_LOG); a no-op when unset. Never logs secrets.
+  const actions = actionLog || createActionLog({ path: process.env.BLUEEYE_ACTION_LOG || '' });
+  // The agent's release trust anchor — used to verify a signed update before it
+  // touches disk. Resolved once at startup.
+  const releasePublicKey = resolveReleasePublicKey();
   // When a cert fingerprint is configured and the server is https, pin it on the
   // REST calls too (the WS client pins separately). Falls back to the injected
   // fetch (or global fetch) otherwise — so tests that inject a fetch are unaffected.
@@ -352,29 +364,78 @@ function createAgentRuntime({
   // unmanaged agents decline; their host rebuilds them.
   async function handleUpdate(command) {
     const managed = capabilities.managed;
+    const auditId = command && command.auditId;
     if (managed !== 'systemd') {
       const reason = managed === 'docker' ? 'docker-managed' : 'unmanaged';
       client.send({ type: 'ack', id: command && command.id, accepted: false, runtime: managed || 'unmanaged', reason });
+      actions.log('update.declined', { runtime: managed || 'unmanaged', reason });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'upgrade', ok: false, detail: reason });
       logger.warn(`Ignoring update command: runtime '${managed}' is not self-updatable (systemd only).`);
       emitter.emit('update-skipped', { managed, reason });
       return;
     }
     client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: 'systemd' });
-    logger.info('Update accepted; downloading and rebuilding from the server source...');
+    const targetVersion = (command && command.version) || null;
+    const signed = !!(command && command.signature);
+    actions.log('update.start', { version: targetVersion, signed });
+    logger.info(`Update accepted; downloading and ${signed ? 'verifying the signed release' : 'rebuilding from the server source'}...`);
     try {
       await updater.update({
         serverUrl: config.serverUrl,
         token,
         expectedSha: command && command.sha256,
+        expectedVersion: targetVersion,
+        signature: command && command.signature,
+        publicKey: releasePublicKey,
         fetchImpl: effectiveFetch,
       });
+      actions.log('update.applied', { version: targetVersion });
       logger.info('Update applied; requesting service restart.');
+      // Report completion BEFORE restarting — once systemd swaps us we can't speak.
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'upgrade', ok: true, version: targetVersion });
       emitter.emit('update-applied');
       updater.restart(); // systemd stops us (SIGTERM -> graceful exit) then starts the new code
     } catch (err) {
+      actions.log('update.failed', { version: targetVersion, error: err.message });
       logger.error(`Self-update failed: ${err.message}`);
       client.send({ type: 'command-result', id: command && command.id, ok: false, error: err.message });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'upgrade', ok: false, detail: err.message });
       emitter.emit('update-error', err);
+    }
+  }
+
+  // Handles a server "delete" command: remove this agent from the host. The agent
+  // securely wipes its token and runs the shipped uninstall.sh (detached) to stop
+  // its service and delete its files. It reports 'completed' to the server FIRST
+  // (so the server can finalise the audit row + drop the agent record) because
+  // afterwards it has neither token nor process. Docker agents decline (the host
+  // removes the container).
+  async function handleDelete(command) {
+    const managed = capabilities.managed;
+    const auditId = command && command.auditId;
+    if (managed === 'docker') {
+      client.send({ type: 'ack', id: command && command.id, accepted: false, runtime: 'docker', reason: 'docker-managed' });
+      actions.log('delete.declined', { runtime: 'docker' });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'delete', ok: false, detail: 'docker-managed' });
+      logger.warn("Ignoring delete command: runtime 'docker' removes itself via the host.");
+      emitter.emit('delete-skipped', { reason: 'docker-managed' });
+      return;
+    }
+    client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: managed || 'unmanaged' });
+    actions.log('delete.start', {});
+    logger.warn('Delete accepted; wiping token and removing this agent from the host.');
+    try {
+      deleter.wipeToken();
+      actions.log('delete.token-wiped', {});
+      // Tell the server we're done BEFORE the detached removal stops us.
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'delete', ok: true });
+      emitter.emit('delete-applied');
+      deleter.remove(); // detached: sleeps briefly, then stops the service + removes files
+    } catch (err) {
+      actions.log('delete.failed', { error: err.message });
+      logger.error(`Self-delete failed: ${err.message}`);
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'delete', ok: false, detail: err.message });
+      emitter.emit('delete-error', err);
     }
   }
 
@@ -407,6 +468,10 @@ function createAgentRuntime({
     }
     if (isUpdateCommand(command)) {
       await handleUpdate(command);
+      return;
+    }
+    if (isDeleteCommand(command)) {
+      await handleDelete(command);
       return;
     }
     if (isSpeedtestCommand(command)) {
