@@ -6,6 +6,7 @@ const PING = /^ping$/i;
 const UPDATE = /^(update|self[\s_-]?update|upgrade)$/i;
 const SPEEDTEST = /^speed[\s_-]?test$/i;
 const DIAGNOSE = /^(diagnose|diag|doctor|self[\s_-]?check|health[\s_-]?check)$/i;
+const DELETE = /^(delete|self[\s_-]?delete|uninstall)$/i;
 
 function verbOf(command) {
   if (typeof command === 'string') return command.trim();
@@ -53,4 +54,11 @@ function isDiagnoseCommand(command) {
   return DIAGNOSE.test(verbOf(command));
 }
 
-module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand };
+// Recognises a delete command: { name: 'delete', id, auditId } — stop the
+// service, securely wipe the token and remove the install directory (the agent
+// removes itself from this host). Docker-managed agents decline.
+function isDeleteCommand(command) {
+  return DELETE.test(verbOf(command));
+}
+
+module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand };
