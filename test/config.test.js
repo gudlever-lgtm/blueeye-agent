@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { loadConfig, clearEnrollmentCode } = require('../src/config');
+const { loadConfig, clearEnrollmentCode, configPathFrom } = require('../src/config');
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'blueeye-agent-cfg-'));
@@ -37,6 +37,27 @@ test('loadConfig falls back to defaults without a file', () => {
   assert.equal(cfg.enrollmentCode, null);
   assert.ok(cfg.tokenPath.endsWith(path.join('.blueeye-agent', 'token')));
   assert.equal(cfg.backoff.factor, 2);
+});
+
+test('config path defaults to the install dir and ignores process.cwd()', () => {
+  // Resolves next to the agent package root (src/..) — the same base tokenPath
+  // uses — never the caller's cwd.
+  const expected = path.join(__dirname, '..', 'blueeye-agent.config.json');
+  assert.equal(configPathFrom({}), expected);
+
+  // The enroll one-shot runs without cd-ing into the install dir, so changing cwd
+  // must not move the config path (and must not throw the way a deleted cwd would).
+  const orig = process.cwd();
+  const tmp = tmpDir();
+  try {
+    process.chdir(tmp);
+    assert.equal(configPathFrom({}), expected);
+  } finally {
+    process.chdir(orig);
+  }
+
+  // An explicit override still wins.
+  assert.equal(configPathFrom({ BLUEEYE_AGENT_CONFIG: '/etc/be.json' }), '/etc/be.json');
 });
 
 test('clearEnrollmentCode removes only the code, preserving other fields', () => {

@@ -143,7 +143,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `BLUEEYE_AGENT_CONFIG` | `./blueeye-agent.config.json` | config file path |
+| `BLUEEYE_AGENT_CONFIG` | `<install-dir>/blueeye-agent.config.json` | config file path |
 | `BLUEEYE_SERVER_URL` | `http://localhost:3000` | server base URL |
 | `BLUEEYE_ENROLLMENT_CODE` | — | one-time code (first start only) |
 | `BLUEEYE_TOKEN_PATH` | `<cfgdir>/.blueeye-agent/token` | token file (`0600`) |
