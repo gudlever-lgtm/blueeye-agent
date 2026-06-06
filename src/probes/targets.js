@@ -65,6 +65,18 @@ function gatewayFromProcRoute(text) {
   return null;
 }
 
+// The interface name of the default route from /proc/net/route — column 0 (Iface)
+// of the row whose Destination (column 1) is 00000000. Used to pick which NIC
+// hsflowd samples when none is configured (or the configured one doesn't exist).
+function defaultRouteInterface(text) {
+  for (const line of String(text || '').split('\n')) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 2 || f[0] === 'Iface') continue;
+    if (f[1] === '00000000') return f[0];
+  }
+  return null;
+}
+
 function hexToIp(hex) {
   const bytes = [hex.slice(0, 2), hex.slice(2, 4), hex.slice(4, 6), hex.slice(6, 8)];
   return bytes.reverse().map((b) => parseInt(b, 16)).join('.');
@@ -114,4 +126,4 @@ async function resolveProbeTargets({
   return out;
 }
 
-module.exports = { parseConfiguredTargets, gatewayFromProcRoute, nameserversFromResolv, resolveProbeTargets };
+module.exports = { parseConfiguredTargets, gatewayFromProcRoute, defaultRouteInterface, nameserversFromResolv, resolveProbeTargets };

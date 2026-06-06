@@ -22,6 +22,7 @@ function createSflowCollector({
   let received = 0;
   let dropped = 0;
   let decoded = 0; // cumulative flow records decoded (survives drain)
+  let counterSamples = 0; // cumulative counter samples seen (carry no flow data)
   let lastAt = null; // ms epoch of the last datagram seen (any datagram)
   let bound = false; // the UDP socket actually bound (vs failed/closed)
 
@@ -36,6 +37,7 @@ function createSflowCollector({
       return;
     }
     decoded += parsed.flows.length;
+    counterSamples += parsed.counterSamples || 0;
     for (const flow of parsed.flows) {
       if (buffer.length >= maxFlows) break;
       buffer.push(flow);
@@ -85,6 +87,7 @@ function createSflowCollector({
       datagrams: received,
       dropped,
       decodedFlows: decoded,
+      counterSamples,
       bufferedFlows: buffer.length,
       lastDatagramAt: lastAt ? new Date(lastAt).toISOString() : null,
     };

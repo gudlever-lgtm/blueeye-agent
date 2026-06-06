@@ -2,7 +2,8 @@
 
 const { execFile } = require('child_process');
 const fs = require('fs');
-const { renderHsflowdConf } = require('./hsflowdConfig');
+const os = require('os');
+const { renderHsflowdConf, pickSamplingDevice } = require('./hsflowdConfig');
 
 // Self-managed lifecycle for the Host sFlow daemon (hsflowd) on a Linux host the
 // agent runs ON. On enable it installs hsflowd if missing, renders
@@ -89,6 +90,10 @@ function createHsflowdManager({
     try { return fs.readFileSync(p, 'utf8'); } catch { return null; }
   },
   writeFile = (p, c) => fs.promises.writeFile(p, c),
+  // For picking the sampled NIC when none is configured / the configured one is
+  // stale. Injectable so the resolution is unit-testable without a real host.
+  listInterfaces = () => os.networkInterfaces(),
+  readRoute = () => { try { return fs.readFileSync('/proc/net/route', 'utf8'); } catch { return ''; } },
   platform = process.platform,
   // capabilities.managed: 'systemd' | 'unmanaged' | 'docker'. A containerised
   // agent cannot apt-install onto / control the host's systemd, so it defers to
@@ -207,7 +212,18 @@ function createHsflowdManager({
         logger.info('hsflowd: installed.');
       }
 
-      const desired = renderHsflowdConf(opts);
+      // Resolve which NIC hsflowd samples: honour an explicit, existing device;
+      // otherwise auto-detect (default route) so a stale/blank 'eth0' on a cloud
+      // instance doesn't silently export counters only and produce no flows.
+      const device = pickSamplingDevice({
+        configured: opts.device || null,
+        interfaces: Object.keys(listInterfaces() || {}),
+        routeText: readRoute(),
+      });
+      if (device && device !== opts.device) {
+        logger.info(`hsflowd: sampling interface '${device}'${opts.device ? ` (configured '${opts.device}' not found)` : ' (auto-detected)'}`);
+      }
+      const desired = renderHsflowdConf(device ? { ...opts, device } : opts);
       const confChanged = readFile(confPath) !== desired;
       if (confChanged) {
         try {
