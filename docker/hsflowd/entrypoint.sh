@@ -26,6 +26,6 @@ EOF
 
 echo "hsflowd sidecar: sampling ${SFLOW_DEVICE} 1-in-${SAMPLING_RATE}, exporting to ${COLLECTOR_IP}:${COLLECTOR_PORT}"
 
-# -d runs hsflowd in the foreground and logs to stderr (does not fork). Some
-# builds use -dd for more verbosity; adjust if your build still daemonises.
-exec hsflowd -d
+# -dd keeps hsflowd in the FOREGROUND (no fork) and logs to stderr — required so
+# it can be the container's PID 1.
+exec hsflowd -dd

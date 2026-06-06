@@ -118,8 +118,12 @@ and ships sFlow to `127.0.0.1:6343` — straight into the agent's collector.
   ```
 
 - **Native (systemd/unmanaged) agent** — the agent self-provisions hsflowd when
-  its `sflow` monitor config includes an `hsflowd` block; it installs the package,
-  writes `/etc/hsflowd.conf`, and starts the service, reporting the actual state.
+  its `sflow` monitor config includes an `hsflowd` block. hsflowd isn't in the
+  Debian/Ubuntu archives, so the agent **builds it from source** (installs the
+  build deps, clones `sflow/host-sflow`, `make FEATURES="HOST PCAP"` →
+  `make install` → `make schedule`), writes `/etc/hsflowd.conf`, starts the
+  service, and reports the actual state. The first enable pulls a compiler and
+  compiles, so it takes a little longer.
 
 Confirm sFlow is arriving on the host:
 

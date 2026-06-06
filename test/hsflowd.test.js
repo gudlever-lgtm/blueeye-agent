@@ -96,41 +96,38 @@ test('docker runtime defers to the sidecar instead of self-managing', async () =
   assert.equal(exec.calls.length, 0, 'must not shell out on a containerised agent');
 });
 
-test('enable: installs when missing, writes conf, enables+starts, reports active', async () => {
+test('enable: builds hsflowd from source when missing, writes conf, enables+starts, reports active', async () => {
   const writes = [];
-  const exec = fakeExec([
-    notInstalled,                              // command -v hsflowd (during isInstalled checks)
-    ['command -v apt-get', OK],
-    ['apt-get install', OK],
-    ['is-active', isActive],
-  ]);
-  // command -v hsflowd is called several times; make it "installed" AFTER apt runs.
-  let installedNow = false;
-  const exec2 = async (cmd, args = []) => {
+  const calls = [];
+  let installedNow = false; // becomes true after `make install`
+  const exec = async (cmd, args = []) => {
     const line = [cmd, ...args].join(' ');
-    exec.calls.push(line);
-    if (line.includes('apt-get install')) { installedNow = true; return OK; }
+    calls.push(line);
+    if (line.includes('command -v apt-get')) return { ...OK, stdout: '/usr/bin/apt-get' };
+    if (line.startsWith('apt-get install')) return OK;          // build deps
+    if (line.includes('git clone')) return OK;
+    if (line.startsWith('make') && line.includes(' install')) { installedNow = true; return OK; }
+    if (line.startsWith('make')) return OK;                      // FEATURES build / schedule
     if (line.includes('command -v hsflowd')) return installedNow ? OK : { ok: false, exitCode: 1, stdout: '' };
-    if (line.includes('command -v apt-get')) return OK;
     if (line.includes('is-active')) return isActive;
     return OK;
   };
-  exec2.calls = exec.calls;
   const m = createHsflowdManager({
-    exec: exec2,
-    platform: 'linux',
-    runtime: 'systemd',
-    readFile: () => null,
-    writeFile: async (p, c) => { writes.push([p, c]); },
+    exec, platform: 'linux', runtime: 'systemd',
+    readFile: () => null, writeFile: async (p, c) => { writes.push([p, c]); },
   });
   const r = await m.enable({ samplingRate: 512 });
   assert.equal(r.state, 'active');
   assert.equal(writes.length, 1);
   assert.equal(writes[0][0], '/etc/hsflowd.conf');
   assert.match(writes[0][1], /sampling = 512/);
-  assert.ok(exec2.calls.some((c) => c.includes('apt-get install')));
-  assert.ok(exec2.calls.some((c) => c.includes('systemctl enable hsflowd')));
-  assert.ok(exec2.calls.some((c) => c.includes('systemctl restart hsflowd')));
+  assert.ok(calls.some((c) => c.startsWith('apt-get install') && c.includes('libpcap-dev')), 'installs build deps');
+  assert.ok(calls.some((c) => c.includes('git clone') && c.includes('host-sflow')), 'clones host-sflow');
+  assert.ok(calls.some((c) => c.startsWith('make') && c.includes('FEATURES=HOST PCAP')), 'builds with the PCAP module');
+  assert.ok(calls.some((c) => c.startsWith('make') && c.includes(' install')), 'make install');
+  assert.ok(calls.some((c) => c.startsWith('make') && c.includes(' schedule')), 'make schedule (systemd unit)');
+  assert.ok(calls.some((c) => c.includes('systemctl enable hsflowd')));
+  assert.ok(calls.some((c) => c.includes('systemctl restart hsflowd')));
 });
 
 test('enable is idempotent: unchanged conf on an active service does nothing', async () => {
@@ -148,7 +145,7 @@ test('enable is idempotent: unchanged conf on an active service does nothing', a
   assert.ok(!exec.calls.some((c) => c.includes('restart')), 'must not restart when nothing changed');
 });
 
-test('enable surfaces install failure (no apt) without looping', async () => {
+test('enable surfaces install failure (no apt for build deps) without looping', async () => {
   const exec = fakeExec([
     notInstalled,
     ['command -v apt-get', { ok: false, exitCode: 1, stdout: '' }],
@@ -170,18 +167,20 @@ test('enable reports permission_denied when systemctl is refused', async () => {
   assert.equal(r.state, 'permission_denied');
 });
 
-test('enable retries past a transient dpkg lock, then succeeds', async () => {
+test('enable retries past a transient dpkg lock on the build deps, then builds + succeeds', async () => {
   let aptCalls = 0;
   let installedNow = false;
   const exec = async (cmd, args = []) => {
     const line = [cmd, ...args].join(' ');
     if (line.includes('command -v apt-get')) return OK;
-    if (line.includes('apt-get install')) {
+    if (line.startsWith('apt-get install')) {
       aptCalls += 1;
       if (aptCalls < 2) return { ok: false, exitCode: 100, stderr: 'E: Could not get lock /var/lib/dpkg/lock-frontend' };
-      installedNow = true;
       return OK;
     }
+    if (line.includes('git clone')) return OK;
+    if (line.startsWith('make') && line.includes(' install')) { installedNow = true; return OK; }
+    if (line.startsWith('make')) return OK;
     if (line.includes('command -v hsflowd')) return installedNow ? OK : { ok: false, exitCode: 1, stdout: '' };
     if (line.includes('is-active')) return isActive;
     return OK;
