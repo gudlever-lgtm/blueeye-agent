@@ -10,6 +10,7 @@ const { runTest } = require('./testRunner');
 const { runProbe } = require('./probes');
 const { resolveProbeTargets } = require('./probes/targets');
 const { createSampler } = require('./monitor');
+const { createHsflowdManager } = require('./sflow/hsflowd');
 const { detectCapabilities } = require('./capabilities');
 const { makePinnedFetch } = require('./httpsClient');
 
@@ -25,6 +26,21 @@ function describeProbeOutcome(result) {
     return `${hops} hops`;
   }
   return `${result.rttMs ?? '?'} ms`;
+}
+
+// Derives the hsflowd exporter options from the monitor config, or null when a
+// local exporter isn't requested. A host self-provisions hsflowd only when the
+// source is sflow AND `sflow.hsflowd` is set (true, or an options object) — so
+// agents that receive sFlow from an external switch are unaffected.
+function sflowExporterOptions(mc) {
+  if (!mc || mc.source !== 'sflow' || !mc.sflow || !mc.sflow.hsflowd) return null;
+  const h = typeof mc.sflow.hsflowd === 'object' ? mc.sflow.hsflowd : {};
+  return {
+    collectorPort: Number.isInteger(mc.sflow.port) ? mc.sflow.port : 6343,
+    samplingRate: h.samplingRate,
+    pollingSecs: h.pollingSecs,
+    device: h.device,
+  };
 }
 
 // Ties the WebSocket client and the REST client together:
@@ -49,6 +65,7 @@ function createAgentRuntime({
   probeRunner = runProbe,
   resolveTargets = resolveProbeTargets,
   selfUpdater = null,
+  hsflowdManager = null,
 }) {
   const emitter = new EventEmitter();
   const updater = selfUpdater || createSelfUpdater({ logger });
@@ -74,6 +91,12 @@ function createAgentRuntime({
   let monitorConfig = { source: 'proc' };
   let currentSampler = samplerFactory(monitorConfig, { logger });
   let effectiveIntervalMs = config.reportIntervalMs;
+  // Self-managed host sFlow exporter (hsflowd). Only acts when the monitor
+  // source is sflow with a local exporter requested; on a containerised agent it
+  // defers to the hsflowd sidecar.
+  const hsflowd = hsflowdManager || createHsflowdManager({ runtime: capabilities.managed, logger });
+  let hsflowdManaged = false;
+  let lastHsflowdState = null;
 
   function handleFatal(reason = 'rest-token-rejected') {
     if (fatal) return;
@@ -147,9 +170,33 @@ function createAgentRuntime({
         Number.isInteger(mc.intervalMs) && mc.intervalMs > 0 ? mc.intervalMs : config.reportIntervalMs;
       logger.info(`Monitor source: ${monitorConfig.source} (report every ${effectiveIntervalMs}ms).`);
       emitter.emit('config', monitorConfig);
+      await reconcileHsflowd();
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not fetch monitor config (${err.message}); using ${monitorConfig.source}.`);
+    }
+  }
+
+  // Converges the local hsflowd exporter to the server's desired state. Runs on
+  // every config load — i.e. at startup and on each WS reconnect — so the host
+  // re-reconciles whenever it reconnects. Never throws (the manager swallows OS
+  // errors and reports a state instead).
+  async function reconcileHsflowd() {
+    const opts = sflowExporterOptions(monitorConfig);
+    if (opts) {
+      const r = await hsflowd.enable(opts);
+      hsflowdManaged = true;
+      lastHsflowdState = r;
+      logger.info(`hsflowd: ${r.state}${r.detail ? ` (${r.detail})` : ''}.`);
+      emitter.emit('hsflowd', r);
+    } else if (hsflowdManaged) {
+      // The source moved away from sflow (or the exporter was switched off) and
+      // we were managing it — stop it, but leave the package installed.
+      const r = await hsflowd.disable();
+      hsflowdManaged = false;
+      lastHsflowdState = r;
+      logger.info(`hsflowd: ${r.state} (local sFlow exporter no longer requested).`);
+      emitter.emit('hsflowd', r);
     }
   }
 
@@ -369,6 +416,7 @@ function createAgentRuntime({
     reportNow: () => runAndSubmit({ name: 'auto-report', intervalMs: config.reportSampleMs }, 'manual'),
     runScheduledProbesNow: () => runScheduledProbes(),
     getMonitorConfig: () => monitorConfig,
+    getHsflowdState: () => lastHsflowdState,
     on: emitter.on.bind(emitter),
     once: emitter.once.bind(emitter),
   };

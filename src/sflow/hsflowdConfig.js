@@ -1,0 +1,66 @@
+'use strict';
+
+// Renders an /etc/hsflowd.conf for the Host sFlow daemon (hsflowd) that turns a
+// plain Linux host into an sFlow v5 EXPORTER: it samples the host's own packets
+// and reads interface counters, then ships them to a collector. We point it at
+// the agent's local collector (127.0.0.1:6343 by default), so a host with no
+// switch doing sFlow export still produces the src/dst flow data the server's
+// Destinations map is built from.
+//
+// Format follows hsflowd's modular config (v2.x):
+//   sflow {
+//     collector { ip = 127.0.0.1  udpport = 6343 }
+//     sampling = 256
+//     polling  = 20
+//     pcap { dev = eth0 }
+//   }
+// `pcap { dev }` is what makes hsflowd sample PACKETS (the 5-tuple data); without
+// an interface it would export interface counters only. The device name varies
+// per host (eth0/ens.../wlan0), so it is configurable and defaults to eth0.
+
+const DEFAULTS = {
+  collectorIp: '127.0.0.1',
+  collectorPort: 6343,
+  samplingRate: 256,
+  pollingSecs: 20,
+  device: 'eth0',
+};
+
+// hsflowd config values are written verbatim into the file, so constrain them to
+// safe shapes (no newlines / braces) — never interpolate untrusted free text.
+const SAFE_DEVICE = /^[A-Za-z0-9._:-]{1,32}$/;
+const SAFE_IP = /^[0-9a-fA-F.:]{1,45}$/;
+
+function posInt(v, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  return Number.isInteger(v) && v >= min && v <= max ? v : fallback;
+}
+
+// Returns the effective, sanitised options actually used (handy for logging and
+// for the manager to compare against an existing file).
+function hsflowdOptions(opts = {}) {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  return {
+    collectorIp: typeof o.collectorIp === 'string' && SAFE_IP.test(o.collectorIp) ? o.collectorIp : DEFAULTS.collectorIp,
+    collectorPort: posInt(o.collectorPort, DEFAULTS.collectorPort, { max: 65535 }),
+    samplingRate: posInt(o.samplingRate, DEFAULTS.samplingRate, { max: 16777216 }),
+    pollingSecs: posInt(o.pollingSecs, DEFAULTS.pollingSecs, { max: 86400 }),
+    device: typeof o.device === 'string' && SAFE_DEVICE.test(o.device) ? o.device : DEFAULTS.device,
+  };
+}
+
+function renderHsflowdConf(opts = {}) {
+  const o = hsflowdOptions(opts);
+  return [
+    '# Managed by blueeye-agent — do not edit by hand; changes are overwritten.',
+    '# Host sFlow exporter: samples this host and exports to the local BlueEye collector.',
+    'sflow {',
+    `  collector { ip = ${o.collectorIp}  udpport = ${o.collectorPort} }`,
+    `  sampling = ${o.samplingRate}`,
+    `  polling = ${o.pollingSecs}`,
+    `  pcap { dev = ${o.device} }`,
+    '}',
+    '',
+  ].join('\n');
+}
+
+module.exports = { renderHsflowdConf, hsflowdOptions, DEFAULTS };
