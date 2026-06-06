@@ -1,5 +1,7 @@
 'use strict';
 
+const { defaultRouteInterface } = require('../probes/targets');
+
 // Renders an /etc/hsflowd.conf for the Host sFlow daemon (hsflowd) that turns a
 // plain Linux host into an sFlow v5 EXPORTER: it samples the host's own packets
 // and reads interface counters, then ships them to a collector. We point it at
@@ -63,4 +65,18 @@ function renderHsflowdConf(opts = {}) {
   ].join('\n');
 }
 
-module.exports = { renderHsflowdConf, hsflowdOptions, DEFAULTS };
+// Chooses which interface hsflowd should sample. An explicitly-configured device
+// that EXISTS on the host wins; otherwise (blank, or a stale name like the default
+// 'eth0' on a cloud instance that actually uses ens3) fall back to the default-
+// route interface, then the first non-loopback interface. Returns null when we
+// cannot enumerate interfaces, so the caller keeps whatever was configured.
+function pickSamplingDevice({ configured = null, interfaces = [], routeText = '' } = {}) {
+  const names = (Array.isArray(interfaces) ? interfaces : []).filter((n) => n && n !== 'lo');
+  if (!names.length) return configured || null; // can't verify — trust the config
+  if (configured && names.includes(configured)) return configured; // explicit + present
+  const viaRoute = defaultRouteInterface(routeText);
+  if (viaRoute && names.includes(viaRoute)) return viaRoute; // default-route NIC
+  return names[0]; // first real (non-loopback) NIC
+}
+
+module.exports = { renderHsflowdConf, hsflowdOptions, pickSamplingDevice, DEFAULTS };

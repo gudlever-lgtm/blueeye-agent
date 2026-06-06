@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { renderHsflowdConf, hsflowdOptions } = require('../src/sflow/hsflowdConfig');
+const { renderHsflowdConf, hsflowdOptions, pickSamplingDevice } = require('../src/sflow/hsflowdConfig');
 const { createHsflowdManager, STATES } = require('../src/sflow/hsflowd');
 
 // ---- config renderer ------------------------------------------------------
@@ -38,6 +38,30 @@ test('hsflowdOptions exposes the effective, sanitised values', () => {
   assert.deepEqual(hsflowdOptions({ samplingRate: 512 }), {
     collectorIp: '127.0.0.1', collectorPort: 6343, samplingRate: 512, pollingSecs: 20, device: 'eth0',
   });
+});
+
+// ---- sampling-device resolution -------------------------------------------
+
+const ROUTE = (iface) => `Iface\tDestination\tGateway\n${iface}\t00000000\t0100A8C0\t0003`;
+
+test('pickSamplingDevice honours an explicit device that exists on the host', () => {
+  assert.equal(pickSamplingDevice({ configured: 'eth1', interfaces: ['lo', 'eth0', 'eth1'], routeText: ROUTE('eth0') }), 'eth1');
+});
+
+test('pickSamplingDevice falls back to the default-route NIC when the configured one is absent', () => {
+  // The classic cloud-instance case: configured eth0 does not exist, NIC is ens3.
+  assert.equal(pickSamplingDevice({ configured: 'eth0', interfaces: ['lo', 'ens3'], routeText: ROUTE('ens3') }), 'ens3');
+});
+
+test('pickSamplingDevice auto-detects when no device is configured', () => {
+  assert.equal(pickSamplingDevice({ configured: null, interfaces: ['lo', 'ens5'], routeText: ROUTE('ens5') }), 'ens5');
+  // No route info -> first non-loopback NIC.
+  assert.equal(pickSamplingDevice({ configured: null, interfaces: ['lo', 'enp0s1'], routeText: '' }), 'enp0s1');
+});
+
+test('pickSamplingDevice trusts the config when interfaces cannot be enumerated', () => {
+  assert.equal(pickSamplingDevice({ configured: 'eth0', interfaces: [], routeText: '' }), 'eth0');
+  assert.equal(pickSamplingDevice({ configured: null, interfaces: [] }), null);
 });
 
 // ---- lifecycle manager: a scripted fake exec ------------------------------
@@ -130,6 +154,21 @@ test('enable: builds hsflowd from source when missing, writes conf, enables+star
   assert.ok(calls.some((c) => c.includes('systemctl restart hsflowd')));
 });
 
+test('enable auto-resolves a stale sampling NIC (eth0 -> default route) into the conf', async () => {
+  const writes = [];
+  const exec = fakeExec([installed, ['is-active', isActive]]);
+  const m = createHsflowdManager({
+    exec, platform: 'linux', runtime: 'systemd',
+    readFile: () => null, writeFile: async (p, c) => writes.push([p, c]),
+    listInterfaces: () => ({ lo: [], ens3: [] }),          // host has ens3, not eth0
+    readRoute: () => 'Iface\tDestination\tGateway\nens3\t00000000\t0100A8C0\t0003',
+  });
+  const r = await m.enable({ device: 'eth0' }); // configured eth0 does not exist here
+  assert.equal(r.state, 'active');
+  assert.equal(writes.length, 1);
+  assert.match(writes[0][1], /pcap \{ dev = ens3 \}/); // corrected to the real NIC
+});
+
 test('enable is idempotent: unchanged conf on an active service does nothing', async () => {
   const desired = renderHsflowdConf({ samplingRate: 256 });
   const exec = fakeExec([installed, ['is-active', isActive]]);
@@ -138,6 +177,8 @@ test('enable is idempotent: unchanged conf on an active service does nothing', a
     exec, platform: 'linux', runtime: 'systemd',
     readFile: () => desired,           // already exactly what we'd write
     writeFile: async (p, c) => writes.push([p, c]),
+    // Pin device resolution to eth0 so the rendered conf matches `desired`.
+    listInterfaces: () => ({ lo: [], eth0: [] }), readRoute: () => '',
   });
   const r = await m.enable({ samplingRate: 256 });
   assert.equal(r.state, 'active');

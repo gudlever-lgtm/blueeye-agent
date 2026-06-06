@@ -60,6 +60,15 @@ function sflowDatagram({ samplingRate, frameLength, raw }) {
 
 function be(n) { const b = Buffer.alloc(4); b.writeUInt32BE(n >>> 0, 0); return b; }
 
+// An sFlow v5 datagram carrying a single COUNTER sample (sampleType 2) — the
+// "exporter is polling counters but NOT sampling packets" case (no flow records).
+function sflowCounterDatagram() {
+  const body = Buffer.alloc(16); // opaque counter body; the parser only counts it
+  const sample = Buffer.concat([be(2), be(body.length), body]); // sampleType=2
+  const head = Buffer.concat([be(5), be(1), Buffer.from([10, 0, 0, 1]), be(0), be(1), be(1000), be(1)]);
+  return Buffer.concat([head, sample]);
+}
+
 const TCP = { src: '10.0.0.5', dst: '93.184.216.34', srcPort: 50000, dstPort: 443, protocol: 6 };
 
 test('decodeSampledHeader extracts the 5-tuple from Ethernet+IPv4+TCP', () => {
@@ -92,6 +101,21 @@ test('parseSflow decodes a flow sample and scales bytes by the sampling rate', (
 test('parseSflow rejects an unsupported version', () => {
   const bad = Buffer.alloc(28); bad.writeUInt32BE(4, 0);
   assert.throws(() => parseSflow(bad));
+});
+
+test('parseSflow counts counter samples and decodes no flows from them', () => {
+  const { flows, counterSamples } = parseSflow(sflowCounterDatagram());
+  assert.equal(flows.length, 0);
+  assert.equal(counterSamples, 1);
+});
+
+test('sFlow collector stats() surfaces counter-only datagrams (datagrams up, 0 flows)', () => {
+  const c = createSflowCollector();
+  c._feed(sflowCounterDatagram());
+  const s = c.stats();
+  assert.equal(s.datagrams, 1);
+  assert.equal(s.decodedFlows, 0);
+  assert.equal(s.counterSamples, 1); // the "exporter sending counters only" signal
 });
 
 test('sFlow collector buffers and drains an aggregated snapshot', () => {
