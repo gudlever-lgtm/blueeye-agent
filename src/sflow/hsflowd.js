@@ -26,6 +26,11 @@ const STATES = Object.freeze([
 
 const CONF_PATH = '/etc/hsflowd.conf';
 const SERVICE = 'hsflowd';
+// hsflowd is NOT in the Debian/Ubuntu archives — it ships from sflow.org. So we
+// build it from source (github.com/sflow/host-sflow) at enable time.
+const REPO_URL = 'https://github.com/sflow/host-sflow';
+const BUILD_DIR = '/usr/local/src/host-sflow';
+const BUILD_DEPS = ['git', 'build-essential', 'libpcap-dev'];
 const silentLogger = { info() {}, warn() {}, error() {} };
 
 // Wraps execFile so it NEVER rejects: callers branch on the resolved shape. A
@@ -84,13 +89,16 @@ function createHsflowdManager({
   runtime = 'unmanaged',
   logger = silentLogger,
   confPath = CONF_PATH,
+  repoUrl = REPO_URL,
+  buildDir = BUILD_DIR,
+  gitRef = null,
   installRetries = 3,
   retryDelayMs = 2000,
 } = {}) {
   const result = (state, detail = null) => ({ state, detail });
 
   async function isInstalled() {
-    const r = await exec('sh', ['-c', `command -v ${SERVICE} || test -x /usr/sbin/${SERVICE}`]);
+    const r = await exec('sh', ['-c', `command -v ${SERVICE} || test -x /usr/sbin/${SERVICE} || test -x /usr/local/sbin/${SERVICE}`]);
     return r.ok;
   }
 
@@ -118,20 +126,21 @@ function createHsflowdManager({
     }
   }
 
-  // apt-get install with retry on the dpkg lock. Returns { ok } on success or
-  // { ok:false, state, detail } on a terminal failure.
-  async function install() {
+  // apt-get install with retry on the dpkg lock. Returns { ok:true } or
+  // { ok:false, state, detail }. Used for hsflowd's BUILD dependencies (these
+  // ARE in apt) — not for hsflowd itself.
+  async function aptInstall(packages) {
     const haveApt = await exec('sh', ['-c', 'command -v apt-get']);
-    if (!haveApt.ok) return { ok: false, ...result('install_failed', 'apt-get is not available on this host') };
+    if (!haveApt.ok) return { ok: false, state: 'install_failed', detail: 'apt-get is not available on this host' };
 
     const env = { ...process.env, DEBIAN_FRONTEND: 'noninteractive' };
     let last = null;
     for (let attempt = 1; attempt <= installRetries; attempt += 1) {
       // eslint-disable-next-line no-await-in-loop
-      const r = await exec('apt-get', ['install', '-y', SERVICE], { env });
+      const r = await exec('apt-get', ['install', '-y', '--no-install-recommends', ...packages], { env });
       last = r;
-      if (r.ok) break;
-      if (isPermissionResult(r)) return { ok: false, ...result('permission_denied', 'apt-get install requires root') };
+      if (r.ok) return { ok: true };
+      if (isPermissionResult(r)) return { ok: false, state: 'permission_denied', detail: 'apt-get install requires root' };
       if (isDpkgLockResult(r) && attempt < installRetries) {
         logger.warn(`hsflowd: apt is locked, retrying (${attempt}/${installRetries})...`);
         // eslint-disable-next-line no-await-in-loop
@@ -140,9 +149,36 @@ function createHsflowdManager({
       }
       break; // some other apt failure — stop, do not loop
     }
-    // Verify by presence rather than trusting the exit code alone.
+    return { ok: false, state: 'install_failed', detail: firstLine(last && (last.stderr || last.stdout)) || 'apt-get install failed' };
+  }
+
+  // hsflowd is NOT packaged in Debian/Ubuntu — it ships from sflow.org. So build
+  // it from source: install the build deps (which ARE in apt), clone, then
+  // `make FEATURES="HOST PCAP"` (PCAP = packet sampling — the src/dst data, not
+  // just counters), `make install`, and `make schedule` to register the systemd
+  // service. Idempotent: an existing checkout/binary is reused. Returns
+  // { ok:true } or { ok:false, state, detail }.
+  async function install() {
+    const deps = await aptInstall(BUILD_DEPS);
+    if (!deps.ok) return deps;
+
+    // Reuse an existing checkout if present (so re-enable doesn't re-clone).
+    const branch = gitRef ? `--branch ${gitRef} ` : '';
+    const clone = await exec('sh', ['-c',
+      `test -d ${buildDir}/.git || git clone --depth 1 ${branch}${repoUrl} ${buildDir}`]);
+    if (isPermissionResult(clone)) return { ok: false, state: 'permission_denied', detail: 'cannot write the build directory' };
+    if (!clone.ok) return { ok: false, state: 'install_failed', detail: `git clone failed: ${firstLine(clone.stderr) || 'unknown'}` };
+
+    // FEATURES="HOST PCAP" -> one argv entry, so make sets FEATURES="HOST PCAP".
+    for (const step of [['FEATURES=HOST PCAP'], ['install'], ['schedule']]) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await exec('make', ['-C', buildDir, ...step]);
+      if (isPermissionResult(r)) return { ok: false, state: 'permission_denied', detail: `make ${step[step.length - 1]} failed` };
+      if (!r.ok) return { ok: false, state: 'install_failed', detail: `make ${step.join(' ')} failed: ${firstLine(r.stderr) || 'unknown'}` };
+    }
+
     if (await isInstalled()) return { ok: true };
-    return { ok: false, ...result('install_failed', firstLine(last && (last.stderr || last.stdout)) || 'apt-get install failed') };
+    return { ok: false, state: 'install_failed', detail: 'built hsflowd but the binary was not found' };
   }
 
   // Converge hsflowd to enabled+running with the given collector/sampling config.
