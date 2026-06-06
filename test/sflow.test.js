@@ -114,3 +114,29 @@ test('sFlow collector buffers and drains an aggregated snapshot', () => {
   c._feed(Buffer.from([0, 0, 0, 4]));
   assert.equal(c.drain().droppedDatagrams, 1);
 });
+
+test('sFlow collector stats() reports receive/decode counters without draining', () => {
+  const c = createSflowCollector();
+  // Before any traffic: not bound, nothing seen.
+  let s = c.stats();
+  assert.equal(s.listening, false);
+  assert.equal(s.datagrams, 0);
+  assert.equal(s.decodedFlows, 0);
+  assert.equal(s.lastDatagramAt, null);
+
+  c._feed(sflowDatagram({ samplingRate: 100, frameLength: 1000, raw: rawPacket(TCP) }));
+  c._feed(Buffer.from([0, 0, 0, 4])); // malformed -> dropped, still "seen"
+
+  s = c.stats();
+  assert.equal(s.datagrams, 1); // one parsed
+  assert.equal(s.dropped, 1); // one malformed
+  assert.equal(s.decodedFlows, 1); // one flow record decoded
+  assert.equal(s.bufferedFlows, 1); // not yet drained
+  assert.equal(typeof s.lastDatagramAt, 'string');
+
+  // stats() must NOT clear the buffer — a following drain still sees the flow.
+  assert.equal(c.drain().byPort.length, 1);
+  // Cumulative counters survive the drain; the buffer resets.
+  assert.equal(c.stats().decodedFlows, 1);
+  assert.equal(c.stats().bufferedFlows, 0);
+});

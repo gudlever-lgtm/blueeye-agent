@@ -5,6 +5,7 @@ const RUN_PROBE = /^run[\s_-]?probe$/i;
 const PING = /^ping$/i;
 const UPDATE = /^(update|self[\s_-]?update|upgrade)$/i;
 const SPEEDTEST = /^speed[\s_-]?test$/i;
+const DIAGNOSE = /^(diagnose|diag|doctor|self[\s_-]?check|health[\s_-]?check)$/i;
 
 function verbOf(command) {
   if (typeof command === 'string') return command.trim();
@@ -45,4 +46,11 @@ function isSpeedtestCommand(command) {
   return SPEEDTEST.test(verbOf(command));
 }
 
-module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand };
+// Recognises a diagnose command: { name: 'diagnose', id } — introspect the flow
+// pipeline (source, collector binding, datagrams/flows seen, exporter state) and
+// report it back so the dashboard can show where flows stop. Read-only.
+function isDiagnoseCommand(command) {
+  return DIAGNOSE.test(verbOf(command));
+}
+
+module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand };
