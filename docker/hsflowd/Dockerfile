@@ -10,12 +10,15 @@ FROM debian:bookworm-slim
 
 # Build deps + libpcap are kept in the image (hsflowd links libpcap at runtime).
 # Pin a release with HSFLOWD_REF at build time for reproducibility.
+# host-sflow builds its core with gcc and its modules with clang; FEATURES=PCAP
+# builds only the packet-sampling module (dependency: libpcap). FEATURES must be
+# passed to `install` too, or mod_pcap.so is not shipped.
 ARG HSFLOWD_REF=
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates build-essential libpcap-dev \
+ && apt-get install -y --no-install-recommends git ca-certificates build-essential clang libpcap-dev \
  && git clone --depth 1 ${HSFLOWD_REF:+--branch ${HSFLOWD_REF}} https://github.com/sflow/host-sflow /usr/local/src/host-sflow \
- && make -C /usr/local/src/host-sflow FEATURES="HOST PCAP" \
- && make -C /usr/local/src/host-sflow install \
+ && make -C /usr/local/src/host-sflow FEATURES="PCAP" \
+ && make -C /usr/local/src/host-sflow FEATURES="PCAP" install \
  && rm -rf /usr/local/src/host-sflow /var/lib/apt/lists/*
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

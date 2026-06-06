@@ -121,10 +121,10 @@ test('enable: builds hsflowd from source when missing, writes conf, enables+star
   assert.equal(writes.length, 1);
   assert.equal(writes[0][0], '/etc/hsflowd.conf');
   assert.match(writes[0][1], /sampling = 512/);
-  assert.ok(calls.some((c) => c.startsWith('apt-get install') && c.includes('libpcap-dev')), 'installs build deps');
+  assert.ok(calls.some((c) => c.startsWith('apt-get install') && c.includes('clang') && c.includes('libpcap-dev')), 'installs build deps incl. clang');
   assert.ok(calls.some((c) => c.includes('git clone') && c.includes('host-sflow')), 'clones host-sflow');
-  assert.ok(calls.some((c) => c.startsWith('make') && c.includes('FEATURES=HOST PCAP')), 'builds with the PCAP module');
-  assert.ok(calls.some((c) => c.startsWith('make') && c.includes(' install')), 'make install');
+  assert.ok(calls.some((c) => c.startsWith('make') && c.includes('FEATURES=PCAP')), 'builds the PCAP module only');
+  assert.ok(calls.some((c) => c.startsWith('make') && c.includes('FEATURES=PCAP') && c.includes(' install')), 'make install carries FEATURES so mod_pcap is installed');
   assert.ok(calls.some((c) => c.startsWith('make') && c.includes(' schedule')), 'make schedule (systemd unit)');
   assert.ok(calls.some((c) => c.includes('systemctl enable hsflowd')));
   assert.ok(calls.some((c) => c.includes('systemctl restart hsflowd')));

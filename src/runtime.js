@@ -183,21 +183,24 @@ function createAgentRuntime({
   // errors and reports a state instead).
   async function reconcileHsflowd() {
     const opts = sflowExporterOptions(monitorConfig);
+    let r = null;
     if (opts) {
-      const r = await hsflowd.enable(opts);
+      r = await hsflowd.enable(opts);
       hsflowdManaged = true;
-      lastHsflowdState = r;
-      logger.info(`hsflowd: ${r.state}${r.detail ? ` (${r.detail})` : ''}.`);
-      emitter.emit('hsflowd', r);
     } else if (hsflowdManaged) {
       // The source moved away from sflow (or the exporter was switched off) and
-      // we were managing it — stop it, but leave the package installed.
-      const r = await hsflowd.disable();
+      // we were managing it — stop it, but leave it installed for a fast re-enable.
+      r = await hsflowd.disable();
       hsflowdManaged = false;
-      lastHsflowdState = r;
-      logger.info(`hsflowd: ${r.state} (local sFlow exporter no longer requested).`);
-      emitter.emit('hsflowd', r);
     }
+    if (!r) return;
+    lastHsflowdState = r;
+    logger.info(`hsflowd: ${r.state}${r.detail ? ` (${r.detail})` : ''}.`);
+    emitter.emit('hsflowd', r);
+    // Report the observed state to the server (best-effort) so the dashboard can
+    // show whether the exporter actually came up after an enable/disable. If the
+    // socket isn't open it's re-sent on the next reconnect (reconcile runs then).
+    try { client.send({ type: 'sflow.status', state: r.state, detail: r.detail || null }); } catch { /* not connected */ }
   }
 
   function startReporting() {
