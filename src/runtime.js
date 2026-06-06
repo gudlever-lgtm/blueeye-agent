@@ -3,7 +3,7 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand } = require('./command');
 const { createSelfUpdater } = require('./selfUpdate');
 const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
@@ -97,6 +97,7 @@ function createAgentRuntime({
   const hsflowd = hsflowdManager || createHsflowdManager({ runtime: capabilities.managed, logger });
   let hsflowdManaged = false;
   let lastHsflowdState = null;
+  let lastReportAt = null; // ms epoch of the last successful results submission
 
   function handleFatal(reason = 'rest-token-rejected') {
     if (fatal) return;
@@ -113,6 +114,7 @@ function createAgentRuntime({
     try {
       const result = await runTest(command, { sampler: currentSampler });
       const response = await api.postResults([result]);
+      lastReportAt = Date.now();
       logger.info(`Traffic measured (${source}, ${monitorConfig.source}); results submitted.`);
       emitter.emit('results-submitted', { result, response, source });
       return true;
@@ -302,6 +304,34 @@ function createAgentRuntime({
   // — stop reporting + mark fatal — not just re-emit, so no timers linger.
   client.on('fatal', (reason) => handleFatal(reason));
 
+  // Snapshot of this agent's flow pipeline for the dashboard "Diagnose" action:
+  // the live monitor source, the collector's receive/decode counters (read
+  // WITHOUT draining them, so a diagnose never steals an interval's data), the
+  // local exporter state and when we last reported. Pure read of current state.
+  function buildDiagnostic() {
+    const stats = currentSampler && typeof currentSampler.stats === 'function' ? currentSampler.stats() : null;
+    const kind = currentSampler ? currentSampler.kind || null : null;
+    return {
+      agentVersion: capabilities.agentVersion,
+      managed: capabilities.managed,
+      source: monitorConfig.source,
+      sources: capabilities.sources,
+      intervalMs: effectiveIntervalMs,
+      lastReportAt: lastReportAt ? new Date(lastReportAt).toISOString() : null,
+      collector: stats ? { kind, ...stats } : null,
+      hsflowd: lastHsflowdState ? { state: lastHsflowdState.state, detail: lastHsflowdState.detail || null } : null,
+    };
+  }
+
+  // Replies to a server "diagnose" command with the snapshot above, so the
+  // dashboard can show, per agent, exactly where flows stop (source isn't a flow
+  // source, no datagrams arriving, datagrams but no flow samples, exporter down).
+  function handleDiagnose(command) {
+    const diagnostic = buildDiagnostic();
+    client.send({ type: 'command-result', id: command && command.id, ok: true, diagnostic });
+    emitter.emit('diagnosed', diagnostic);
+  }
+
   // Replies to a server "ping" with this agent's live identity, so the dashboard
   // can confirm the round-trip works (not just that a row says "online").
   function handlePing(command) {
@@ -371,6 +401,10 @@ function createAgentRuntime({
       handlePing(command);
       return;
     }
+    if (isDiagnoseCommand(command)) {
+      handleDiagnose(command);
+      return;
+    }
     if (isUpdateCommand(command)) {
       await handleUpdate(command);
       return;
@@ -420,6 +454,7 @@ function createAgentRuntime({
     runScheduledProbesNow: () => runScheduledProbes(),
     getMonitorConfig: () => monitorConfig,
     getHsflowdState: () => lastHsflowdState,
+    getDiagnostic: () => buildDiagnostic(),
     on: emitter.on.bind(emitter),
     once: emitter.once.bind(emitter),
   };
