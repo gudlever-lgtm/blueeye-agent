@@ -30,7 +30,14 @@ const SERVICE = 'hsflowd';
 // build it from source (github.com/sflow/host-sflow) at enable time.
 const REPO_URL = 'https://github.com/sflow/host-sflow';
 const BUILD_DIR = '/usr/local/src/host-sflow';
-const BUILD_DEPS = ['git', 'build-essential', 'libpcap-dev'];
+// host-sflow builds its core sFlow lib with gcc but its Linux modules with
+// clang, and links libpcap for the PCAP (packet-sampling) module.
+const BUILD_DEPS = ['git', 'build-essential', 'clang', 'libpcap-dev'];
+// Build ONLY the PCAP module — packet sampling, i.e. the src/dst flow data. The
+// "HOST" meta-feature pulls in KVM/OVS/NFLOG/DOCKER/DBUS and their heavy dev
+// dependencies (libvirt-dev, …), none of which we need: the agent already
+// reports interface counters, and core hsflowd still polls counters anyway.
+const BUILD_FEATURES = 'PCAP';
 const silentLogger = { info() {}, warn() {}, error() {} };
 
 // Wraps execFile so it NEVER rejects: callers branch on the resolved shape. A
@@ -169,8 +176,12 @@ function createHsflowdManager({
     if (isPermissionResult(clone)) return { ok: false, state: 'permission_denied', detail: 'cannot write the build directory' };
     if (!clone.ok) return { ok: false, state: 'install_failed', detail: `git clone failed: ${firstLine(clone.stderr) || 'unknown'}` };
 
-    // FEATURES="HOST PCAP" -> one argv entry, so make sets FEATURES="HOST PCAP".
-    for (const step of [['FEATURES=HOST PCAP'], ['install'], ['schedule']]) {
+    // FEATURES must be passed to EVERY target (build + install + schedule): the
+    // install target ships only the modules in the current feature set, so
+    // without it mod_pcap.so is never installed and hsflowd runs with no packet
+    // sampling. `make schedule` then installs+enables the systemd unit.
+    const feat = `FEATURES=${BUILD_FEATURES}`;
+    for (const step of [[feat], [feat, 'install'], [feat, 'schedule']]) {
       // eslint-disable-next-line no-await-in-loop
       const r = await exec('make', ['-C', buildDir, ...step]);
       if (isPermissionResult(r)) return { ok: false, state: 'permission_denied', detail: `make ${step[step.length - 1]} failed` };
