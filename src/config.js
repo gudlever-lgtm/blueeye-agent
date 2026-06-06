@@ -24,8 +24,14 @@ function toBool(envVal, fileVal, dflt) {
 // cd-ing into the install dir, so cwd must not decide where config lives — and if
 // cwd was deleted out from under the process (e.g. uninstall.sh removed it), even
 // reading process.cwd() throws (uv_cwd ENOENT) and startup dies before loading a
-// single setting. Mirrors how tokenPath is resolved below. Override with
-// BLUEEYE_AGENT_CONFIG.
+// single setting. Mirrors how tokenPath is resolved below.
+//
+// NB: under the versioned-release layout (`current` -> releases/<v> symlink),
+// __dirname resolves INTO the swappable release dir, so the systemd installer pins
+// BLUEEYE_AGENT_CONFIG to a stable state path (/var/lib/blueeye-agent) — otherwise
+// config persisted post-enroll (serverUrl / discovered cert fingerprint) would be
+// abandoned on the next atomic swap. The __dirname default is for the flat enroll
+// layout (/opt/blueeye-agent, no symlink), where it IS the stable dir.
 function configPathFrom(env) {
   return env.BLUEEYE_AGENT_CONFIG || path.join(__dirname, '..', 'blueeye-agent.config.json');
 }

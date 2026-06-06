@@ -21,11 +21,14 @@ ExecStart=/usr/bin/node /opt/blueeye-agent/current/src/index.js
 Restart=on-failure
 RestartSec=5
 
-# Provisioning. The token + action log live OUTSIDE the swappable release dir so
-# they survive updates. BLUEEYE_RELEASE_PUBLIC_KEY (base64-of-PEM) — the signed-
-# update trust anchor — is set via a drop-in by the installer.
+# Provisioning. The token, config and action log live OUTSIDE the swappable release
+# dir so they survive updates — ExecStart runs through the `current` symlink, so a
+# default config path would resolve into releases/<version>/ (build-release.sh
+# excludes the config) and be abandoned on the next atomic swap. BLUEEYE_RELEASE_-
+# PUBLIC_KEY (base64-of-PEM) — the signed-update trust anchor — is set via a drop-in.
 Environment=BLUEEYE_SERVER_URL=https://server.example
 Environment=BLUEEYE_TOKEN_PATH=/var/lib/blueeye-agent/token
+Environment=BLUEEYE_AGENT_CONFIG=/var/lib/blueeye-agent/config.json
 Environment=BLUEEYE_ACTION_LOG=/var/log/blueeye-agent/actions.log
 Environment=BLUEEYE_RELEASES_DIR=/opt/blueeye-agent/releases
 Environment=BLUEEYE_CURRENT_LINK=/opt/blueeye-agent/current
