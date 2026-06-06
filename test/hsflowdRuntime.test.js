@@ -41,12 +41,16 @@ test('a sflow+hsflowd monitor config makes the agent provision the local exporte
   });
   try {
     const reconciled = onceEvent(runtime, 'hsflowd');
+    const reported = server.waitForWsMessage((m) => m.type === 'sflow.status');
     runtime.start();
     const r = await withTimeout(reconciled, 4000, 'hsflowd never reconciled');
     assert.equal(r.state, 'active');
     assert.equal(mgr.calls.enable.length, 1);
     assert.deepEqual(mgr.calls.enable[0], { collectorPort: 6343, samplingRate: 512, pollingSecs: undefined, device: 'ens5' });
     assert.deepEqual(runtime.getHsflowdState(), { state: 'active', detail: null });
+    // The agent reports its exporter state to the server (status loop).
+    const status = await withTimeout(reported, 4000, 'no sflow.status reported');
+    assert.equal(status.state, 'active');
   } finally {
     runtime.stop();
     await server.close();
