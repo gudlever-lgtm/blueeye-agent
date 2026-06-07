@@ -14,7 +14,9 @@ set -euo pipefail
 # Optional env:
 #   BLUEEYE_INSTALL_DIR          (/opt/blueeye-agent)
 #   SERVICE_NAME                 (blueeye-agent)
-#   BLUEEYE_RELEASE_PUBLIC_KEY   base64-of-PEM — enables signed-update verification
+#   BLUEEYE_RELEASE_PUBLIC_KEY   PEM or base64-of-PEM — the release trust anchor for
+#                                signed self-updates. Optional: auto-fetched from the
+#                                server (GET /enroll/agent-release-key) when unset.
 
 SERVER_URL="${BLUEEYE_SERVER_URL:?set BLUEEYE_SERVER_URL (e.g. https://server.example)}"
 CODE="${BLUEEYE_ENROLLMENT_CODE:-}"
@@ -28,6 +30,17 @@ UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 [ "$(id -u)" = "0" ] || { echo "run with sudo (root)" >&2; exit 1; }
 command -v node >/dev/null || { echo "Node.js (>=20) is required" >&2; exit 1; }
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
+
+# Fail fast on a first install that can't get credentials: neither a stored token
+# nor a one-time enrollment code. Without one the agent exits 1 on every boot and
+# systemd's Restart= turns that into a crash-loop. (A token already present means a
+# prior enrollment succeeded, so a code-less re-run/upgrade is fine.)
+if [ -z "$CODE" ] && [ ! -f "$STATE_DIR/token" ]; then
+  echo "ERROR: no stored token at $STATE_DIR/token and no BLUEEYE_ENROLLMENT_CODE set." >&2
+  echo "       A first-time agent needs a one-time enrollment code from the dashboard:" >&2
+  echo "         BLUEEYE_SERVER_URL=$SERVER_URL BLUEEYE_ENROLLMENT_CODE=<code> sudo ./scripts/install-systemd.sh" >&2
+  exit 1
+fi
 
 mkdir -p "$RELEASES" "$STATE_DIR" "$LOG_DIR"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -55,10 +68,26 @@ mv -T "$INSTALL_DIR/current.next" "$INSTALL_DIR/current"
 # 3) Install the systemd unit (templated with the server URL).
 sed "s#https://server.example#${SERVER_URL}#g" "$DEST/deploy/blueeye-agent.service" > "$UNIT"
 
-# Embed the release trust anchor via a drop-in (keeps base64/PEM out of the unit).
-if [ -n "${BLUEEYE_RELEASE_PUBLIC_KEY:-}" ]; then
+# Pin the self-update restart target to THIS unit's name (selfUpdate defaults to
+# 'blueeye-agent'); only matters when SERVICE_NAME was overridden, but harmless otherwise.
+mkdir -p "${UNIT}.d"
+{ echo "[Service]"; echo "Environment=BLUEEYE_SERVICE_NAME=${SERVICE_NAME}"; } > "${UNIT}.d/00-service-name.conf"
+
+# Release trust anchor. Prefer an explicitly provided key; otherwise fetch it from
+# the server (public, not secret) so SIGNED self-updates verify with no manual
+# provisioning. Base64-encoded in the drop-in so a multi-line PEM stays on a single
+# Environment= line (the agent decodes base64-of-PEM).
+RELEASE_KEY="${BLUEEYE_RELEASE_PUBLIC_KEY:-}"
+[ -n "$RELEASE_KEY" ] || RELEASE_KEY="$(curl -fsSL "$SERVER_URL/enroll/agent-release-key" 2>/dev/null || true)"
+if [ -n "$RELEASE_KEY" ] && command -v base64 >/dev/null 2>&1; then
+  case "$RELEASE_KEY" in
+    *"BEGIN PUBLIC KEY"*) RELEASE_KEY="$(printf '%s' "$RELEASE_KEY" | base64 | tr -d '\n')" ;;
+  esac
   mkdir -p "${UNIT}.d"
-  { echo "[Service]"; echo "Environment=BLUEEYE_RELEASE_PUBLIC_KEY=${BLUEEYE_RELEASE_PUBLIC_KEY}"; } > "${UNIT}.d/10-release-key.conf"
+  { echo "[Service]"; echo "Environment=BLUEEYE_RELEASE_PUBLIC_KEY=${RELEASE_KEY}"; } > "${UNIT}.d/10-release-key.conf"
+  echo "Signed self-updates enabled (release key pinned)."
+else
+  echo "NOTE: no release public key available — signed self-updates will be refused until BLUEEYE_RELEASE_PUBLIC_KEY is set (or AGENT_RELEASE_PUBLIC_KEY is configured on the server)." >&2
 fi
 
 # Enroll on first install: the agent exchanges the one-time code for a token on

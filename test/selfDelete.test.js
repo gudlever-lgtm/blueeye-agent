@@ -47,3 +47,29 @@ test('remove() spawns a DETACHED uninstall.sh --yes with the right service + ins
   assert.match(spawned.args[1], /SERVICE_NAME='blueeye-agent'/);
   assert.match(spawned.args[1], /BLUEEYE_INSTALL_DIR='\/opt\/blueeye-agent'/);
 });
+
+test('remove() targets the install ROOT (parent of current) + state/log dirs from env', () => {
+  const prevLink = process.env.BLUEEYE_CURRENT_LINK;
+  const prevLog = process.env.BLUEEYE_ACTION_LOG;
+  process.env.BLUEEYE_CURRENT_LINK = '/opt/blueeye-agent/current';
+  process.env.BLUEEYE_ACTION_LOG = '/var/log/blueeye-agent/actions.log';
+  try {
+    let spawned = null;
+    const d = createSelfDeleter({
+      // installDir intentionally omitted -> derived from BLUEEYE_CURRENT_LINK's parent
+      tokenPath: '/var/lib/blueeye-agent/token',
+      uninstallPath: '/opt/blueeye-agent/current/uninstall.sh',
+      fsImpl: { existsSync: () => false },
+      spawnImpl: (cmd, args) => { spawned = { cmd, args }; return { unref() {} }; },
+      logger: { warn() {} },
+    });
+    d.remove();
+    // The install ROOT is the PARENT of the `current` symlink, never the release dir.
+    assert.match(spawned.args[1], /BLUEEYE_INSTALL_DIR='\/opt\/blueeye-agent'/);
+    assert.match(spawned.args[1], /BLUEEYE_STATE_DIR='\/var\/lib\/blueeye-agent'/);
+    assert.match(spawned.args[1], /BLUEEYE_LOG_DIR='\/var\/log\/blueeye-agent'/);
+  } finally {
+    if (prevLink === undefined) delete process.env.BLUEEYE_CURRENT_LINK; else process.env.BLUEEYE_CURRENT_LINK = prevLink;
+    if (prevLog === undefined) delete process.env.BLUEEYE_ACTION_LOG; else process.env.BLUEEYE_ACTION_LOG = prevLog;
+  }
+});
