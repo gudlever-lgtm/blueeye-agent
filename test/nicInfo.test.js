@@ -33,6 +33,24 @@ test('parseEthtoolInfo leaves missing/empty fields null', () => {
   assert.equal(info.busInfo, null);
 });
 
+test('parseEthtoolInfo treats N/A-style placeholders as absent', () => {
+  const info = parseEthtoolInfo('driver: bridge\nversion: N/A\nfirmware-version: N/A\nbus-info: N/A');
+  assert.equal(info.driver, 'bridge'); // a real name is kept
+  assert.equal(info.driverVersion, null);
+  assert.equal(info.firmwareVersion, null);
+  assert.equal(info.busInfo, null);
+});
+
+test('collectNicInfo drops a software bridge whose firmware is only "N/A"', async () => {
+  const nics = await collectNicInfo({
+    platform: 'linux',
+    listIfaces: async () => ['eth0', 'br0'],
+    runEthtool: async (iface) => (iface === 'eth0' ? ETHTOOL_ETH0 : 'driver: bridge\nfirmware-version: N/A\nbus-info: N/A'),
+    readSysfsId: async () => null,
+  });
+  assert.deepEqual(nics.map((n) => n.iface), ['eth0']);
+});
+
 test('collectNicInfo returns one entry per physical interface', async () => {
   const byIface = { eth0: ETHTOOL_ETH0, wlan0: ETHTOOL_WLAN0 };
   const nics = await collectNicInfo({

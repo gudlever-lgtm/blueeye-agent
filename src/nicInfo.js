@@ -19,6 +19,17 @@ const fs = require('fs');
 const ETHTOOL_TIMEOUT_MS = 4000;
 const MAX_FIELD = 256;
 
+// ethtool prints these placeholders for drivers that have no real value (e.g.
+// software bridges/veth report `firmware-version: N/A`). Treat them as absent so
+// a bridge with no bus/PCI id and no real firmware is dropped, not listed as a
+// "NIC" with firmware "N/A".
+const PLACEHOLDERS = new Set(['', 'n/a', 'na', 'none', 'unknown']);
+function cleanField(value) {
+  if (value == null) return null;
+  const t = String(value).trim();
+  return PLACEHOLDERS.has(t.toLowerCase()) ? null : t;
+}
+
 // Parses `ethtool -i <iface>` output (key: value lines) into the fields we keep.
 function parseEthtoolInfo(text) {
   const out = { driver: null, driverVersion: null, firmwareVersion: null, busInfo: null };
@@ -28,9 +39,9 @@ function parseEthtoolInfo(text) {
     const key = m[1].trim().toLowerCase();
     const value = m[2].trim();
     if (key === 'driver') out.driver = value || null;
-    else if (key === 'version') out.driverVersion = value || null;
-    else if (key === 'firmware-version') out.firmwareVersion = value || null;
-    else if (key === 'bus-info') out.busInfo = value || null;
+    else if (key === 'version') out.driverVersion = cleanField(value);
+    else if (key === 'firmware-version') out.firmwareVersion = cleanField(value);
+    else if (key === 'bus-info') out.busInfo = cleanField(value);
   }
   return out;
 }
