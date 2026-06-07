@@ -163,10 +163,20 @@ on how the agent is supervised — check with **Agents → Ping** in the dashboa
 `systemctl status blueeye-agent`).
 
 **systemd / Node — easiest is the dashboard** (Agents → **Update**, or
-Settings → Updates). Manually, in place — this mirrors the one-click flow:
+Settings → Updates); it downloads the published source, verifies its checksum,
+reinstalls deps and restarts the unit. To do the same by hand, verify the
+bundle against the server's published `X-Content-SHA256` header before
+extracting — the source endpoint is public (no token needed) and HTTPS already
+protects the transfer, but the checksum guards against a truncated/tampered
+bundle, mirroring the installer:
 
 ```bash
-curl -fsSL https://<server>/enroll/agent-source.tgz -o /tmp/agent.tgz
+# download the bundle + capture the server's published checksum (response header)
+curl -fsSL -D /tmp/agent.hdr https://<server>/enroll/agent-source.tgz -o /tmp/agent.tgz
+expected=$(awk 'tolower($1)=="x-content-sha256:"{print $2}' /tmp/agent.hdr | tr -d '\r')
+actual=$(sha256sum /tmp/agent.tgz | awk '{print $1}')
+[ "$expected" = "$actual" ] || { echo "checksum mismatch — aborting"; exit 1; }
+
 sudo tar -xzf /tmp/agent.tgz -C /opt/blueeye-agent
 cd /opt/blueeye-agent && sudo npm ci --omit=dev
 sudo systemctl restart blueeye-agent
