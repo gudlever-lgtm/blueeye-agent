@@ -18,7 +18,7 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 | Live channel | [`src/agentClient.js`](src/agentClient.js) — WebSocket to `/ws/agent` |
 | REST | [`src/apiClient.js`](src/apiClient.js) — Bearer-authenticated calls |
 | Traffic sources | proc · snmp · netflow · sflow (server picks per agent) |
-| Active probes | ping · tcp · dns · traceroute |
+| Active probes | ping · tcp · dns · traceroute · http |
 | Tests | `node --test` over [`test/`](test) against [`test-support/fakeServer.js`](test-support/fakeServer.js) |
 
 ## Boot sequence
@@ -40,7 +40,7 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 ```
                          ┌────────────────────────────────────────────┐
                          │            runtime.js (composition)          │
-   index.js  ── start ──▶│  • reportCapabilities → loadServerConfig     │
+   index.js  ── start ──▶│  • reportCapabilities (+NIC info) → loadCfg   │
    (boot/exit)           │  • startReporting (continuous, on interval)  │
                          │  • on command: run-test / run-probe          │
                          └───┬───────────────┬───────────────────┬──────┘
@@ -98,6 +98,8 @@ UDP packet ─▶ collector.js ─▶ parse ─▶ flow records ─▶ aggregate
 | [`netflow/aggregate.js`](src/netflow/aggregate.js) | Folds flow records into per-port/proto/talker summaries (shared by sflow). |
 | [`sflow/parse.js`](src/sflow/parse.js) | Parses sFlow v5 datagrams; scales sampled bytes by sampling rate. |
 | [`sflow/decodePacket.js`](src/sflow/decodePacket.js) | Decodes the sampled raw frame (Eth+IPv4/IPv6+TCP/UDP) to a 5-tuple. |
+| [`sflow/hsflowd.js`](src/sflow/hsflowd.js) | Self-managed hsflowd lifecycle (install/configure/start/stop + state machine) so a host exports sFlow to its own collector. Docker agents defer to the [hsflowd sidecar](docker/hsflowd). |
+| [`sflow/hsflowdConfig.js`](src/sflow/hsflowdConfig.js) | Renders `/etc/hsflowd.conf` (collector, sampling, polling, pcap device). |
 
 ## Active probes
 
@@ -111,10 +113,12 @@ a runner error resolves to an `ok:false` result stamped with `ts`.
 | `tcp` | [`probes/tcp.js`](src/probes/tcp.js) | times N connect-and-close attempts. |
 | `dns` | [`probes/dns.js`](src/probes/dns.js) | times N resolver lookups. |
 | `traceroute` | [`probes/traceroute.js`](src/probes/traceroute.js) | system `traceroute`/`tracert`, parses hops. |
+| `http` | [`probes/http.js`](src/probes/http.js) | `fetch`es a URL (metadata only); reports HTTP `status` + (https) TLS `certExpiryDays`. |
 | — | [`probes/stats.js`](src/probes/stats.js) | shared `clampInt`/`round`/`summarize`/`fail` helpers. |
 
 All probes return a normalized record: `{ type, target, ok, attempts, success,
-rttMs, minMs, maxMs, jitterMs, lossPct, ... }`.
+rttMs, minMs, maxMs, jitterMs, lossPct, ... }` (http adds `status` +
+`certExpiryDays`).
 
 ## Server API surface (the contract)
 
@@ -127,7 +131,7 @@ What the agent calls on **blueeye-server** (mirrored by the fake server):
 | `POST /agents/results` | [`apiClient.js`](src/apiClient.js) | traffic results. |
 | `POST /agents/probe-results` | [`apiClient.js`](src/apiClient.js) | probe results. |
 | `GET /agents/me/config` | [`apiClient.js`](src/apiClient.js) | returns `{ monitorConfig }` (which source to use). |
-| `POST /agents/me/capabilities` | [`apiClient.js`](src/apiClient.js) | reports `{ sources, agentVersion }` ([`capabilities.js`](src/capabilities.js)). |
+| `POST /agents/me/capabilities` | [`apiClient.js`](src/apiClient.js) | reports `{ sources, agentVersion, managed, nic }` — sources/version/runtime ([`capabilities.js`](src/capabilities.js)) plus the per-interface NIC driver/firmware inventory ([`nicInfo.js`](src/nicInfo.js), `ethtool -i` + sysfs; for fleet firmware-drift detection). |
 
 Server → agent commands ([`command.js`](src/command.js)):
 - **run-test** (`run[\s_-]?test`) → measure traffic + system, `POST /agents/results`.
@@ -139,7 +143,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `BLUEEYE_AGENT_CONFIG` | `./blueeye-agent.config.json` | config file path |
+| `BLUEEYE_AGENT_CONFIG` | `<install-dir>/blueeye-agent.config.json` | config file path |
 | `BLUEEYE_SERVER_URL` | `http://localhost:3000` | server base URL |
 | `BLUEEYE_ENROLLMENT_CODE` | — | one-time code (first start only) |
 | `BLUEEYE_TOKEN_PATH` | `<cfgdir>/.blueeye-agent/token` | token file (`0600`) |
@@ -178,7 +182,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | Concern | Files |
 | --- | --- |
 | Lifecycle / wiring | [`index.js`](src/index.js), [`runtime.js`](src/runtime.js), [`bootstrap.js`](src/bootstrap.js) |
-| Identity / config | [`config.js`](src/config.js), [`system.js`](src/system.js), [`tokenStore.js`](src/tokenStore.js), [`enroll.js`](src/enroll.js), [`capabilities.js`](src/capabilities.js) |
+| Identity / config | [`config.js`](src/config.js), [`system.js`](src/system.js), [`tokenStore.js`](src/tokenStore.js), [`enroll.js`](src/enroll.js), [`capabilities.js`](src/capabilities.js), [`nicInfo.js`](src/nicInfo.js) |
 | Transport | [`agentClient.js`](src/agentClient.js), [`apiClient.js`](src/apiClient.js), [`backoff.js`](src/backoff.js) |
 | Commands | [`command.js`](src/command.js) |
 | Measurement orchestration | [`testRunner.js`](src/testRunner.js), [`monitor.js`](src/monitor.js), [`systemMetrics.js`](src/systemMetrics.js) |

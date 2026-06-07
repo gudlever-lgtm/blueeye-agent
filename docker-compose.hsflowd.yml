@@ -1,0 +1,34 @@
+# hsflowd sidecar — runs the host sFlow exporter next to a host-networked agent,
+# so a host with no switch doing sFlow export still produces src/dst flow data
+# for the server's Destinations map.
+#
+# Prerequisites:
+#   • The agent runs with `--network host` (see docker-compose.host-agent.yml).
+#   • The agent's monitor source is set to "sflow" in the dashboard
+#     (Agents tab → Edit → Traffic source = sflow, port 6343).
+#
+# Usage (Linux host; set SFLOW_DEVICE to the host's main interface):
+#   SFLOW_DEVICE=eth0 docker compose -f docker-compose.hsflowd.yml up -d --build
+#
+# Both the agent and this sidecar share the host network namespace, so hsflowd's
+# 127.0.0.1:6343 reaches the agent's collector. Confirm packets are flowing with:
+#   sudo tcpdump -ni any udp port 6343
+services:
+  hsflowd:
+    build: ./docker/hsflowd
+    image: blueeye-hsflowd
+    container_name: blueeye-hsflowd
+    restart: unless-stopped
+    # Host networking: sample the host's real interfaces and reach the agent's
+    # collector on localhost (a sidecar in its own namespace would see neither).
+    network_mode: host
+    # Packet sampling needs raw-socket / admin capability on the host stack.
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      COLLECTOR_IP: "127.0.0.1"
+      COLLECTOR_PORT: "6343"
+      SAMPLING_RATE: "256"
+      POLLING_SECS: "20"
+      SFLOW_DEVICE: "${SFLOW_DEVICE:-eth0}"

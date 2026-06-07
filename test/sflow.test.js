@@ -60,6 +60,15 @@ function sflowDatagram({ samplingRate, frameLength, raw }) {
 
 function be(n) { const b = Buffer.alloc(4); b.writeUInt32BE(n >>> 0, 0); return b; }
 
+// An sFlow v5 datagram carrying a single COUNTER sample (sampleType 2) — the
+// "exporter is polling counters but NOT sampling packets" case (no flow records).
+function sflowCounterDatagram() {
+  const body = Buffer.alloc(16); // opaque counter body; the parser only counts it
+  const sample = Buffer.concat([be(2), be(body.length), body]); // sampleType=2
+  const head = Buffer.concat([be(5), be(1), Buffer.from([10, 0, 0, 1]), be(0), be(1), be(1000), be(1)]);
+  return Buffer.concat([head, sample]);
+}
+
 const TCP = { src: '10.0.0.5', dst: '93.184.216.34', srcPort: 50000, dstPort: 443, protocol: 6 };
 
 test('decodeSampledHeader extracts the 5-tuple from Ethernet+IPv4+TCP', () => {
@@ -94,6 +103,21 @@ test('parseSflow rejects an unsupported version', () => {
   assert.throws(() => parseSflow(bad));
 });
 
+test('parseSflow counts counter samples and decodes no flows from them', () => {
+  const { flows, counterSamples } = parseSflow(sflowCounterDatagram());
+  assert.equal(flows.length, 0);
+  assert.equal(counterSamples, 1);
+});
+
+test('sFlow collector stats() surfaces counter-only datagrams (datagrams up, 0 flows)', () => {
+  const c = createSflowCollector();
+  c._feed(sflowCounterDatagram());
+  const s = c.stats();
+  assert.equal(s.datagrams, 1);
+  assert.equal(s.decodedFlows, 0);
+  assert.equal(s.counterSamples, 1); // the "exporter sending counters only" signal
+});
+
 test('sFlow collector buffers and drains an aggregated snapshot', () => {
   const c = createSflowCollector();
   c._feed(sflowDatagram({ samplingRate: 100, frameLength: 1000, raw: rawPacket(TCP) }));
@@ -113,4 +137,30 @@ test('sFlow collector buffers and drains an aggregated snapshot', () => {
   // A malformed datagram is dropped, not thrown.
   c._feed(Buffer.from([0, 0, 0, 4]));
   assert.equal(c.drain().droppedDatagrams, 1);
+});
+
+test('sFlow collector stats() reports receive/decode counters without draining', () => {
+  const c = createSflowCollector();
+  // Before any traffic: not bound, nothing seen.
+  let s = c.stats();
+  assert.equal(s.listening, false);
+  assert.equal(s.datagrams, 0);
+  assert.equal(s.decodedFlows, 0);
+  assert.equal(s.lastDatagramAt, null);
+
+  c._feed(sflowDatagram({ samplingRate: 100, frameLength: 1000, raw: rawPacket(TCP) }));
+  c._feed(Buffer.from([0, 0, 0, 4])); // malformed -> dropped, still "seen"
+
+  s = c.stats();
+  assert.equal(s.datagrams, 1); // one parsed
+  assert.equal(s.dropped, 1); // one malformed
+  assert.equal(s.decodedFlows, 1); // one flow record decoded
+  assert.equal(s.bufferedFlows, 1); // not yet drained
+  assert.equal(typeof s.lastDatagramAt, 'string');
+
+  // stats() must NOT clear the buffer — a following drain still sees the flow.
+  assert.equal(c.drain().byPort.length, 1);
+  // Cumulative counters survive the drain; the buffer resets.
+  assert.equal(c.stats().decodedFlows, 1);
+  assert.equal(c.stats().bufferedFlows, 0);
 });
