@@ -1,0 +1,37 @@
+[Unit]
+Description=BlueEye monitoring agent
+Documentation=https://github.com/gudlever-lgtm/blueeye-agent
+After=network-online.target
+Wants=network-online.target
+# A burst of fast restarts (e.g. a bad release) is visible via `systemctl status`;
+# with the kept previous release, selfUpdate.rollback() restores the prior version.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Runs as root: a self-update restarts this service (systemctl) and a self-delete
+# removes the unit + /opt files — both need privileges. To run unprivileged
+# instead, add polkit rules for `systemctl restart/stop blueeye-agent` + sudo for
+# uninstall.sh, then set User=/Group= here.
+WorkingDirectory=/opt/blueeye-agent/current
+# Run from the `current` symlink so a signed update can ATOMICALLY swap the
+# release underneath without rewriting a live tree.
+ExecStart=/usr/bin/node /opt/blueeye-agent/current/src/index.js
+Restart=on-failure
+RestartSec=5
+
+# Provisioning. The token, config and action log live OUTSIDE the swappable release
+# dir so they survive updates — ExecStart runs through the `current` symlink, so a
+# default config path would resolve into releases/<version>/ (build-release.sh
+# excludes the config) and be abandoned on the next atomic swap. BLUEEYE_RELEASE_-
+# PUBLIC_KEY (base64-of-PEM) — the signed-update trust anchor — is set via a drop-in.
+Environment=BLUEEYE_SERVER_URL=https://server.example
+Environment=BLUEEYE_TOKEN_PATH=/var/lib/blueeye-agent/token
+Environment=BLUEEYE_AGENT_CONFIG=/var/lib/blueeye-agent/config.json
+Environment=BLUEEYE_ACTION_LOG=/var/log/blueeye-agent/actions.log
+Environment=BLUEEYE_RELEASES_DIR=/opt/blueeye-agent/releases
+Environment=BLUEEYE_CURRENT_LINK=/opt/blueeye-agent/current
+
+[Install]
+WantedBy=multi-user.target

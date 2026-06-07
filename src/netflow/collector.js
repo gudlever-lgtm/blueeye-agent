@@ -28,9 +28,13 @@ function createNetflowCollector({
   let buffer = [];
   let received = 0;
   let dropped = 0;
+  let decoded = 0; // cumulative flow records decoded (survives drain)
+  let lastAt = null; // ms epoch of the last packet seen (any packet)
+  let bound = false; // the UDP socket actually bound (vs failed/closed)
   const templates = new Map(); // v9/IPFIX template cache, persisted across packets
 
   function handlePacket(msg) {
+    lastAt = Date.now();
     let parsed;
     try {
       const version = Buffer.isBuffer(msg) && msg.length >= 2 ? msg.readUInt16BE(0) : 0;
@@ -40,6 +44,7 @@ function createNetflowCollector({
       logger.debug(`NetFlow: dropped a packet (${err.message})`);
       return;
     }
+    decoded += parsed.flows.length;
     for (const flow of parsed.flows) {
       if (buffer.length >= maxFlows) break; // backpressure: cap memory
       buffer.push(flow);
@@ -55,6 +60,7 @@ function createNetflowCollector({
       socket.once('error', reject);
       try {
         socket.bind(port, bindAddress, () => {
+          bound = true;
           logger.info(`NetFlow collector listening on ${bindAddress}:${port}`);
           resolve();
         });
@@ -77,12 +83,26 @@ function createNetflowCollector({
       try { socket.close(); } catch { /* ignore */ }
       socket = null;
     }
+    bound = false;
+  }
+
+  // Non-destructive health snapshot (does NOT clear the buffer) for the
+  // dashboard "Diagnose" action. Same shape as the sFlow collector's stats().
+  function stats() {
+    return {
+      listening: bound,
+      datagrams: received,
+      dropped,
+      decodedFlows: decoded,
+      bufferedFlows: buffer.length,
+      lastDatagramAt: lastAt ? new Date(lastAt).toISOString() : null,
+    };
   }
 
   // Exposed for tests: feed a raw packet as if it arrived over UDP.
   function _feed(msg) { handlePacket(msg); }
 
-  return { start, drain, stop, _feed, get bufferedFlows() { return buffer.length; } };
+  return { start, drain, stop, stats, _feed, get bufferedFlows() { return buffer.length; } };
 }
 
 module.exports = { createNetflowCollector };

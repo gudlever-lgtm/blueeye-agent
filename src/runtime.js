@@ -3,14 +3,19 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand } = require('./command');
 const { createSelfUpdater } = require('./selfUpdate');
+const { createSelfDeleter } = require('./selfDelete');
+const { createActionLog } = require('./actionLog');
+const { resolveReleasePublicKey } = require('./release/publicKey');
 const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
 const { runProbe } = require('./probes');
 const { resolveProbeTargets } = require('./probes/targets');
 const { createSampler } = require('./monitor');
+const { createHsflowdManager } = require('./sflow/hsflowd');
 const { detectCapabilities } = require('./capabilities');
+const { collectNicInfo } = require('./nicInfo');
 const { makePinnedFetch } = require('./httpsClient');
 
 // Hard cap on how many targets one scheduled cycle will probe, so a giant
@@ -25,6 +30,21 @@ function describeProbeOutcome(result) {
     return `${hops} hops`;
   }
   return `${result.rttMs ?? '?'} ms`;
+}
+
+// Derives the hsflowd exporter options from the monitor config, or null when a
+// local exporter isn't requested. A host self-provisions hsflowd only when the
+// source is sflow AND `sflow.hsflowd` is set (true, or an options object) — so
+// agents that receive sFlow from an external switch are unaffected.
+function sflowExporterOptions(mc) {
+  if (!mc || mc.source !== 'sflow' || !mc.sflow || !mc.sflow.hsflowd) return null;
+  const h = typeof mc.sflow.hsflowd === 'object' ? mc.sflow.hsflowd : {};
+  return {
+    collectorPort: Number.isInteger(mc.sflow.port) ? mc.sflow.port : 6343,
+    samplingRate: h.samplingRate,
+    pollingSecs: h.pollingSecs,
+    device: h.device,
+  };
 }
 
 // Ties the WebSocket client and the REST client together:
@@ -48,10 +68,21 @@ function createAgentRuntime({
   capabilities = detectCapabilities(),
   probeRunner = runProbe,
   resolveTargets = resolveProbeTargets,
+  collectNic = collectNicInfo,
   selfUpdater = null,
+  selfDeleter = null,
+  actionLog = null,
+  hsflowdManager = null,
 }) {
   const emitter = new EventEmitter();
   const updater = selfUpdater || createSelfUpdater({ logger });
+  const deleter = selfDeleter || createSelfDeleter({ logger });
+  // Local, server-independent action trail. Path comes from the env at
+  // provisioning (BLUEEYE_ACTION_LOG); a no-op when unset. Never logs secrets.
+  const actions = actionLog || createActionLog({ path: process.env.BLUEEYE_ACTION_LOG || '' });
+  // The agent's release trust anchor — used to verify a signed update before it
+  // touches disk. Resolved once at startup.
+  const releasePublicKey = resolveReleasePublicKey();
   // When a cert fingerprint is configured and the server is https, pin it on the
   // REST calls too (the WS client pins separately). Falls back to the injected
   // fetch (or global fetch) otherwise — so tests that inject a fetch are unaffected.
@@ -74,6 +105,13 @@ function createAgentRuntime({
   let monitorConfig = { source: 'proc' };
   let currentSampler = samplerFactory(monitorConfig, { logger });
   let effectiveIntervalMs = config.reportIntervalMs;
+  // Self-managed host sFlow exporter (hsflowd). Only acts when the monitor
+  // source is sflow with a local exporter requested; on a containerised agent it
+  // defers to the hsflowd sidecar.
+  const hsflowd = hsflowdManager || createHsflowdManager({ runtime: capabilities.managed, logger });
+  let hsflowdManaged = false;
+  let lastHsflowdState = null;
+  let lastReportAt = null; // ms epoch of the last successful results submission
 
   function handleFatal(reason = 'rest-token-rejected') {
     if (fatal) return;
@@ -90,6 +128,7 @@ function createAgentRuntime({
     try {
       const result = await runTest(command, { sampler: currentSampler });
       const response = await api.postResults([result]);
+      lastReportAt = Date.now();
       logger.info(`Traffic measured (${source}, ${monitorConfig.source}); results submitted.`);
       emitter.emit('results-submitted', { result, response, source });
       return true;
@@ -122,11 +161,20 @@ function createAgentRuntime({
     }
   }
 
-  // Reports capabilities to the server. Resilient: only a 401 is fatal.
+  // Reports capabilities to the server. Resilient: only a 401 is fatal. NIC
+  // inventory (driver/firmware per interface) is collected best-effort and
+  // folded in, so the server can spot fleet-wide firmware drift; a failure to
+  // read it just omits the field.
   async function reportCapabilities() {
+    let payload = capabilities;
     try {
-      await api.postCapabilities(capabilities);
-      logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}`);
+      const nic = await collectNic();
+      if (Array.isArray(nic) && nic.length) payload = { ...capabilities, nic };
+    } catch { /* NIC inventory is best-effort */ }
+    try {
+      await api.postCapabilities(payload);
+      const nicNote = payload.nic ? ` + ${payload.nic.length} NIC(s)` : '';
+      logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}${nicNote}`);
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not report capabilities (${err.message}).`);
@@ -147,10 +195,37 @@ function createAgentRuntime({
         Number.isInteger(mc.intervalMs) && mc.intervalMs > 0 ? mc.intervalMs : config.reportIntervalMs;
       logger.info(`Monitor source: ${monitorConfig.source} (report every ${effectiveIntervalMs}ms).`);
       emitter.emit('config', monitorConfig);
+      await reconcileHsflowd();
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not fetch monitor config (${err.message}); using ${monitorConfig.source}.`);
     }
+  }
+
+  // Converges the local hsflowd exporter to the server's desired state. Runs on
+  // every config load — i.e. at startup and on each WS reconnect — so the host
+  // re-reconciles whenever it reconnects. Never throws (the manager swallows OS
+  // errors and reports a state instead).
+  async function reconcileHsflowd() {
+    const opts = sflowExporterOptions(monitorConfig);
+    let r = null;
+    if (opts) {
+      r = await hsflowd.enable(opts);
+      hsflowdManaged = true;
+    } else if (hsflowdManaged) {
+      // The source moved away from sflow (or the exporter was switched off) and
+      // we were managing it — stop it, but leave it installed for a fast re-enable.
+      r = await hsflowd.disable();
+      hsflowdManaged = false;
+    }
+    if (!r) return;
+    lastHsflowdState = r;
+    logger.info(`hsflowd: ${r.state}${r.detail ? ` (${r.detail})` : ''}.`);
+    emitter.emit('hsflowd', r);
+    // Report the observed state to the server (best-effort) so the dashboard can
+    // show whether the exporter actually came up after an enable/disable. If the
+    // socket isn't open it's re-sent on the next reconnect (reconcile runs then).
+    try { client.send({ type: 'sflow.status', state: r.state, detail: r.detail || null }); } catch { /* not connected */ }
   }
 
   function startReporting() {
@@ -252,6 +327,34 @@ function createAgentRuntime({
   // — stop reporting + mark fatal — not just re-emit, so no timers linger.
   client.on('fatal', (reason) => handleFatal(reason));
 
+  // Snapshot of this agent's flow pipeline for the dashboard "Diagnose" action:
+  // the live monitor source, the collector's receive/decode counters (read
+  // WITHOUT draining them, so a diagnose never steals an interval's data), the
+  // local exporter state and when we last reported. Pure read of current state.
+  function buildDiagnostic() {
+    const stats = currentSampler && typeof currentSampler.stats === 'function' ? currentSampler.stats() : null;
+    const kind = currentSampler ? currentSampler.kind || null : null;
+    return {
+      agentVersion: capabilities.agentVersion,
+      managed: capabilities.managed,
+      source: monitorConfig.source,
+      sources: capabilities.sources,
+      intervalMs: effectiveIntervalMs,
+      lastReportAt: lastReportAt ? new Date(lastReportAt).toISOString() : null,
+      collector: stats ? { kind, ...stats } : null,
+      hsflowd: lastHsflowdState ? { state: lastHsflowdState.state, detail: lastHsflowdState.detail || null } : null,
+    };
+  }
+
+  // Replies to a server "diagnose" command with the snapshot above, so the
+  // dashboard can show, per agent, exactly where flows stop (source isn't a flow
+  // source, no datagrams arriving, datagrams but no flow samples, exporter down).
+  function handleDiagnose(command) {
+    const diagnostic = buildDiagnostic();
+    client.send({ type: 'command-result', id: command && command.id, ok: true, diagnostic });
+    emitter.emit('diagnosed', diagnostic);
+  }
+
   // Replies to a server "ping" with this agent's live identity, so the dashboard
   // can confirm the round-trip works (not just that a row says "online").
   function handlePing(command) {
@@ -272,29 +375,78 @@ function createAgentRuntime({
   // unmanaged agents decline; their host rebuilds them.
   async function handleUpdate(command) {
     const managed = capabilities.managed;
+    const auditId = command && command.auditId;
     if (managed !== 'systemd') {
       const reason = managed === 'docker' ? 'docker-managed' : 'unmanaged';
       client.send({ type: 'ack', id: command && command.id, accepted: false, runtime: managed || 'unmanaged', reason });
+      actions.log('update.declined', { runtime: managed || 'unmanaged', reason });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'upgrade', ok: false, detail: reason });
       logger.warn(`Ignoring update command: runtime '${managed}' is not self-updatable (systemd only).`);
       emitter.emit('update-skipped', { managed, reason });
       return;
     }
     client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: 'systemd' });
-    logger.info('Update accepted; downloading and rebuilding from the server source...');
+    const targetVersion = (command && command.version) || null;
+    const signed = !!(command && command.signature);
+    actions.log('update.start', { version: targetVersion, signed });
+    logger.info(`Update accepted; downloading and ${signed ? 'verifying the signed release' : 'rebuilding from the server source'}...`);
     try {
       await updater.update({
         serverUrl: config.serverUrl,
         token,
         expectedSha: command && command.sha256,
+        expectedVersion: targetVersion,
+        signature: command && command.signature,
+        publicKey: releasePublicKey,
         fetchImpl: effectiveFetch,
       });
+      actions.log('update.applied', { version: targetVersion });
       logger.info('Update applied; requesting service restart.');
+      // Report completion BEFORE restarting — once systemd swaps us we can't speak.
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'upgrade', ok: true, version: targetVersion });
       emitter.emit('update-applied');
       updater.restart(); // systemd stops us (SIGTERM -> graceful exit) then starts the new code
     } catch (err) {
+      actions.log('update.failed', { version: targetVersion, error: err.message });
       logger.error(`Self-update failed: ${err.message}`);
       client.send({ type: 'command-result', id: command && command.id, ok: false, error: err.message });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'upgrade', ok: false, detail: err.message });
       emitter.emit('update-error', err);
+    }
+  }
+
+  // Handles a server "delete" command: remove this agent from the host. The agent
+  // securely wipes its token and runs the shipped uninstall.sh (detached) to stop
+  // its service and delete its files. It reports 'completed' to the server FIRST
+  // (so the server can finalise the audit row + drop the agent record) because
+  // afterwards it has neither token nor process. Docker agents decline (the host
+  // removes the container).
+  async function handleDelete(command) {
+    const managed = capabilities.managed;
+    const auditId = command && command.auditId;
+    if (managed === 'docker') {
+      client.send({ type: 'ack', id: command && command.id, accepted: false, runtime: 'docker', reason: 'docker-managed' });
+      actions.log('delete.declined', { runtime: 'docker' });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'delete', ok: false, detail: 'docker-managed' });
+      logger.warn("Ignoring delete command: runtime 'docker' removes itself via the host.");
+      emitter.emit('delete-skipped', { reason: 'docker-managed' });
+      return;
+    }
+    client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: managed || 'unmanaged' });
+    actions.log('delete.start', {});
+    logger.warn('Delete accepted; wiping token and removing this agent from the host.');
+    try {
+      deleter.wipeToken();
+      actions.log('delete.token-wiped', {});
+      // Tell the server we're done BEFORE the detached removal stops us.
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'delete', ok: true });
+      emitter.emit('delete-applied');
+      deleter.remove(); // detached: sleeps briefly, then stops the service + removes files
+    } catch (err) {
+      actions.log('delete.failed', { error: err.message });
+      logger.error(`Self-delete failed: ${err.message}`);
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'delete', ok: false, detail: err.message });
+      emitter.emit('delete-error', err);
     }
   }
 
@@ -321,8 +473,16 @@ function createAgentRuntime({
       handlePing(command);
       return;
     }
+    if (isDiagnoseCommand(command)) {
+      handleDiagnose(command);
+      return;
+    }
     if (isUpdateCommand(command)) {
       await handleUpdate(command);
+      return;
+    }
+    if (isDeleteCommand(command)) {
+      await handleDelete(command);
       return;
     }
     if (isSpeedtestCommand(command)) {
@@ -369,6 +529,8 @@ function createAgentRuntime({
     reportNow: () => runAndSubmit({ name: 'auto-report', intervalMs: config.reportSampleMs }, 'manual'),
     runScheduledProbesNow: () => runScheduledProbes(),
     getMonitorConfig: () => monitorConfig,
+    getHsflowdState: () => lastHsflowdState,
+    getDiagnostic: () => buildDiagnostic(),
     on: emitter.on.bind(emitter),
     once: emitter.once.bind(emitter),
   };

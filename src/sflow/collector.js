@@ -21,8 +21,13 @@ function createSflowCollector({
   let buffer = [];
   let received = 0;
   let dropped = 0;
+  let decoded = 0; // cumulative flow records decoded (survives drain)
+  let counterSamples = 0; // cumulative counter samples seen (carry no flow data)
+  let lastAt = null; // ms epoch of the last datagram seen (any datagram)
+  let bound = false; // the UDP socket actually bound (vs failed/closed)
 
   function handlePacket(msg) {
+    lastAt = Date.now();
     let parsed;
     try {
       parsed = parseSflow(msg);
@@ -31,6 +36,8 @@ function createSflowCollector({
       logger.debug(`sFlow: dropped a datagram (${err.message})`);
       return;
     }
+    decoded += parsed.flows.length;
+    counterSamples += parsed.counterSamples || 0;
     for (const flow of parsed.flows) {
       if (buffer.length >= maxFlows) break;
       buffer.push(flow);
@@ -46,6 +53,7 @@ function createSflowCollector({
       socket.once('error', reject);
       try {
         socket.bind(port, bindAddress, () => {
+          bound = true;
           logger.info(`sFlow collector listening on ${bindAddress}:${port}`);
           resolve();
         });
@@ -67,11 +75,27 @@ function createSflowCollector({
       try { socket.close(); } catch { /* ignore */ }
       socket = null;
     }
+    bound = false;
+  }
+
+  // Non-destructive health snapshot (does NOT clear the buffer) for the
+  // dashboard "Diagnose" action: is the socket bound, how many datagrams have
+  // arrived, how many flow records we decoded, and when we last heard anything.
+  function stats() {
+    return {
+      listening: bound,
+      datagrams: received,
+      dropped,
+      decodedFlows: decoded,
+      counterSamples,
+      bufferedFlows: buffer.length,
+      lastDatagramAt: lastAt ? new Date(lastAt).toISOString() : null,
+    };
   }
 
   function _feed(msg) { handlePacket(msg); }
 
-  return { start, drain, stop, _feed, get bufferedFlows() { return buffer.length; } };
+  return { start, drain, stop, stats, _feed, get bufferedFlows() { return buffer.length; } };
 }
 
 module.exports = { createSflowCollector };

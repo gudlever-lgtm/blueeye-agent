@@ -10,11 +10,15 @@ const { silentLogger } = require('./logger');
 // background and drain() its aggregated snapshot each interval. Carries a
 // .stop() for the socket lifecycle. A failed start (e.g. the UDP port is in
 // use) is logged rather than swallowed.
-function collectorSampler(collector, logger) {
+function collectorSampler(collector, logger, kind) {
   Promise.resolve(collector.start()).catch((err) =>
     logger.warn(`flow collector failed to start: ${err.message}`));
   const sampler = async () => collector.drain();
   sampler.stop = () => collector.stop();
+  // Surfaced by the runtime's "diagnose" handler so the dashboard can show the
+  // collector's live receive/decode counters without draining them.
+  sampler.kind = kind;
+  sampler.stats = () => (typeof collector.stats === 'function' ? collector.stats() : null);
   return sampler;
 }
 
@@ -44,12 +48,12 @@ function createSampler(
 
   if (cfg.source === 'netflow') {
     const nf = cfg.netflow || {};
-    return collectorSampler(netflowFactory({ port: nf.port || 2055, bindAddress: nf.bindAddress || '0.0.0.0' }), logger);
+    return collectorSampler(netflowFactory({ port: nf.port || 2055, bindAddress: nf.bindAddress || '0.0.0.0' }), logger, 'netflow');
   }
 
   if (cfg.source === 'sflow') {
     const sf = cfg.sflow || {};
-    return collectorSampler(sflowFactory({ port: sf.port || 6343, bindAddress: sf.bindAddress || '0.0.0.0' }), logger);
+    return collectorSampler(sflowFactory({ port: sf.port || 6343, bindAddress: sf.bindAddress || '0.0.0.0' }), logger, 'sflow');
   }
 
   return ({ intervalMs }) => sampleTraffic({ intervalMs });

@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseConfiguredTargets, gatewayFromProcRoute, nameserversFromResolv, resolveProbeTargets } = require('../src/probes/targets');
+const { parseConfiguredTargets, gatewayFromProcRoute, defaultRouteInterface, nameserversFromResolv, resolveProbeTargets } = require('../src/probes/targets');
 
 test('parseConfiguredTargets parses the common forms', () => {
   assert.deepEqual(
@@ -35,6 +35,17 @@ test('gatewayFromProcRoute decodes the default-route gateway (little-endian hex)
   ].join('\n');
   assert.equal(gatewayFromProcRoute(route), '192.168.0.1');
   assert.equal(gatewayFromProcRoute('Iface\tDestination\tGateway\n'), null);
+});
+
+test('defaultRouteInterface returns the NIC of the default route (Iface column)', () => {
+  const route = [
+    'Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask',
+    'ens3\t0000A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF', // subnet route — skipped
+    'ens3\t00000000\t0100A8C0\t0003\t0\t0\t0\t00000000', // default route
+  ].join('\n');
+  assert.equal(defaultRouteInterface(route), 'ens3');
+  assert.equal(defaultRouteInterface('Iface\tDestination\tGateway\n'), null); // header only
+  assert.equal(defaultRouteInterface(''), null);
 });
 
 test('nameserversFromResolv extracts non-loopback nameservers, de-duplicated', () => {
