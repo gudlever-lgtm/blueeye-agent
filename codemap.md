@@ -40,7 +40,7 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 ```
                          ┌────────────────────────────────────────────┐
                          │            runtime.js (composition)          │
-   index.js  ── start ──▶│  • reportCapabilities → loadServerConfig     │
+   index.js  ── start ──▶│  • reportCapabilities (+NIC info) → loadCfg   │
    (boot/exit)           │  • startReporting (continuous, on interval)  │
                          │  • on command: run-test / run-probe          │
                          └───┬───────────────┬───────────────────┬──────┘
@@ -131,7 +131,7 @@ What the agent calls on **blueeye-server** (mirrored by the fake server):
 | `POST /agents/results` | [`apiClient.js`](src/apiClient.js) | traffic results. |
 | `POST /agents/probe-results` | [`apiClient.js`](src/apiClient.js) | probe results. |
 | `GET /agents/me/config` | [`apiClient.js`](src/apiClient.js) | returns `{ monitorConfig }` (which source to use). |
-| `POST /agents/me/capabilities` | [`apiClient.js`](src/apiClient.js) | reports `{ sources, agentVersion }` ([`capabilities.js`](src/capabilities.js)). |
+| `POST /agents/me/capabilities` | [`apiClient.js`](src/apiClient.js) | reports `{ sources, agentVersion, managed, nic }` — sources/version/runtime ([`capabilities.js`](src/capabilities.js)) plus the per-interface NIC driver/firmware inventory ([`nicInfo.js`](src/nicInfo.js), `ethtool -i` + sysfs; for fleet firmware-drift detection). |
 
 Server → agent commands ([`command.js`](src/command.js)):
 - **run-test** (`run[\s_-]?test`) → measure traffic + system, `POST /agents/results`.
@@ -182,7 +182,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | Concern | Files |
 | --- | --- |
 | Lifecycle / wiring | [`index.js`](src/index.js), [`runtime.js`](src/runtime.js), [`bootstrap.js`](src/bootstrap.js) |
-| Identity / config | [`config.js`](src/config.js), [`system.js`](src/system.js), [`tokenStore.js`](src/tokenStore.js), [`enroll.js`](src/enroll.js), [`capabilities.js`](src/capabilities.js) |
+| Identity / config | [`config.js`](src/config.js), [`system.js`](src/system.js), [`tokenStore.js`](src/tokenStore.js), [`enroll.js`](src/enroll.js), [`capabilities.js`](src/capabilities.js), [`nicInfo.js`](src/nicInfo.js) |
 | Transport | [`agentClient.js`](src/agentClient.js), [`apiClient.js`](src/apiClient.js), [`backoff.js`](src/backoff.js) |
 | Commands | [`command.js`](src/command.js) |
 | Measurement orchestration | [`testRunner.js`](src/testRunner.js), [`monitor.js`](src/monitor.js), [`systemMetrics.js`](src/systemMetrics.js) |

@@ -17,6 +17,17 @@ function withTimeout(promise, ms, message) {
 }
 const onceEvent = (emitter, name) => new Promise((resolve) => emitter.once(name, resolve));
 
+// Polls until a predicate holds (capabilities are posted independently of the
+// 'config' event, so assert on their arrival rather than racing the WS open).
+async function waitFor(pred, ms = 4000, message = 'condition not met') {
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    if (pred()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error(message);
+}
+
 const baseConfig = (server) => ({
   serverUrl: server.url,
   heartbeatMs: 10000,
@@ -38,9 +49,51 @@ test('agent reports its capabilities to the server on start', async () => {
   });
   try {
     runtime.start();
-    await withTimeout(onceEvent(runtime, 'config'), 4000, 'no config event');
-    assert.equal(server.receivedCapabilities.length >= 1, true);
+    await waitFor(() => server.receivedCapabilities.length >= 1, 4000, 'no capabilities reported');
     assert.deepEqual(server.receivedCapabilities[0].sources, ['proc', 'snmp']);
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});
+
+test('agent folds collected NIC info into the capabilities report', async () => {
+  const server = await startFakeServer({ validTokens: ['valid'] });
+  const runtime = createAgentRuntime({
+    config: baseConfig(server),
+    token: 'valid',
+    agentId: 1,
+    logger: silentLogger,
+    capabilities: fixedCaps,
+    collectNic: async () => [{ iface: 'wlan0', driver: 'iwlwifi', firmwareVersion: '83.20428e91.0' }],
+  });
+  try {
+    runtime.start();
+    await waitFor(() => server.receivedCapabilities.length >= 1, 4000, 'no capabilities reported');
+    const caps = server.receivedCapabilities[0];
+    assert.deepEqual(caps.sources, ['proc', 'snmp']);
+    assert.equal(Array.isArray(caps.nic), true);
+    assert.equal(caps.nic[0].firmwareVersion, '83.20428e91.0');
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});
+
+test('a failing NIC collection still reports capabilities (no nic field)', async () => {
+  const server = await startFakeServer({ validTokens: ['valid'] });
+  const runtime = createAgentRuntime({
+    config: baseConfig(server),
+    token: 'valid',
+    agentId: 1,
+    logger: silentLogger,
+    capabilities: fixedCaps,
+    collectNic: async () => { throw new Error('ethtool exploded'); },
+  });
+  try {
+    runtime.start();
+    await waitFor(() => server.receivedCapabilities.length >= 1, 4000, 'no capabilities reported');
+    assert.equal(server.receivedCapabilities[0].nic, undefined);
   } finally {
     runtime.stop();
     await server.close();
