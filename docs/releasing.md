@@ -16,10 +16,12 @@ node blueeye-licens/scripts/generate-signing-key.js
 
 - Keep the printed **private** key (`AGENT_RELEASE_SIGNING_KEY`, base64 PKCS8 PEM)
   on the build host / CI secret store. It NEVER ships.
-- Provision the **public** key (SPKI PEM, or base64-of-PEM) to:
-  - the server: `AGENT_RELEASE_PUBLIC_KEY` (used by `POST /agents/releases`), and
-  - the agent: `BLUEEYE_RELEASE_PUBLIC_KEY` (a systemd drop-in; the installer sets
-    it). It can also be embedded in `src/release/publicKey.js`.
+- Provision the **public** key (SPKI PEM, or base64-of-PEM) to the server:
+  `AGENT_RELEASE_PUBLIC_KEY` (used by `POST /agents/releases`). The agent then gets
+  it **automatically**: the server serves it at `GET /enroll/agent-release-key`, and
+  both installers (the one-liner and `install-systemd.sh`) fetch + pin it as a
+  systemd drop-in. Override per-host with `BLUEEYE_RELEASE_PUBLIC_KEY` if needed; it
+  can also be embedded in `src/release/publicKey.js`.
 
 Both sides fail **closed** without it: the server refuses uploads (503), the
 agent refuses signed updates.
@@ -61,23 +63,29 @@ extracting**, swaps atomically, restarts, and reports completion (the audit row
 flips to `completed`). Every action is in `GET /agents/:id/audit` and
 `GET /audit?user=`.
 
-## 4. Install on a fresh host (systemd, not Docker)
+## 4. Install on a fresh host
+
+The customer one-liner (`curl -sSL <server>/enroll/<code>/install.sh | sh`) and the
+manual installer below produce the **same versioned layout**, so install / upgrade /
+uninstall behave identically. The release public key is fetched from the server
+automatically — you normally don't pass it:
 
 ```bash
 BLUEEYE_SERVER_URL=https://server.example \
 BLUEEYE_ENROLLMENT_CODE=<one-time-code> \
-BLUEEYE_RELEASE_PUBLIC_KEY=<base64-of-pem> \
 sudo ./scripts/install-systemd.sh
 ```
 
 Lays out `/opt/blueeye-agent/releases/<v>` + a `current` symlink and installs
 `blueeye-agent.service` (running from `current`). The token lives at
 `/var/lib/blueeye-agent/token`, the local trail at
-`/var/log/blueeye-agent/actions.log` — both outside the swappable release dir.
+`/var/log/blueeye-agent/actions.log` — both outside the swappable release dir, so
+updates never touch them. (Override the trust anchor per-host with
+`BLUEEYE_RELEASE_PUBLIC_KEY` if you don't serve it from the server.)
 
-> Existing agents must be re-installed **once** onto this layout before
-> symlink-swap updates take over. Until then the agent still verifies signatures
-> and updates in place.
+> Agents installed the OLD flat way must be re-installed **once** onto this layout
+> before symlink-swap updates take over. Until then the agent still verifies
+> signatures and updates in place.
 
 ## 5. Rollback
 

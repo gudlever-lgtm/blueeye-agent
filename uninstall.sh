@@ -4,9 +4,9 @@ set -euo pipefail
 # BlueEye agent uninstaller — removes the agent from THIS machine.
 #
 # Auto-detects how the agent was installed and removes it:
-#   - systemd service (Node install): stop + disable + delete the unit
+#   - systemd service (Node install): stop + disable + delete the unit + drop-ins
 #   - Docker container (Docker install): stop + remove the container
-#   - the install directory (incl. the stored enrollment token)
+#   - the install dir, the state dir (token/config) and the log dir
 #
 # It WARNS and asks for confirmation first (use --yes to skip the prompt).
 #
@@ -15,7 +15,7 @@ set -euo pipefail
 #   sudo ./uninstall.sh --yes      # no prompt
 #   sudo ./uninstall.sh --purge    # also remove the Docker image + token volume
 #
-# Env overrides: SERVICE_NAME, BLUEEYE_INSTALL_DIR, CONTAINER, IMAGE, TOKEN_VOLUME
+# Env overrides: SERVICE_NAME, BLUEEYE_INSTALL_DIR, BLUEEYE_STATE_DIR, BLUEEYE_LOG_DIR, CONTAINER, IMAGE, TOKEN_VOLUME
 #
 # NOTE: this removes the agent locally only. To remove it from the BlueEye
 # server's list too, open the dashboard -> Agents -> Delete.
@@ -26,6 +26,8 @@ CONTAINER="${CONTAINER:-blueeye-agent}"
 IMAGE="${IMAGE:-blueeye-agent}"
 TOKEN_VOLUME="${TOKEN_VOLUME:-blueeye-agent-data}"
 UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
+STATE_DIR="${BLUEEYE_STATE_DIR:-/var/lib/blueeye-agent}"
+LOG_DIR="${BLUEEYE_LOG_DIR:-/var/log/blueeye-agent}"
 
 ASSUME_YES=0
 PURGE=0
@@ -48,8 +50,8 @@ if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/de
   HAVE_CONTAINER=1
 fi
 
-if [ "$HAVE_SERVICE" -eq 0 ] && [ "$HAVE_CONTAINER" -eq 0 ] && [ ! -d "$INSTALL_DIR" ]; then
-  log "No BlueEye agent found on this host (no '$SERVICE_NAME' service, no '$CONTAINER' container, no $INSTALL_DIR). Nothing to do."
+if [ "$HAVE_SERVICE" -eq 0 ] && [ "$HAVE_CONTAINER" -eq 0 ] && [ ! -d "$INSTALL_DIR" ] && [ ! -d "$STATE_DIR" ]; then
+  log "No BlueEye agent found on this host (no '$SERVICE_NAME' service, no '$CONTAINER' container, no $INSTALL_DIR/$STATE_DIR). Nothing to do."
   exit 0
 fi
 
@@ -57,7 +59,9 @@ fi
 warn "This will REMOVE the BlueEye agent from this machine:"
 [ "$HAVE_SERVICE" -eq 1 ]   && warn "  - systemd service '$SERVICE_NAME' (stop, disable, delete $UNIT)"
 [ "$HAVE_CONTAINER" -eq 1 ] && warn "  - Docker container '$CONTAINER' (stop, remove)"
-[ -d "$INSTALL_DIR" ]       && warn "  - install directory $INSTALL_DIR (incl. the stored enrollment token)"
+[ -d "$INSTALL_DIR" ]       && warn "  - install directory $INSTALL_DIR (releases + current)"
+[ -d "$STATE_DIR" ]         && warn "  - state directory $STATE_DIR (incl. the stored enrollment token)"
+[ -d "$LOG_DIR" ]           && warn "  - log directory $LOG_DIR (local action trail)"
 [ "$PURGE" -eq 1 ]          && warn "  - Docker image '$IMAGE' and token volume '$TOKEN_VOLUME' (--purge)"
 warn "It does NOT remove the agent from the BlueEye server — do that in the dashboard (Agents -> Delete)."
 
@@ -77,6 +81,7 @@ if [ "$HAVE_SERVICE" -eq 1 ]; then
   systemctl stop "$SERVICE_NAME" 2>/dev/null || true
   systemctl disable "$SERVICE_NAME" 2>/dev/null || true
   rm -f "$UNIT"
+  rm -rf "${UNIT}.d"
   systemctl daemon-reload 2>/dev/null || true
 fi
 
@@ -93,6 +98,16 @@ fi
 if [ -d "$INSTALL_DIR" ]; then
   log "Removing $INSTALL_DIR ..."
   rm -rf "$INSTALL_DIR"
+fi
+
+if [ -d "$STATE_DIR" ]; then
+  log "Removing $STATE_DIR (token + config) ..."
+  rm -rf "$STATE_DIR"
+fi
+
+if [ -d "$LOG_DIR" ]; then
+  log "Removing $LOG_DIR ..."
+  rm -rf "$LOG_DIR"
 fi
 
 log "Done — the BlueEye agent has been removed from this machine."
