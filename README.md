@@ -95,47 +95,117 @@ Imaget bygges til en **64-bit** platform. `install.sh` detekterer host-arkitektu
 automatisk (`linux/amd64` eller `linux/arm64`); overstyr med `PLATFORM`, fx
 `PLATFORM=linux/arm64 ./install.sh`. 32-bit hosts understøttes ikke.
 
-## Seeing src/dst traffic (sFlow + hsflowd)
+## Running as a service
 
-The server's **Destinations** map and **Flows** view are built from per-flow
-src/dst records, which only come from a **NetFlow** or **sFlow** source — the
-default `proc` source reports interface byte-rates only (no addresses). Set the
-agent's source in the dashboard (**Agents → Edit → Traffic source = sflow**), then
-make sure something actually exports sFlow to the agent's collector on UDP 6343.
+In normal use the agent runs **under a supervisor** so it survives crashes and
+reboots — and, under **systemd**, can be updated with one click from the
+dashboard. The one-liner installer sets this up for you: it installs either a
+**systemd service** or a **Docker container** named `blueeye-agent`.
 
-A plain Linux host emits no sFlow about its own traffic. To turn the host itself
-into an exporter, run **hsflowd** (the Host sFlow daemon), which samples the host
-and ships sFlow to `127.0.0.1:6343` — straight into the agent's collector.
-
-- **Docker agent (the usual install)** — the alpine agent can't install hsflowd
-  onto the host, so run the **hsflowd sidecar** alongside it (host networking +
-  packet-capture caps). Set `SFLOW_DEVICE` to the host's real interface:
-
-  ```bash
-  SFLOW_DEVICE=eth0 docker compose -f docker-compose.hsflowd.yml up -d --build
-  # …or let install.sh do it:
-  ENABLE_HSFLOWD=1 SFLOW_DEVICE=eth0 ./install.sh
-  ```
-
-- **Native (systemd/unmanaged) agent** — the agent self-provisions hsflowd when
-  its `sflow` monitor config includes an `hsflowd` block. hsflowd isn't in the
-  Debian/Ubuntu archives, so the agent **builds it from source** (installs the
-  build deps `git build-essential clang libpcap-dev`, clones `sflow/host-sflow`,
-  then `make FEATURES="PCAP"` → `… install` → `… schedule` — `PCAP` is the
-  packet-sampling module, the only one needed; `HOST` would drag in
-  KVM/OVS/libvirt), writes `/etc/hsflowd.conf`, starts the service, and reports
-  the actual state. The first enable pulls a compiler and compiles, so it takes a
-  little longer.
-
-Confirm sFlow is arriving on the host:
+The underlying start command is:
 
 ```bash
-sudo tcpdump -ni any udp port 6343   # packets = inbound sFlow; silence = nothing exporting
+npm start          # = node src/index.js (runs in the foreground)
 ```
 
-Once datagrams flow, conversations appear on the server's **Flows** tab within a
-report cycle (~60 s); the **Destinations** map additionally needs geo enabled +
-an EU GeoIP database + the `geo` license feature.
+Run bare like that, the agent is **unmanaged**: nothing restarts it, and the
+dashboard's one-click update can't reach it (it reports `managed: unmanaged`).
+Fine for a quick test — but for a real install, run it as a service.
+
+**systemd (Node install).** Write a unit so the agent runs as a managed service.
+The key line is `BLUEEYE_RUNTIME=systemd`, which makes the agent report itself as
+managed so the dashboard **Update** button works:
+
+```ini
+# /etc/systemd/system/blueeye-agent.service
+[Unit]
+Description=BlueEye monitoring agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/blueeye-agent
+Environment=BLUEEYE_SERVER_URL=https://server.example
+Environment=BLUEEYE_TOKEN_PATH=/opt/blueeye-agent/token
+Environment=BLUEEYE_RUNTIME=systemd
+# Environment=BLUEEYE_SERVER_CERT_FINGERPRINT=<sha256>   # optional: pin the server's TLS cert (https)
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now blueeye-agent     # start now + on every boot
+systemctl status blueeye-agent                # is it running?
+journalctl -u blueeye-agent -f                # follow logs
+```
+
+> `ExecStart` runs `npm start` (i.e. `node src/index.js`). If `npm` isn't on
+> systemd's `PATH`, use the absolute path from `command -v npm` — or point
+> `ExecStart` straight at Node, as the bundled installer does:
+> `ExecStart=/usr/bin/node /opt/blueeye-agent/src/index.js`.
+
+**Docker.** `./install.sh` already runs the container with `--restart
+unless-stopped`, so it returns after a reboot. It reports `managed: docker` —
+update it by rebuilding on the host (see below), not from the dashboard.
+
+## Updating an agent
+
+Updates **reuse the stored token** (the Docker volume, or
+`/opt/blueeye-agent/token`), so you never re-enroll. Which path you use depends
+on how the agent is supervised — check with **Agents → Ping** in the dashboard
+(the toast shows `managed`), or on the host (`docker ps` /
+`systemctl status blueeye-agent`).
+
+**systemd / Node — easiest is the dashboard** (Agents → **Update**, or
+Settings → Updates); it downloads the published source, verifies its checksum,
+reinstalls deps and restarts the unit. To do the same by hand, verify the
+bundle against the server's published `X-Content-SHA256` header before
+extracting — the source endpoint is public (no token needed) and HTTPS already
+protects the transfer, but the checksum guards against a truncated/tampered
+bundle, mirroring the installer:
+
+```bash
+# download the bundle + capture the server's published checksum (response header)
+curl -fsSL -D /tmp/agent.hdr https://<server>/enroll/agent-source.tgz -o /tmp/agent.tgz
+expected=$(awk 'tolower($1)=="x-content-sha256:"{print $2}' /tmp/agent.hdr | tr -d '\r')
+actual=$(sha256sum /tmp/agent.tgz | awk '{print $1}')
+[ "$expected" = "$actual" ] || { echo "checksum mismatch — aborting"; exit 1; }
+
+sudo tar -xzf /tmp/agent.tgz -C /opt/blueeye-agent
+cd /opt/blueeye-agent && sudo npm ci --omit=dev
+sudo systemctl restart blueeye-agent
+```
+
+**Docker — rebuild on the host** (from the checkout you installed from; no
+enrollment code needed):
+
+```bash
+cd /path/to/blueeye-agent && git pull --ff-only
+BLUEEYE_SERVER_URL=https://<server> ./install.sh
+```
+
+**Unmanaged (bare `npm start`)** — nothing restarts it for you; update the
+source and restart it yourself:
+
+```bash
+cd /path/to/blueeye-agent && git pull --ff-only
+npm install --omit=dev        # only if dependencies changed
+# stop the running process, then:
+npm start
+```
+
+> The dashboard Update and the `agent-source.tgz` paths install **whatever the
+> server currently publishes** (its `AGENT_SOURCE_DIR`). After bumping the agent
+> on the server host, refresh it with **Settings → Updates → Reload agent
+> source** (no server restart). The `git pull` paths take whatever is on the
+> branch you pull. After it restarts, the agent reports its new version on
+> reconnect, and the dashboard version line updates.
 
 ## Uninstalling
 
