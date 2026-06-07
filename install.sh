@@ -73,23 +73,6 @@ docker build --platform "$PLATFORM" -t "$IMAGE" "$SRC"
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker volume create "$TOKEN_VOLUME" >/dev/null
 
-# Fail fast on the "fresh volume + forgot the code" case. With neither a stored
-# token on $TOKEN_VOLUME nor a one-time enrollment code, the agent has no way to
-# get credentials: it exits 1 on every boot and --restart unless-stopped turns
-# that into an endless crash-loop (the symptom looks like a daemon problem in
-# `journalctl`, but the real error is only in `docker logs`). Refuse to start it.
-# A token already on the volume means a prior enrollment succeeded, so re-running
-# without a code is fine — that path is allowed.
-if [ -z "$ENROLL" ] && \
-   ! docker run --rm --platform "$PLATFORM" -v "$TOKEN_VOLUME:/data:ro" "$IMAGE" \
-       sh -c '[ -s /data/token ]' >/dev/null 2>&1; then
-  echo "ERROR: no stored token on volume '$TOKEN_VOLUME' and no BLUEEYE_ENROLLMENT_CODE set." >&2
-  echo "       A first-time agent enrolls once with a one-time code from the server dashboard;" >&2
-  echo "       without it the agent cannot enroll and would crash-loop. Re-run with the code:" >&2
-  echo "         BLUEEYE_SERVER_URL=$SERVER_URL BLUEEYE_ENROLLMENT_CODE=<code> ./install.sh" >&2
-  exit 1
-fi
-
 ARGS=(-d --name "$CONTAINER" --restart unless-stopped
   --platform "$PLATFORM"
   -e "BLUEEYE_SERVER_URL=$SERVER_URL"
