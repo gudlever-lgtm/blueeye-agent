@@ -15,6 +15,7 @@ const { resolveProbeTargets } = require('./probes/targets');
 const { createSampler } = require('./monitor');
 const { createHsflowdManager } = require('./sflow/hsflowd');
 const { detectCapabilities } = require('./capabilities');
+const { collectNicInfo } = require('./nicInfo');
 const { makePinnedFetch } = require('./httpsClient');
 
 // Hard cap on how many targets one scheduled cycle will probe, so a giant
@@ -67,6 +68,7 @@ function createAgentRuntime({
   capabilities = detectCapabilities(),
   probeRunner = runProbe,
   resolveTargets = resolveProbeTargets,
+  collectNic = collectNicInfo,
   selfUpdater = null,
   selfDeleter = null,
   actionLog = null,
@@ -159,11 +161,20 @@ function createAgentRuntime({
     }
   }
 
-  // Reports capabilities to the server. Resilient: only a 401 is fatal.
+  // Reports capabilities to the server. Resilient: only a 401 is fatal. NIC
+  // inventory (driver/firmware per interface) is collected best-effort and
+  // folded in, so the server can spot fleet-wide firmware drift; a failure to
+  // read it just omits the field.
   async function reportCapabilities() {
+    let payload = capabilities;
     try {
-      await api.postCapabilities(capabilities);
-      logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}`);
+      const nic = await collectNic();
+      if (Array.isArray(nic) && nic.length) payload = { ...capabilities, nic };
+    } catch { /* NIC inventory is best-effort */ }
+    try {
+      await api.postCapabilities(payload);
+      const nicNote = payload.nic ? ` + ${payload.nic.length} NIC(s)` : '';
+      logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}${nicNote}`);
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not report capabilities (${err.message}).`);
