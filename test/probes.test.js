@@ -7,7 +7,7 @@ const { EventEmitter } = require('events');
 const { tcpProbe } = require('../src/probes/tcp');
 const { dnsProbe } = require('../src/probes/dns');
 const { parsePing } = require('../src/probes/ping');
-const { parseTraceroute } = require('../src/probes/traceroute');
+const { traceroute, parseTraceroute } = require('../src/probes/traceroute');
 const { httpProbe, normalizeUrl } = require('../src/probes/http');
 const { runProbe } = require('../src/probes');
 const { isRunProbeCommand, isRunTestCommand } = require('../src/command');
@@ -134,6 +134,27 @@ test('parseTraceroute aggregates multi-sample hops into loss + jitter (MTR-style
   assert.equal(hops[2].recv, 2);
   assert.equal(hops[2].lossPct, 33.33);
   assert.equal(hops[2].rttMs, 13);
+});
+
+test('traceroute reports a reason when the command is missing, not a blank run', async () => {
+  // Minimal hosts often lack the traceroute binary; the run must say so (so the
+  // server/dashboard can explain the empty path) rather than silently return [].
+  const exec = (_bin, _args, _opts, cb) => cb(Object.assign(new Error('spawn traceroute ENOENT'), { code: 'ENOENT' }), '');
+  const res = await traceroute({ host: 'example.com' }, { exec, platform: 'linux' });
+  assert.equal(res.ok, false);
+  assert.equal(res.hopCount, 0);
+  assert.deepEqual(res.hops, []);
+  assert.equal(res.error, 'traceroute not installed');
+});
+
+test('traceroute still succeeds when the command prints hops despite a nonzero exit', async () => {
+  // traceroute can exit nonzero yet still emit a usable report; hops win over err.
+  const stdout = ' 1  10.0.0.1  1.0 ms  1.0 ms  1.0 ms\n 2  93.184.216.34  10 ms  10 ms  10 ms\n';
+  const exec = (_bin, _args, _opts, cb) => cb(new Error('exit 1'), stdout);
+  const res = await traceroute({ host: 'example.com' }, { exec, platform: 'linux' });
+  assert.equal(res.ok, true);
+  assert.equal(res.hopCount, 2);
+  assert.equal(res.error, undefined);
 });
 
 test('parseTraceroute reads the Windows tracert layout (IP last, "<1 ms")', () => {

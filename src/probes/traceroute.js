@@ -21,8 +21,18 @@ function traceroute(spec, { exec = execFile, platform = process.platform } = {})
     ? ['-d', '-h', String(maxHops), host]
     : ['-n', '-m', String(maxHops), '-q', String(queries), '-w', '2', host];
   return new Promise((resolve) => {
-    exec(bin, args, { timeout: 60000 }, (_err, stdout) => {
+    exec(bin, args, { timeout: 60000 }, (err, stdout) => {
       const hops = parseTraceroute(String(stdout || ''), queries);
+      // Surface *why* a run came back empty so the server/dashboard can explain it
+      // instead of drawing a blank path: a missing binary (ENOENT) is the common
+      // case on minimal hosts/containers; `killed` means it ran but timed out.
+      if (hops.length === 0 && err) {
+        const reason = err.code === 'ENOENT' ? `${bin} not installed`
+          : err.killed ? `${bin} timed out`
+          : String(err.message || 'failed').split('\n')[0].slice(0, 120);
+        resolve({ type: 'traceroute', target: host, ok: false, hopCount: 0, queries, hops: [], error: reason });
+        return;
+      }
       resolve({ type: 'traceroute', target: host, ok: hops.length > 0, hopCount: hops.length, queries, hops });
     });
   });
