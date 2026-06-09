@@ -112,7 +112,7 @@ a runner error resolves to an `ok:false` result stamped with `ts`.
 | `ping` | [`probes/ping.js`](src/probes/ping.js) | system `ping`, parses loss% + min/avg/max/mdev (Linux/macOS/Windows). |
 | `tcp` | [`probes/tcp.js`](src/probes/tcp.js) | times N connect-and-close attempts. |
 | `dns` | [`probes/dns.js`](src/probes/dns.js) | times N resolver lookups. |
-| `traceroute` | [`probes/traceroute.js`](src/probes/traceroute.js) | system `traceroute`/`tracert`, parses hops. |
+| `traceroute` | [`probes/traceroute.js`](src/probes/traceroute.js) | system `traceroute`/`tracert`, MTR-style multi-probe (`-q queries`); per-hop `{ ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs }` for the server's path map. |
 | `http` | [`probes/http.js`](src/probes/http.js) | `fetch`es a URL (metadata only); reports HTTP `status` + (https) TLS `certExpiryDays`. |
 | — | [`probes/stats.js`](src/probes/stats.js) | shared `clampInt`/`round`/`summarize`/`fail` helpers. |
 

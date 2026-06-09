@@ -113,13 +113,42 @@ test('parsePing reads the Windows format (loss + Minimum/Maximum/Average)', () =
   assert.equal(p.avg, 11);
 });
 
-test('parseTraceroute extracts hops, ips and rtt (timeouts -> null ip)', () => {
-  const out = ' 1  10.0.0.1  1.2 ms\n 2  * * *\n 3  93.184.216.34  12.5 ms';
-  const hops = parseTraceroute(out);
+test('parseTraceroute aggregates multi-sample hops into loss + jitter (MTR-style)', () => {
+  // Linux `traceroute -q 3` layout: IP then up to 3 RTTs; "*" = a lost probe.
+  const out = [
+    ' 1  10.0.0.1  1.0 ms  2.0 ms  3.0 ms',
+    ' 2  * * *',
+    ' 3  93.184.216.34  12.5 ms  *  13.5 ms',
+  ].join('\n');
+  const hops = parseTraceroute(out, 3);
   assert.equal(hops.length, 3);
-  assert.deepEqual(hops[0], { hop: 1, ip: '10.0.0.1', rttMs: 1.2 });
+  // hop 1: 3/3 answered, avg 2, jitter = mean|Δ| of (1,1) = 1, no loss.
+  assert.deepEqual(hops[0], { hop: 1, ip: '10.0.0.1', sent: 3, recv: 3, lossPct: 0, rttMs: 2, minMs: 1, maxMs: 3, jitterMs: 1 });
+  // hop 2: silent router — 0/3, 100% loss, null IP, null timings.
   assert.equal(hops[1].ip, null);
+  assert.equal(hops[1].recv, 0);
+  assert.equal(hops[1].lossPct, 100);
+  assert.equal(hops[1].rttMs, null);
+  // hop 3: 2/3 answered -> ~33% loss, RTTs averaged.
   assert.equal(hops[2].ip, '93.184.216.34');
+  assert.equal(hops[2].recv, 2);
+  assert.equal(hops[2].lossPct, 33.33);
+  assert.equal(hops[2].rttMs, 13);
+});
+
+test('parseTraceroute reads the Windows tracert layout (IP last, "<1 ms")', () => {
+  const out = [
+    '  1     1 ms     1 ms     1 ms  192.168.1.1',
+    '  2     *        *        *     Request timed out.',
+    '  3    <1 ms    <1 ms    <1 ms  10.0.0.1',
+  ].join('\n');
+  const hops = parseTraceroute(out, 3);
+  assert.equal(hops[0].ip, '192.168.1.1');
+  assert.equal(hops[0].recv, 3);
+  assert.equal(hops[0].lossPct, 0);
+  assert.equal(hops[1].lossPct, 100);
+  assert.equal(hops[2].ip, '10.0.0.1');
+  assert.equal(hops[2].rttMs, 0.5); // "<1 ms" -> ~0.5 ms
 });
 
 test('normalizeUrl accepts full URLs and defaults a bare host to https', () => {
