@@ -3,9 +3,10 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand } = require('./command');
 const { createSelfUpdater } = require('./selfUpdate');
 const { createSelfDeleter } = require('./selfDelete');
+const { createToolInstaller } = require('./toolInstaller');
 const { createActionLog } = require('./actionLog');
 const { resolveReleasePublicKey } = require('./release/publicKey');
 const { runSpeedtest } = require('./speedtest');
@@ -71,12 +72,14 @@ function createAgentRuntime({
   collectNic = collectNicInfo,
   selfUpdater = null,
   selfDeleter = null,
+  toolInstaller = null,
   actionLog = null,
   hsflowdManager = null,
 }) {
   const emitter = new EventEmitter();
   const updater = selfUpdater || createSelfUpdater({ logger });
   const deleter = selfDeleter || createSelfDeleter({ logger });
+  const installer = toolInstaller || createToolInstaller({ logger });
   // Local, server-independent action trail. Path comes from the env at
   // provisioning (BLUEEYE_ACTION_LOG); a no-op when unset. Never logs secrets.
   const actions = actionLog || createActionLog({ path: process.env.BLUEEYE_ACTION_LOG || '' });
@@ -450,6 +453,50 @@ function createAgentRuntime({
     }
   }
 
+  // Handles a server "install-tool" command: install a missing diagnostic tool
+  // (e.g. traceroute) from the host's package manager, then report the outcome.
+  // The agent only ever installs tools on its OWN allowlist (toolInstaller) — a
+  // tool not on the list is refused regardless of what the server asked for, so
+  // a compromised server can't push an arbitrary package. Docker hosts decline
+  // (the image owns its packages). systemd/unmanaged proceed with whatever
+  // privilege the agent already runs with; a genuine "needs root" surfaces as a
+  // distinct failure rather than silently doing nothing.
+  async function handleInstallTool(command) {
+    const managed = capabilities.managed;
+    const auditId = command && command.auditId;
+    const tool = (command && command.tool) || '';
+    if (managed === 'docker') {
+      client.send({ type: 'ack', id: command && command.id, accepted: false, runtime: 'docker', reason: 'docker-managed' });
+      actions.log('install-tool.declined', { runtime: 'docker', tool });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'install-tool', ok: false, tool, detail: 'docker-managed' });
+      logger.warn("Ignoring install-tool command: runtime 'docker' manages its own packages.");
+      emitter.emit('install-tool-skipped', { reason: 'docker-managed', tool });
+      return;
+    }
+    client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: managed || 'unmanaged' });
+    actions.log('install-tool.start', { tool });
+    logger.info(`Install-tool accepted; installing '${tool}'...`);
+    try {
+      const result = await installer.installTool({ tool });
+      if (result.ok) {
+        actions.log('install-tool.applied', { tool, package: result.package, manager: result.manager });
+        logger.info(`Installed '${tool}' (${result.package} via ${result.manager}).`);
+        if (auditId != null) client.send({ type: 'action-result', auditId, action: 'install-tool', ok: true, tool, package: result.package, manager: result.manager });
+        emitter.emit('install-tool-applied', result);
+      } else {
+        actions.log('install-tool.failed', { tool, error: result.detail });
+        logger.warn(`Install of '${tool}' failed: ${result.detail}`);
+        if (auditId != null) client.send({ type: 'action-result', auditId, action: 'install-tool', ok: false, tool, detail: result.detail });
+        emitter.emit('install-tool-error', result);
+      }
+    } catch (err) {
+      actions.log('install-tool.failed', { tool, error: err.message });
+      logger.error(`Install of '${tool}' errored: ${err.message}`);
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'install-tool', ok: false, tool, detail: err.message });
+      emitter.emit('install-tool-error', err);
+    }
+  }
+
   // Runs an active speed test against the server and submits the result. A 401
   // is fatal; other errors are surfaced but non-terminal.
   async function runSpeedtestAndSubmit(command) {
@@ -483,6 +530,11 @@ function createAgentRuntime({
     }
     if (isDeleteCommand(command)) {
       await handleDelete(command);
+      return;
+    }
+    if (isInstallToolCommand(command)) {
+      logger.info(`Received install-tool command (${command.tool}).`);
+      await handleInstallTool(command);
       return;
     }
     if (isSpeedtestCommand(command)) {
