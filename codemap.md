@@ -114,11 +114,12 @@ a runner error resolves to an `ok:false` result stamped with `ts`.
 | `dns` | [`probes/dns.js`](src/probes/dns.js) | times N resolver lookups. |
 | `traceroute` | [`probes/traceroute.js`](src/probes/traceroute.js) | system `traceroute`/`tracert`, MTR-style multi-probe (`-q queries`); per-hop `{ ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs }` for the server's path map. |
 | `http` | [`probes/http.js`](src/probes/http.js) | `fetch`es a URL (metadata only); reports HTTP `status` + (https) TLS `certExpiryDays`. |
+| `curl` | [`probes/curl.js`](src/probes/curl.js) | system `curl` content check — verifies received traffic beyond mere connectivity: HTTP `status`, response body (substring or `/regex/`), `bytes`, and a response header. Fetches the body locally to check it but reports **metadata only** (pass/fail, `bytes`, `contentType`, `status`) — never the body. |
 | — | [`probes/stats.js`](src/probes/stats.js) | shared `clampInt`/`round`/`summarize`/`fail` helpers. |
 
 All probes return a normalized record: `{ type, target, ok, attempts, success,
 rttMs, minMs, maxMs, jitterMs, lossPct, ... }` (http adds `status` +
-`certExpiryDays`).
+`certExpiryDays`; curl adds `status` + `bytes` + `contentType`).
 
 ## Server API surface (the contract)
 
