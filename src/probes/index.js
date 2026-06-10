@@ -7,8 +7,9 @@ const { traceroute } = require('./traceroute');
 const { httpProbe } = require('./http');
 const { curlProbe } = require('./curl');
 const { pageloadProbe } = require('./pageload');
+const { transactionProbe } = require('./transaction');
 
-const RUNNERS = { tcp: tcpProbe, dns: dnsProbe, ping: pingProbe, traceroute, http: httpProbe, curl: curlProbe, pageload: pageloadProbe };
+const RUNNERS = { tcp: tcpProbe, dns: dnsProbe, ping: pingProbe, traceroute, http: httpProbe, curl: curlProbe, pageload: pageloadProbe, transaction: transactionProbe };
 
 // Runs one probe by spec.type and returns a normalized result stamped with `ts`.
 // Never throws: an unknown type or a runner error resolves to an ok:false result

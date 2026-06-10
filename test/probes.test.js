@@ -11,6 +11,7 @@ const { traceroute, parseTraceroute } = require('../src/probes/traceroute');
 const { httpProbe, normalizeUrl } = require('../src/probes/http');
 const { curlProbe } = require('../src/probes/curl');
 const { pageloadProbe, extractResources } = require('../src/probes/pageload');
+const { transactionProbe, subst } = require('../src/probes/transaction');
 const { runProbe } = require('../src/probes');
 const { isRunProbeCommand, isRunTestCommand } = require('../src/command');
 
@@ -346,6 +347,75 @@ test('pageloadProbe reports an unreachable document as not ok', async () => {
   assert.equal(res.ok, false);
   assert.equal(res.status, null);
   assert.match(res.detail, /curl not installed/);
+});
+
+// Transaction fake: curl -i reply with the transaction SENTINEL; routes by --url
+// and records each requested URL so we can assert variable substitution.
+function txReply({ status = 200, headers = {}, body = '' } = {}) {
+  const hdr = Object.entries({ 'content-type': 'application/json', ...headers }).map(([k, v]) => `${k}: ${v}`).join('\r\n');
+  return `HTTP/1.1 ${status} OK\r\n${hdr}\r\n\r\n${body}\n__BLUEEYE_TX__ ${status} ${Buffer.byteLength(body)} 0.020`;
+}
+function fakeTxCurl(byUrl, captured = []) {
+  return (_file, args, _opts, cb) => {
+    const i = args.indexOf('--url');
+    const url = i >= 0 ? args[i + 1] : '';
+    captured.push({ url, args });
+    const reply = byUrl[url] != null ? byUrl[url] : txReply({ status: 404, body: '' });
+    setImmediate(() => cb(null, reply, ''));
+  };
+}
+
+test('transaction subst replaces {{name}} from extracted vars (missing → empty)', () => {
+  assert.equal(subst('https://x/{{tok}}/a', { tok: 'ABC' }), 'https://x/ABC/a');
+  assert.equal(subst('h/{{missing}}', {}), 'h/');
+});
+
+test('transactionProbe runs steps in order, extracting a value into a later step', async () => {
+  const captured = [];
+  const res = await transactionProbe(
+    { steps: [
+      { url: 'https://api.test/login', method: 'POST', expectStatus: 200, extract: { name: 'token', pattern: '"token"\\s*:\\s*"([^"]+)"' } },
+      { url: 'https://api.test/me?t={{token}}', expectStatus: 200, expectBody: 'welcome' },
+    ] },
+    { exec: fakeTxCurl({
+      'https://api.test/login': txReply({ status: 200, body: '{"token":"SECRET123"}' }),
+      'https://api.test/me?t=SECRET123': txReply({ status: 200, body: 'welcome home' }),
+    }, captured), now: () => 0 }
+  );
+  assert.equal(res.type, 'transaction');
+  assert.equal(res.ok, true);
+  assert.equal(res.elements.length, 2);
+  assert.equal(res.status, 200);
+  // the extracted token flowed into step 2's URL
+  assert.ok(captured.some((c) => c.url === 'https://api.test/me?t=SECRET123'));
+  // privacy: the extracted secret must not leak into the reported result
+  assert.ok(!JSON.stringify(res).includes('SECRET123') || res.elements[1].url.includes('SECRET123'));
+  assert.match(res.detail, /2\/2 steps ok/);
+});
+
+test('transactionProbe stops at the first failing step', async () => {
+  const res = await transactionProbe(
+    { steps: [
+      { url: 'https://api.test/a', expectStatus: 200 },
+      { url: 'https://api.test/b', expectStatus: 200 },
+      { url: 'https://api.test/c', expectStatus: 200 },
+    ] },
+    { exec: fakeTxCurl({
+      'https://api.test/a': txReply({ status: 200, body: 'ok' }),
+      'https://api.test/b': txReply({ status: 500, body: 'boom' }),
+      'https://api.test/c': txReply({ status: 200, body: 'ok' }),
+    }), now: () => 0 }
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.status, 500);
+  assert.equal(res.elements.length, 2); // stopped after step 2; step 3 never ran
+  assert.match(res.detail, /failed at step 2/);
+});
+
+test('transactionProbe fails cleanly with no steps', async () => {
+  const res = await transactionProbe({ steps: [] }, { exec: fakeTxCurl({}), now: () => 0 });
+  assert.equal(res.ok, false);
+  assert.match(res.detail || res.error, /no steps/);
 });
 
 test('runProbe dispatches by type and stamps a ts', async () => {
