@@ -115,11 +115,14 @@ a runner error resolves to an `ok:false` result stamped with `ts`.
 | `traceroute` | [`probes/traceroute.js`](src/probes/traceroute.js) | system `traceroute`/`tracert`, MTR-style multi-probe (`-q queries`); per-hop `{ ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs }` for the server's path map. |
 | `http` | [`probes/http.js`](src/probes/http.js) | `fetch`es a URL (metadata only); reports HTTP `status` + (https) TLS `certExpiryDays`. |
 | `curl` | [`probes/curl.js`](src/probes/curl.js) | system `curl` content check — verifies received traffic beyond mere connectivity: HTTP `status`, response body (substring or `/regex/`), `bytes`, and a response header. Fetches the body locally to check it but reports **metadata only** (pass/fail, `bytes`, `contentType`, `status`) — never the body. |
+| `pageload` | [`probes/pageload.js`](src/probes/pageload.js) | browser-free page-load test — `curl`s a page, parses its sub-resources (script/css/img), times a fetch of each → per-element waterfall (`elements: [{url,kind,status,bytes,ms}]`) + totals (`rttMs` = total load time, `bytes` = page weight, `status` = doc status). Bodies discarded/parsed locally; metadata only. |
+| `transaction` | [`probes/transaction.js`](src/probes/transaction.js) | browser-free multi-step journey / scripted API call — ordered `curl` steps with status/body assertions; a step can `extract` a regex capture into a variable later steps reference as `{{name}}` in URL/header/body (e.g. login → token → authed call). Stops at the first failure. Per-step waterfall in `elements` (`kind` = `step N METHOD`); `rttMs` = total time. Extracted values stay local — never reported. |
 | — | [`probes/stats.js`](src/probes/stats.js) | shared `clampInt`/`round`/`summarize`/`fail` helpers. |
 
 All probes return a normalized record: `{ type, target, ok, attempts, success,
 rttMs, minMs, maxMs, jitterMs, lossPct, ... }` (http adds `status` +
-`certExpiryDays`; curl adds `status` + `bytes` + `contentType`).
+`certExpiryDays`; curl adds `status` + `bytes` + `contentType`; pageload +
+transaction add `status` + `bytes` + `elements`).
 
 ## Server API surface (the contract)
 
