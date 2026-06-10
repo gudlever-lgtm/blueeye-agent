@@ -10,6 +10,7 @@ const { parsePing } = require('../src/probes/ping');
 const { traceroute, parseTraceroute } = require('../src/probes/traceroute');
 const { httpProbe, normalizeUrl } = require('../src/probes/http');
 const { curlProbe } = require('../src/probes/curl');
+const { pageloadProbe, extractResources } = require('../src/probes/pageload');
 const { runProbe } = require('../src/probes');
 const { isRunProbeCommand, isRunTestCommand } = require('../src/command');
 
@@ -271,6 +272,77 @@ test('curlProbe treats a 500 as a failed check by default', async () => {
 test('curlProbe reports curl-not-installed without throwing', async () => {
   const err = Object.assign(new Error('spawn curl ENOENT'), { code: 'ENOENT' });
   const res = await curlProbe({ url: 'http://x.test' }, { exec: fakeCurl('', err), now: () => 0 });
+  assert.equal(res.ok, false);
+  assert.equal(res.status, null);
+  assert.match(res.detail, /curl not installed/);
+});
+
+// Page-load fake curl: assembles a body (for the document) + the -w metrics line
+// using pageload's SENTINEL, and routes by --url so the document and its assets
+// each get a distinct reply.
+function plReply({ status = 200, body = '', bytes, timeMs = 50 } = {}) {
+  const size = bytes != null ? bytes : Buffer.byteLength(body);
+  return `${body}\n__BLUEEYE_PL__ ${status} ${size} ${(timeMs / 1000).toFixed(3)} ${(timeMs / 2000).toFixed(3)} text/html`;
+}
+function fakePageCurl(byUrl) {
+  return (_file, args, _opts, cb) => {
+    const i = args.indexOf('--url');
+    const url = i >= 0 ? args[i + 1] : '';
+    const reply = byUrl[url] != null ? byUrl[url] : plReply({ status: 404, body: '' });
+    setImmediate(() => cb(null, reply, ''));
+  };
+}
+
+test('extractResources pulls scripts/styles/images and resolves relative URLs', () => {
+  const html = '<html><head><link rel="stylesheet" href="/a.css"><script src="https://cdn.test/x.js"></script></head><body><img src="img/logo.png"></body></html>';
+  const out = extractResources(html, new URL('https://site.test/page'), 20);
+  const urls = out.map((r) => r.url);
+  assert.ok(urls.includes('https://site.test/a.css'));
+  assert.ok(urls.includes('https://cdn.test/x.js'));
+  assert.ok(urls.includes('https://site.test/img/logo.png'));
+});
+
+test('pageloadProbe builds a waterfall of the document + its sub-resources', async () => {
+  const doc = 'https://site.test/';
+  const html = '<link rel="stylesheet" href="/a.css"><script src="/b.js"></script><img src="/c.png">';
+  const res = await pageloadProbe(
+    { url: doc },
+    { exec: fakePageCurl({
+      [doc]: plReply({ status: 200, body: html, bytes: 4096, timeMs: 80 }),
+      'https://site.test/a.css': plReply({ status: 200, bytes: 1000, timeMs: 20 }),
+      'https://site.test/b.js': plReply({ status: 200, bytes: 2000, timeMs: 30 }),
+      'https://site.test/c.png': plReply({ status: 200, bytes: 8000, timeMs: 40 }),
+    }), now: clock() }
+  );
+  assert.equal(res.type, 'pageload');
+  assert.equal(res.ok, true);
+  assert.equal(res.status, 200);
+  assert.equal(res.elements.length, 4); // document + 3 assets
+  assert.equal(res.elements[0].kind, 'document');
+  assert.equal(res.bytes, 4096 + 1000 + 2000 + 8000);
+  assert.equal(res.lossPct, 0);
+  assert.ok(res.rttMs != null && res.rttMs > 0); // total load time → graphs over time
+  assert.match(res.detail, /elements/);
+});
+
+test('pageloadProbe counts failed sub-resources as loss but stays ok if the doc loads', async () => {
+  const doc = 'http://site.test/';
+  const html = '<img src="/ok.png"><img src="/missing.png">';
+  const res = await pageloadProbe(
+    { url: doc },
+    { exec: fakePageCurl({
+      [doc]: plReply({ status: 200, body: html, bytes: 500, timeMs: 60 }),
+      'http://site.test/ok.png': plReply({ status: 200, bytes: 100, timeMs: 10 }),
+      'http://site.test/missing.png': plReply({ status: 404, bytes: 0, timeMs: 5 }),
+    }), now: clock() }
+  );
+  assert.equal(res.ok, true); // document is healthy
+  assert.equal(res.lossPct, 50); // one of two assets failed
+});
+
+test('pageloadProbe reports an unreachable document as not ok', async () => {
+  const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  const res = await pageloadProbe({ url: 'http://x.test' }, { exec: (_f, _a, _o, cb) => setImmediate(() => cb(err, '', '')), now: clock() });
   assert.equal(res.ok, false);
   assert.equal(res.status, null);
   assert.match(res.detail, /curl not installed/);
