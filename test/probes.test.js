@@ -9,6 +9,7 @@ const { dnsProbe } = require('../src/probes/dns');
 const { parsePing } = require('../src/probes/ping');
 const { traceroute, parseTraceroute } = require('../src/probes/traceroute');
 const { httpProbe, normalizeUrl } = require('../src/probes/http');
+const { curlProbe } = require('../src/probes/curl');
 const { runProbe } = require('../src/probes');
 const { isRunProbeCommand, isRunTestCommand } = require('../src/command');
 
@@ -209,6 +210,70 @@ test('httpProbe counts a network error as loss and leaves status null', async ()
   assert.equal(res.ok, false);
   assert.equal(res.lossPct, 100);
   assert.equal(res.status, null);
+});
+
+// A fake execFile('curl', ...) that yields canned output (and optional error).
+// `curlReply` assembles the -i header/body + the trailing -w metrics line.
+function curlReply({ status = 200, headers = {}, body = '', timeMs = 123, contentType = 'text/plain' } = {}) {
+  const hdr = Object.entries({ 'content-type': contentType, ...headers })
+    .map(([k, v]) => `${k}: ${v}`).join('\r\n');
+  const bytes = Buffer.byteLength(body);
+  return `HTTP/1.1 ${status} OK\r\n${hdr}\r\n\r\n${body}\n__BLUEEYE_CURL__ ${status} ${bytes} ${(timeMs / 1000).toFixed(3)} ${contentType}`;
+}
+function fakeCurl(stdout, err = null) {
+  return (_file, _args, _opts, cb) => { setImmediate(() => cb(err, stdout, err ? 'curl: error' : '')); };
+}
+
+test('curlProbe verifies status, body and a header — ok when all pass', async () => {
+  const out = curlReply({ status: 200, body: 'service healthy', headers: { 'x-app': 'blueeye' } });
+  const res = await curlProbe(
+    { url: 'https://example.com/health', expectStatus: 200, expectBody: 'healthy', expectHeader: 'x-app' },
+    { exec: fakeCurl(out), now: () => 0 }
+  );
+  assert.equal(res.type, 'curl');
+  assert.equal(res.target, 'https://example.com/health');
+  assert.equal(res.ok, true);
+  assert.equal(res.status, 200);
+  assert.equal(res.bytes, Buffer.byteLength('service healthy'));
+  assert.equal(res.lossPct, 0);
+  assert.match(res.detail, /body matched/);
+});
+
+test('curlProbe fails the check when the body does not match (reachable, but not ok)', async () => {
+  const res = await curlProbe(
+    { url: 'https://example.com', expectBody: 'EXPECTED-TOKEN' },
+    { exec: fakeCurl(curlReply({ status: 200, body: 'something else' })), now: () => 0 }
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.status, 200); // we DID reach it — status is still reported
+  assert.equal(res.lossPct, 100);
+  assert.match(res.detail, /body no match/);
+  // privacy: the actual body must never leak into the reported result
+  assert.ok(!JSON.stringify(res).includes('something else'));
+});
+
+test('curlProbe supports a /regex/ body matcher and a minimum byte count', async () => {
+  const res = await curlProbe(
+    { url: 'http://x.test', expectBody: '/ver\\s*\\d+/i', minBytes: 5 },
+    { exec: fakeCurl(curlReply({ status: 200, body: 'API VER 42 ok' })), now: () => 0 }
+  );
+  assert.equal(res.ok, true);
+  assert.match(res.detail, /✓/);
+});
+
+test('curlProbe treats a 500 as a failed check by default', async () => {
+  const res = await curlProbe({ url: 'http://x.test' }, { exec: fakeCurl(curlReply({ status: 500, body: 'err' })), now: () => 0 });
+  assert.equal(res.ok, false);
+  assert.equal(res.status, 500);
+  assert.equal(res.lossPct, 100);
+});
+
+test('curlProbe reports curl-not-installed without throwing', async () => {
+  const err = Object.assign(new Error('spawn curl ENOENT'), { code: 'ENOENT' });
+  const res = await curlProbe({ url: 'http://x.test' }, { exec: fakeCurl('', err), now: () => 0 });
+  assert.equal(res.ok, false);
+  assert.equal(res.status, null);
+  assert.match(res.detail, /curl not installed/);
 });
 
 test('runProbe dispatches by type and stamps a ts', async () => {
