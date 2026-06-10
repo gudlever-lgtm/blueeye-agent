@@ -6,7 +6,8 @@ WORKDIR /app
 # ethtool lets the agent read per-NIC driver/firmware (`ethtool -i`) for the
 # fleet firmware-drift inventory. Tiny, optional: the collector degrades to []
 # when it's absent. Needs `network_mode: host` to see the host's real NICs.
-RUN apk add --no-cache ethtool
+# curl powers the `curl` content-verification probe (HTTP status/body/headers).
+RUN apk add --no-cache ethtool curl
 
 # Install production dependencies first (better layer caching).
 COPY package*.json ./
