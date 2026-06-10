@@ -136,6 +136,11 @@ What the agent calls on **blueeye-server** (mirrored by the fake server):
 Server → agent commands ([`command.js`](src/command.js)):
 - **run-test** (`run[\s_-]?test`) → measure traffic + system, `POST /agents/results`.
 - **run-probe** (`run[\s_-]?probe` + a `probe` object) → run it, `POST /agents/probe-results`.
+- **install-tool** (`install[\s_-]?tool` + a `tool` string, carries `auditId`) → install a
+  missing diagnostic tool (traceroute/mtr/tcptraceroute) from the host package manager and
+  report back via `action-result`. The tool is checked against the agent's OWN allowlist in
+  [`toolInstaller.js`](src/toolInstaller.js) (apt/dnf/yum/zypper/apk/pacman) — the agent never
+  installs an arbitrary package the server names. Docker-managed agents decline.
 
 ## Configuration & environment
 

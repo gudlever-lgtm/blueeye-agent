@@ -7,6 +7,7 @@ const UPDATE = /^(update|self[\s_-]?update|upgrade)$/i;
 const SPEEDTEST = /^speed[\s_-]?test$/i;
 const DIAGNOSE = /^(diagnose|diag|doctor|self[\s_-]?check|health[\s_-]?check)$/i;
 const DELETE = /^(delete|self[\s_-]?delete|uninstall)$/i;
+const INSTALL_TOOL = /^install[\s_-]?tool$/i;
 
 function verbOf(command) {
   if (typeof command === 'string') return command.trim();
@@ -61,4 +62,12 @@ function isDeleteCommand(command) {
   return DELETE.test(verbOf(command));
 }
 
-module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand };
+// Recognises an install-tool command: { name: 'install-tool', id, auditId,
+// tool } — install a missing diagnostic tool (e.g. traceroute) from the host's
+// package manager and report back. The agent only installs tools on its own
+// allowlist (see src/toolInstaller.js); a missing `tool` is not this command.
+function isInstallToolCommand(command) {
+  return INSTALL_TOOL.test(verbOf(command)) && !!command && typeof command.tool === 'string' && command.tool.trim() !== '';
+}
+
+module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand };
