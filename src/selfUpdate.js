@@ -98,11 +98,31 @@ function createSelfUpdater({
   // Writes the verified tarball to a temp file and installs it — atomically
   // (versioned swap) when the layout is configured and a version is known,
   // otherwise in place.
+  // Guards against tar-slip: list the archive and reject any member with an
+  // absolute path or a `..` that would escape the extraction root, BEFORE we
+  // extract. Portable (list-then-extract on the same local file) and needs no
+  // tar lib. The signed path is already authenticated; this also covers the
+  // legacy sha-only bundle where the bytes' provenance is weaker.
+  function assertSafeTar(tgz) {
+    const r = exec('tar', ['-tzf', tgz], { encoding: 'utf8' });
+    if (!r || r.status !== 0) {
+      throw fail('EXTRACT_FAILED', `could not read archive listing: ${(r && (r.stderr || r.error)) || 'unknown error'}`);
+    }
+    const names = String(r.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    for (const name of names) {
+      const norm = path.normalize(name);
+      if (path.isAbsolute(name) || norm === '..' || norm.startsWith(`..${path.sep}`) || norm.startsWith('../')) {
+        throw fail('UNSAFE_ARCHIVE', `refusing to extract: archive contains an unsafe path "${name}"`);
+      }
+    }
+  }
+
   function installRelease(buf, version) {
     const tmp = fsImpl.mkdtempSync(path.join(os.tmpdir(), 'blueeye-update-'));
     const tgz = path.join(tmp, 'agent.tgz');
     fsImpl.writeFileSync(tgz, buf);
     try {
+      assertSafeTar(tgz);
       if (releasesDir && currentLink && version) atomicInstall(tgz, version);
       else inPlaceInstall(tgz);
     } finally {

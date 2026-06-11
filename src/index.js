@@ -7,6 +7,7 @@ const { collectSystemInfo } = require('./system');
 const { ensureToken } = require('./bootstrap');
 const { createAgentRuntime } = require('./runtime');
 const { parseArgs, runEnroll, USAGE } = require('./cli');
+const { makePinnedFetch } = require('./httpsClient');
 
 // CLI entry point. This is the only place that calls process.exit — all the
 // logic lives in injectable modules so it can be tested without spawning a
@@ -51,9 +52,15 @@ async function main() {
   );
   logger.info(`Server: ${config.serverUrl}`);
 
+  // Pin the server's cert on the enrollment request too (it carries the one-time
+  // code and receives the permanent token). Mirrors runtime's REST pinning; falls
+  // back to plain fetch for http/dev so existing flows are unchanged.
+  const fp = config.serverCertFingerprint;
+  const enrollFetch = (fp && /^https:/i.test(config.serverUrl)) ? makePinnedFetch(fp) : fetch;
+
   let credentials;
   try {
-    credentials = await ensureToken({ config, systemInfo, logger });
+    credentials = await ensureToken({ config, systemInfo, logger, fetchImpl: enrollFetch });
   } catch (err) {
     const detail = err.detail ? ` — ${JSON.stringify(err.detail)}` : '';
     logger.error(`${err.message}${detail}`);

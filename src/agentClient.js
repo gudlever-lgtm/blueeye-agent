@@ -112,8 +112,18 @@ function createAgentClient({
     // request — which carries the token — is sent.
     if (pinning) wsOpts.rejectUnauthorized = false;
     ws = new WebSocketImpl(wsUrl, wsOpts);
-    if (pinning && ws._req && typeof ws._req.on === 'function') {
-      ws._req.on('socket', (socket) => socket.on('secureConnect', () => verifyPeerOrDestroy(socket, pin)));
+    if (pinning) {
+      // We disabled the default chain check to pin the exact leaf on
+      // secureConnect. If we can't attach that verifier (e.g. the ws internals
+      // changed in a future version), fail CLOSED — running with
+      // rejectUnauthorized:false and no pin would mean no TLS validation at all.
+      if (ws._req && typeof ws._req.on === 'function') {
+        ws._req.on('socket', (socket) => socket.on('secureConnect', () => verifyPeerOrDestroy(socket, pin)));
+      } else {
+        try { ws.terminate(); } catch { /* ignore */ }
+        failFatal('cannot attach certificate pin verifier (ws internals changed); refusing to connect unpinned');
+        return;
+      }
     }
 
     ws.on('open', () => {

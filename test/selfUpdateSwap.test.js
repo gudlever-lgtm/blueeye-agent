@@ -64,7 +64,7 @@ test('a signed update with the symlink layout extracts a NEW release dir and ato
   const r = await updater.update({ serverUrl: 'http://s', token: 't', signature: sig, publicKey: pubPem, fetchImpl: async () => fakeRelease(tarball, manifest, sig) });
   assert.equal(r.version, '0.3.0');
 
-  const tar = execCalls.find((c) => c.cmd === 'tar');
+  const tar = execCalls.find((c) => c.cmd === 'tar' && c.args.includes('-xzf'));
   assert.deepEqual(tar.args.slice(-2), ['-C', '/opt/blueeye-agent/releases/0.3.0']); // extracted into the NEW dir
   const npm = execCalls.find((c) => c.cmd === 'npm');
   assert.equal(npm.cwd, '/opt/blueeye-agent/releases/0.3.0'); // deps installed in the NEW dir
@@ -104,6 +104,6 @@ test('without the layout, a signed update still extracts in place (back-compat)'
     logger: quiet,
   });
   await updater.update({ serverUrl: 'http://s', token: 't', signature: sig, publicKey: pubPem, fetchImpl: async () => fakeRelease(tarball, manifest, sig) });
-  const tar = execCalls.find((c) => c.cmd === 'tar');
+  const tar = execCalls.find((c) => c.cmd === 'tar' && c.args.includes('-xzf'));
   assert.deepEqual(tar.args.slice(-2), ['-C', '/opt/blueeye-agent']); // in place
 });
