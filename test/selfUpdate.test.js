@@ -35,9 +35,9 @@ test('update() downloads, verifies the checksum, extracts and installs deps', as
 
   assert.equal(out.ok, true);
   assert.equal(out.sha, SHA);
-  // Extracted into the install dir.
-  const tar = calls.find((c) => c.cmd === 'tar');
-  assert.ok(tar, 'tar was invoked');
+  // Extracted into the install dir (the -xzf call; a -tzf listing precedes it).
+  const tar = calls.find((c) => c.cmd === 'tar' && c.args.includes('-xzf'));
+  assert.ok(tar, 'tar extract was invoked');
   assert.deepEqual(tar.args.slice(-2), ['-C', '/opt/blueeye-agent']);
   // Dependencies refreshed in the install dir.
   const npm = calls.find((c) => c.cmd === 'npm');
@@ -83,12 +83,29 @@ test('update() falls back to npm install when npm ci fails', async () => {
 });
 
 test('update() surfaces an extract failure', async () => {
-  const exec = (cmd) => (cmd === 'tar' ? { status: 1, stderr: 'tar: bad' } : { status: 0 });
+  // The pre-extract listing (-tzf) succeeds; the extract (-xzf) fails.
+  const exec = (cmd, args) => (cmd === 'tar' && args.includes('-xzf') ? { status: 1, stderr: 'tar: bad' } : { status: 0 });
   const updater = createSelfUpdater({ installDir: '/opt/x', exec, fsImpl: makeFakeFs(), logger: quiet });
   await assert.rejects(
     () => updater.update({ serverUrl: 'http://s', token: 't', expectedSha: SHA, fetchImpl: okFetch() }),
     /could not extract/
   );
+});
+
+test('update() refuses an archive with a path-traversal member (tar-slip)', async () => {
+  // The listing (-tzf) reports a malicious member; extraction must not happen.
+  const calls = [];
+  const exec = (cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd === 'tar' && args.includes('-tzf')) return { status: 0, stdout: 'pkg/app.js\n../../etc/cron.d/evil\n' };
+    return { status: 0 };
+  };
+  const updater = createSelfUpdater({ installDir: '/opt/x', exec, fsImpl: makeFakeFs(), logger: quiet });
+  await assert.rejects(
+    () => updater.update({ serverUrl: 'http://s', token: 't', expectedSha: SHA, fetchImpl: okFetch() }),
+    /unsafe path/
+  );
+  assert.equal(calls.find((c) => c.cmd === 'tar' && c.args.includes('-xzf')), undefined, 'must not extract');
 });
 
 test('restart() asks systemd to restart the unit without blocking', () => {
