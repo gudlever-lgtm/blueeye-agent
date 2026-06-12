@@ -78,7 +78,10 @@ function createAgentRuntime({
 }) {
   const emitter = new EventEmitter();
   const updater = selfUpdater || createSelfUpdater({ logger });
-  const deleter = selfDeleter || createSelfDeleter({ logger });
+  // The deleter must wipe the token the runtime actually uses: tokenPath can be
+  // set via the config FILE (not just env), and selfDelete's own default only
+  // sees the env — so a file-configured path would be left un-wiped.
+  const deleter = selfDeleter || createSelfDeleter({ logger, tokenPath: config.tokenPath });
   const installer = toolInstaller || createToolInstaller({ logger });
   // Local, server-independent action trail. Path comes from the env at
   // provisioning (BLUEEYE_ACTION_LOG); a no-op when unset. Never logs secrets.
@@ -226,6 +229,16 @@ function createAgentRuntime({
     }
   }
 
+  // Was the host's hsflowd provisioned by this agent — now, or by a PREVIOUS
+  // process? The in-memory flag dies with a restart; the manager re-derives it
+  // from the conf marker. Injected test fakes without isManaged() mean "no".
+  // Never throws.
+  async function managedByThisAgent() {
+    try {
+      return typeof hsflowd.isManaged === 'function' ? !!(await hsflowd.isManaged()) : false;
+    } catch { return false; }
+  }
+
   // Converges the local hsflowd exporter to the server's desired state. Runs on
   // every config load — i.e. at startup and on each WS reconnect — so the host
   // re-reconciles whenever it reconnects. Never throws (the manager swallows OS
@@ -236,9 +249,11 @@ function createAgentRuntime({
     if (opts) {
       r = await hsflowd.enable(opts);
       hsflowdManaged = true;
-    } else if (hsflowdManaged) {
+    } else if (hsflowdManaged || (await managedByThisAgent())) {
       // The source moved away from sflow (or the exporter was switched off) and
-      // we were managing it — stop it, but leave it installed for a fast re-enable.
+      // we were managing it — possibly in a previous process: the conf marker
+      // outlives a restart, so the exporter doesn't end up orphaned. Stop it,
+      // but leave it installed for a fast re-enable.
       r = await hsflowd.disable();
       hsflowdManaged = false;
     }
@@ -469,6 +484,17 @@ function createAgentRuntime({
     client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: managed || 'unmanaged' });
     actions.log('delete.start', {});
     logger.warn('Delete accepted; wiping token and removing this agent from the host.');
+    // Stop an exporter WE provisioned before removing ourselves, so the delete
+    // doesn't orphan a root daemon exporting sFlow to a dead collector.
+    // Best-effort: an exporter failure must never block the delete itself.
+    try {
+      if (hsflowdManaged || (await managedByThisAgent())) {
+        const r = await hsflowd.disable();
+        hsflowdManaged = false;
+        actions.log('delete.hsflowd-disabled', { state: r && r.state });
+        logger.info(`Stopped the agent-managed hsflowd exporter (${(r && r.state) || 'unknown'}).`);
+      }
+    } catch { /* best-effort */ }
     try {
       deleter.wipeToken();
       actions.log('delete.token-wiped', {});

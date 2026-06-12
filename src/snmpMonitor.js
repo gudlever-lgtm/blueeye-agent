@@ -24,6 +24,11 @@ const OID = {
 
 const OPER_STATUS = { 1: 'up', 2: 'down', 3: 'testing', 5: 'dormant', 6: 'notPresent', 7: 'lowerLayerDown' };
 
+// Same per-interface cap as the /proc sampler, for the same reason: a big
+// chassis (or a misconfigured walk) must not push one result over the server's
+// 64 KiB per-result limit and lose the whole report.
+const { MAX_INTERFACES } = require('./trafficMonitor');
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Coerces an SNMP Counter64 value (number or Buffer) to a JS number.
@@ -123,6 +128,7 @@ async function sampleSnmp({
   readCounters = defaultReadCounters,
   sleepFn = sleep,
   now = () => Date.now(),
+  maxInterfaces = MAX_INTERFACES,
 } = {}) {
   const t0 = now();
   const first = await readCounters(snmp);
@@ -163,11 +169,20 @@ async function sampleSnmp({
     });
   }
 
+  // Cap after totals (omitted ports still count there); keep the busiest ports.
+  let interfacesOmitted = 0;
+  if (interfaces.length > maxInterfaces) {
+    interfaces.sort((a, b) => (b.rxBytes + b.txBytes) - (a.rxBytes + a.txBytes));
+    interfacesOmitted = interfaces.length - maxInterfaces;
+    interfaces.length = maxInterfaces;
+  }
+
   return {
     source: 'snmp',
     intervalMs,
     elapsedSec: Math.round(elapsedSec * 1000) / 1000,
     interfaces,
+    ...(interfacesOmitted ? { interfacesOmitted } : {}),
     totals: {
       ...totals,
       rxBytesPerSec: Math.round(totals.rxBytes / elapsedSec),

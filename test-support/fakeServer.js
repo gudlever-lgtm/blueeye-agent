@@ -74,6 +74,31 @@ function startFakeServer(options = {}) {
       res.end(JSON.stringify({ serverUrl: options.publicUrl || '', certFingerprint: options.certFingerprint || null }));
       return;
     }
+
+    // Self-update downloads (unauthenticated, like the real server): the legacy
+    // source bundle, and the signed release with its verification headers.
+    // Provide the bytes via options.agentSource (Buffer) / options.agentRelease
+    // ({ buffer, version, signature, manifestB64 }); 404 when unset.
+    if (req.method === 'GET' && req.url === '/enroll/agent-source.tgz') {
+      const src = options.agentSource;
+      if (!src) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'No agent source' })); return; }
+      res.writeHead(200, { 'content-type': 'application/gzip', 'content-length': String(src.length) });
+      res.end(src);
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/enroll/agent-release.tgz') {
+      const rel = options.agentRelease;
+      if (!rel) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'No signed release' })); return; }
+      res.writeHead(200, {
+        'content-type': 'application/gzip',
+        'content-length': String(rel.buffer.length),
+        'x-release-version': rel.version,
+        'x-release-signature': rel.signature,
+        'x-release-manifest': rel.manifestB64,
+      });
+      res.end(rel.buffer);
+      return;
+    }
     if (req.method === 'POST' && req.url === '/agents/enroll') {
       const body = await readJson(req);
       enrollments.push(body);

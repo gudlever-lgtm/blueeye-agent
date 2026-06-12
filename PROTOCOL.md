@@ -1,7 +1,7 @@
 # blueeye-agent ↔ blueeye-server protocol
 
 Complete wire contract between the agent and **blueeye-server**, as implemented
-in agent `v0.9.0`. Compiled from the agent source and cross-checked against the
+in agent `v0.9.1`. Compiled from the agent source and cross-checked against the
 server's routes/validators (`blueeye-server/src/routes/agentReports.js`,
 `agentEnroll.js`, `enroll.js`, `speedtest.js`, `src/ws/agentSocket.js`,
 `src/validation/*`). Discrepancies found while writing this are catalogued in
@@ -71,17 +71,18 @@ validateMonitorConfig`; everything else is stripped):
   "source": "proc" | "snmp" | "netflow" | "sflow",   // required
   "intervalMs": 1000..86400000,                       // optional; overrides reportIntervalMs
   "snmp":    { "host": "...", "community"?: "...", "version"?: "1"|"2c", "port"?: 1..65535 },  // when source=snmp
-  "netflow": { "port"?: 1..65535 },                   // when source=netflow ({} ⇒ agent defaults 2055)
-  "sflow":   { "port"?: 1..65535,                     // when source=sflow ({} ⇒ agent defaults 6343)
+  "netflow": { "port"?: 1..65535, "bindAddress"?: "<IP literal>" },   // when source=netflow ({} ⇒ agent defaults 2055)
+  "sflow":   { "port"?: 1..65535, "bindAddress"?: "<IP literal>",     // when source=sflow ({} ⇒ agent defaults 6343)
                "hsflowd"?: true | {                   // self-provision a local Host sFlow exporter
                  "samplingRate"?: 1..16777216, "pollingSecs"?: 1..86400,
                  "device"?: "<iface, [A-Za-z0-9._:-]{1,32}>" } }
 }
 ```
 
-Note: the agent additionally reads `netflow.bindAddress` / `sflow.bindAddress`
-(`src/monitor.js`), but the server validator strips those keys — they can never
-arrive from a real server (see audit F-04).
+`bindAddress` (server ≥ 0.25.0) is the UDP address the agent's flow collector
+binds — e.g. `127.0.0.1` when only the local hsflowd exports, keeping the
+collector off the LAN. Unset ⇒ the agent binds `0.0.0.0`. Older servers strip
+the key (the agent then uses the default).
 
 ### 1.4 `POST /agents/me/capabilities` — report capabilities + NIC inventory
 
@@ -148,11 +149,17 @@ Result envelope (`src/testRunner.js runTest()`):
     "rxErrors": 0, "txErrors": 0, "rxDrop": 0, "txDrop": 0,
     "operStatus": "up" | null, "speedMbps": 1000 | null
   } ],
+  "interfacesOmitted": 12,     // only when the cap below kicked in
   "totals": { "rxBytes": 0, "txBytes": 0, "rxPackets": 0, "txPackets": 0,
               "rxErrors": 0, "txErrors": 0, "rxDrop": 0, "txDrop": 0,
               "rxBytesPerSec": 0, "txBytesPerSec": 0 }
 }
 ```
+
+The `interfaces` list is capped at the **64 busiest** interfaces (by rx+tx
+bytes over the window) so a veth-farm host can't push a result over the
+server's 64 KiB per-result limit; `totals` always cover every interface, and
+`interfacesOmitted` says how many entries were dropped (absent when none).
 
 **Traffic snapshot — `netflow` / `sflow`** (`src/{netflow,sflow}/collector.js
 drain()` + `src/netflow/aggregate.js`): flow summary since the last drain.
@@ -511,4 +518,5 @@ permission_denied | unknown` (mirrored by the server's `HSFLOWD_STATES`).
 | `agent.error` | category/code ≤ 48, message ≤ 300 (server-side) ; message ≤ 300 (agent-side slice) |
 | `sflow.status.detail`, `action-result.detail` | ≤ 300 (server-side) |
 | scheduled probes | ≤ 16 targets per cycle (agent-side) |
+| traffic snapshots | ≤ 64 interfaces per snapshot, busiest kept (agent-side; `interfacesOmitted` counts the rest) |
 | flow summaries | top 50 per byPort/byProtocol/topTalkers; collector buffer 100 000 flows |

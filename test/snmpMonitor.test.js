@@ -68,6 +68,29 @@ test('sampleSnmp carries error/drop deltas + oper-status/speed through', async (
   assert.equal(traffic.totals.rxErrors, 3);
 });
 
+test('sampleSnmp caps the interface list at the busiest N (totals still cover all ports)', async () => {
+  const port = (rx) => ({ rxBytes: rx, txBytes: 0 });
+  const first = {};
+  const second = {};
+  for (let i = 1; i <= 5; i += 1) {
+    first[i] = { name: `Gi0/${i}`, ...port(0) };
+    second[i] = { name: `Gi0/${i}`, ...port(i * 100) }; // Gi0/5 busiest
+  }
+  let call = 0;
+  const traffic = await sampleSnmp({
+    snmp: { host: '10.0.0.1' },
+    intervalMs: 1000,
+    readCounters: async () => [first, second][call++],
+    sleepFn: async () => {},
+    now: (() => { const v = [0, 1000]; let i = 0; return () => v[i++]; })(),
+    maxInterfaces: 2,
+  });
+  assert.equal(traffic.interfaces.length, 2);
+  assert.deepEqual(traffic.interfaces.map((i) => i.iface), ['Gi0/5', 'Gi0/4']);
+  assert.equal(traffic.interfacesOmitted, 3);
+  assert.equal(traffic.totals.rxBytes, 100 + 200 + 300 + 400 + 500);
+});
+
 test('toNumber handles numbers and 64-bit Buffers', () => {
   assert.equal(toNumber(1234), 1234);
   const buf = Buffer.alloc(8);

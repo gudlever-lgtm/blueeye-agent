@@ -28,6 +28,12 @@ const DEFAULTS = {
   device: 'eth0',
 };
 
+// First line of every conf this agent writes — and the marker by which the
+// agent (and uninstall.sh) recognises an hsflowd installation IT manages, so a
+// delete / source change stops our exporter without ever touching an
+// operator-managed hsflowd. Must stay a prefix of the rendered first line.
+const MANAGED_MARKER = '# Managed by blueeye-agent';
+
 // hsflowd config values are written verbatim into the file, so constrain them to
 // safe shapes (no newlines / braces) — never interpolate untrusted free text.
 const SAFE_DEVICE = /^[A-Za-z0-9._:-]{1,32}$/;
@@ -53,7 +59,7 @@ function hsflowdOptions(opts = {}) {
 function renderHsflowdConf(opts = {}) {
   const o = hsflowdOptions(opts);
   return [
-    '# Managed by blueeye-agent — do not edit by hand; changes are overwritten.',
+    `${MANAGED_MARKER} — do not edit by hand; changes are overwritten.`,
     '# Host sFlow exporter: samples this host and exports to the local BlueEye collector.',
     'sflow {',
     `  collector { ip = ${o.collectorIp}  udpport = ${o.collectorPort} }`,
@@ -79,4 +85,4 @@ function pickSamplingDevice({ configured = null, interfaces = [], routeText = ''
   return names[0]; // first real (non-loopback) NIC
 }
 
-module.exports = { renderHsflowdConf, hsflowdOptions, pickSamplingDevice, DEFAULTS };
+module.exports = { renderHsflowdConf, hsflowdOptions, pickSamplingDevice, DEFAULTS, MANAGED_MARKER };

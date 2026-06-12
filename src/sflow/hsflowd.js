@@ -3,7 +3,7 @@
 const { execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
-const { renderHsflowdConf, pickSamplingDevice } = require('./hsflowdConfig');
+const { renderHsflowdConf, pickSamplingDevice, MANAGED_MARKER } = require('./hsflowdConfig');
 
 // Self-managed lifecycle for the Host sFlow daemon (hsflowd) on a Linux host the
 // agent runs ON. On enable it installs hsflowd if missing, renders
@@ -124,6 +124,17 @@ function createHsflowdManager({
     if (s === 'active' || s === 'activating' || s === 'reloading') return 'active';
     if (s === 'failed') return 'failed';
     return 'inactive'; // inactive | deactivating | unknown
+  }
+
+  // Whether the host's hsflowd conf was written by THIS agent (the managed
+  // marker). The in-memory "we enabled it" flag does not survive an agent
+  // restart, so this is how a fresh process recognises an exporter a previous
+  // run provisioned — a delete or a source change can then stop it, while a
+  // pre-existing operator-managed hsflowd is never touched. Observe-only.
+  function isManaged() {
+    if (platform !== 'linux' || runtime === 'docker') return false;
+    const conf = readFile(confPath);
+    return typeof conf === 'string' && conf.includes(MANAGED_MARKER);
   }
 
   // Observe-only: the current state, no side effects.
@@ -268,7 +279,7 @@ function createHsflowdManager({
     }
   }
 
-  return { status, enable, disable };
+  return { status, enable, disable, isManaged };
 }
 
 module.exports = { createHsflowdManager, STATES };

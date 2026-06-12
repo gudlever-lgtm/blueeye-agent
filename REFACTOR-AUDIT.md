@@ -10,6 +10,20 @@ Severity: **P1** behaviour broken in a supported configuration · **P2**
 correctness/robustness risk in realistic conditions · **P3** drift, dead code,
 doc/test gaps.
 
+## Fix status (updated 2026-06-12)
+
+| finding | status |
+| --- | --- |
+| F-01 | **Fixed** in agent 0.9.1 — `makePinnedFetch` is binary-safe with `headers.get()`/`arrayBuffer()`; pinned-TLS regression tests cover update (signed + legacy) and speedtest |
+| F-02 | **Fixed** in agent 0.9.1 — delete and the reconcile loop disable a marker-managed exporter (survives restarts); `uninstall.sh` stops it and removes the agent-authored conf |
+| F-03 | **Fixed** in agent 0.9.1 — the runtime passes `config.tokenPath` to the self-deleter |
+| F-04 | **Fixed** in server 0.25.0 — `bindAddress` validated + persisted for netflow/sflow, with a dashboard field so a UI edit round-trips it |
+| F-05 | **Fixed** in agent 0.9.1 — interface lists capped at the 64 busiest (proc + snmp), `interfacesOmitted` marks the rest; totals still cover all |
+| F-06 … F-16 | open |
+
+The finding texts below are kept as written at audit time (line references are
+to the audited revisions, before the fixes).
+
 ---
 
 ## P1 — bugs
@@ -261,6 +275,7 @@ Not bugs — the server normalises defensively — but the contract is implicit:
    add the missing fakeServer endpoints), then keep PROTOCOL.md as the single
    source of truth for the wire contract.
 
-Per repo convention, each fix above lands with a `package.json` version bump
-(agent + server in lockstep where both sides change). This audit itself changes
-no code and ships no bump.
+Per repo convention, each fix lands with a `package.json` version bump (agent +
+server in lockstep where both sides change). F-01…F-05 shipped as agent 0.9.1 /
+server 0.25.0 (see the fix-status table above); the remaining items are the
+docs/tests batch.
