@@ -125,6 +125,23 @@ function createAgentRuntime({
     emitter.emit('fatal', reason);
   }
 
+  // Ships a non-fatal operational error to the server over the live channel so it
+  // surfaces in the server's audit trail (Reporting → Audit) — not just the local
+  // log. Best-effort and metadata-only: a closed socket just drops it (the server
+  // already infers offline), `category` lets the server collapse repeats onto one
+  // row, and `message` is the Error text, never measured payload. A 401 is handled
+  // by handleFatal, not reported here. Never throws.
+  function reportError(category, err) {
+    try {
+      client.send({
+        type: 'agent.error',
+        category,
+        code: (err && err.code) || null,
+        message: err && err.message ? String(err.message).slice(0, 300) : 'error',
+      });
+    } catch { /* error reporting must never throw */ }
+  }
+
   // Measures traffic (with the currently selected sampler) and submits it. A 401
   // is fatal; other errors are surfaced but non-terminal so the loop continues.
   async function runAndSubmit(command, source) {
@@ -141,6 +158,7 @@ function createAgentRuntime({
         return false;
       }
       logger.error(`Failed to measure/submit traffic (${source}): ${err.message}`);
+      reportError('traffic-report', err);
       emitter.emit('command-error', err);
       return false;
     }
@@ -159,6 +177,7 @@ function createAgentRuntime({
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
       logger.error(`Failed to run/submit probe: ${err.message}`);
+      reportError('probe', err);
       emitter.emit('command-error', err);
       return false;
     }
@@ -181,6 +200,7 @@ function createAgentRuntime({
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not report capabilities (${err.message}).`);
+      reportError('capabilities', err);
     }
   }
 
@@ -202,6 +222,7 @@ function createAgentRuntime({
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not fetch monitor config (${err.message}); using ${monitorConfig.source}.`);
+      reportError('config', err);
     }
   }
 
@@ -275,6 +296,7 @@ function createAgentRuntime({
       });
     } catch (err) {
       logger.warn(`Could not resolve probe targets (${err.message}).`);
+      reportError('probe-targets', err);
       return false;
     }
     if (!specs || !specs.length) return false;
@@ -290,6 +312,7 @@ function createAgentRuntime({
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
       logger.error(`Failed to submit scheduled probes: ${err.message}`);
+      reportError('scheduled-probes', err);
       emitter.emit('command-error', err);
       return false;
     }
@@ -510,6 +533,7 @@ function createAgentRuntime({
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
       logger.error(`Speed test failed: ${err.message}`);
+      reportError('speedtest', err);
       emitter.emit('command-error', err);
       return false;
     }

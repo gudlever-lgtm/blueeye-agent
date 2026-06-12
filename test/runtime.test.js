@@ -271,3 +271,39 @@ test('reconnects after a dropped connection (exponential backoff)', async () => 
     await server.close();
   }
 });
+
+test('reports a non-fatal submit failure to the server as an agent.error frame', async () => {
+  const server = await startFakeServer({ validTokens: ['valid'] });
+  // Let capabilities/config succeed (so the live socket stays open) but force the
+  // results POST to fail with a non-401 — the agent should surface that over WS so
+  // it lands in the server's audit trail instead of only the local log.
+  const realFetch = globalThis.fetch;
+  const fetchImpl = async (url, opts) => {
+    if (String(url).endsWith('/agents/results')) {
+      return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+    }
+    return realFetch(url, opts);
+  };
+  const runtime = createAgentRuntime({
+    config: makeConfig(server),
+    token: 'valid',
+    agentId: 1,
+    logger: silentLogger,
+    fetchImpl,
+    // Trivial sampler so runTest is fast + independent of the host's /proc.
+    samplerFactory: () => async () => ({ source: 'proc', interfaces: [], totals: {} }),
+  });
+  try {
+    runtime.start();
+    await withTimeout(onceEvent(runtime, 'connected'), 4000, 'no connected message');
+    const errored = server.waitForWsMessage((m) => m.type === 'agent.error');
+    await runtime.reportNow();
+    const frame = await withTimeout(errored, 4000, 'no agent.error frame');
+    assert.equal(frame.category, 'traffic-report');
+    assert.equal(frame.code, 'HTTP_ERROR'); // a 500 surfaces as HTTP_ERROR, not fatal
+    assert.ok(frame.message && frame.message.includes('500'));
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});
