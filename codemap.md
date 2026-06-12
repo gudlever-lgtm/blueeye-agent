@@ -169,7 +169,11 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
   all timers, does **not** reconnect, does **not** re-enroll, and the process
   exits 1. Manual intervention required.
 - **Everything else is non-terminal.** Transient REST/WS errors are logged and
-  the loop continues; WS reconnects with exponential backoff + jitter.
+  the loop continues; WS reconnects with exponential backoff + jitter. Each such
+  error is also reported to the server over the live channel as an `agent.error`
+  frame (`reportError` in [`runtime.js`](src/runtime.js)) — best-effort + metadata
+  only, so it surfaces in the server's audit trail (Reporting → Audit) instead of
+  hiding in the host's local log. A closed socket simply drops it.
 - **Collectors swallow malformed packets** (counted as `dropped`), never crash.
 - **Probes never throw** (bad probe → `ok:false`).
 - System metrics are **best-effort** — a failure there must not lose the
