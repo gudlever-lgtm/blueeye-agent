@@ -344,8 +344,16 @@ function createAgentRuntime({
 
   client.on('open', () => {
     emitter.emit('open');
-    // On (re)connect, refresh config so source changes are picked up.
-    if (!fatal) loadServerConfig().catch(() => {});
+    // On (re)connect, re-report capabilities AND refresh config. Re-reporting
+    // capabilities converges the server's stored agent version onto the running
+    // one — after a self-update/restart, or when the one-shot bootstrap report
+    // raced a server restart and never landed. Without this the dashboard's
+    // overview keeps showing the stale version (and a phantom "update" badge)
+    // even though the live agent — and the Diagnose snapshot — is newer.
+    if (!fatal) {
+      reportCapabilities().catch(() => {});
+      loadServerConfig().catch(() => {});
+    }
   });
   client.on('connected', (m) => emitter.emit('connected', m));
   client.on('close', (code) => emitter.emit('close', code));

@@ -18,6 +18,8 @@ function withTimeout(promise, ms, message) {
 
 const onceEvent = (emitter, name) => new Promise((resolve) => emitter.once(name, resolve));
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // Small backoff so the reconnect test is fast.
 const makeConfig = (server) => ({
   serverUrl: server.url,
@@ -261,11 +263,19 @@ test('reconnects after a dropped connection (exponential backoff)', async () => 
     runtime.start();
     await withTimeout(onceEvent(runtime, 'open'), 4000, 'first open failed');
 
+    const capsBefore = server.receivedCapabilities.length;
     const reconnected = onceEvent(runtime, 'open');
     server.dropAllSockets(); // simulate a lost connection
     await withTimeout(reconnected, 4000, 'did not reconnect');
 
     assert.ok(opens >= 2, `expected at least 2 opens, got ${opens}`);
+    // Re-reporting capabilities on (re)connect keeps the server's stored agent
+    // version in step with the running one (see the 'open' handler).
+    await withTimeout(
+      (async () => { while (server.receivedCapabilities.length <= capsBefore) await delay(20); })(),
+      4000,
+      'capabilities not re-reported on reconnect'
+    );
   } finally {
     runtime.stop();
     await server.close();
