@@ -35,9 +35,12 @@ function verifyPeerOrDestroy(socket, expected) {
   if (err) socket.destroy(err);
 }
 
-// Minimal JSON request over core http/https. When `fingerprint` is set and the
-// URL is https, the server certificate is pinned to it. `body` may be a string
-// (sent as-is) or an object (JSON-encoded). Resolves { status, raw, json }.
+// Minimal JSON/binary request over core http/https. When `fingerprint` is set
+// and the URL is https, the server certificate is pinned to it. `body` may be a
+// string or Buffer/TypedArray/ArrayBuffer (sent as-is, byte for byte) or a
+// plain object (JSON-encoded). Resolves { status, raw, json, buffer, headers }:
+// `buffer` is the exact response bytes (binary-safe), `raw`/`json` its utf8
+// view, `headers` Node's lower-cased response-header object.
 function requestJson({ url, method = 'GET', headers = {}, body, fingerprint, timeoutMs = 15000 }) {
   return new Promise((resolve, reject) => {
     let u;
@@ -49,7 +52,13 @@ function requestJson({ url, method = 'GET', headers = {}, body, fingerprint, tim
     }
     const isHttps = u.protocol === 'https:';
     const lib = isHttps ? https : http;
-    const payload = body == null ? null : (typeof body === 'string' ? body : JSON.stringify(body));
+    let payload = null;
+    if (body != null) {
+      if (typeof body === 'string' || Buffer.isBuffer(body)) payload = body;
+      else if (ArrayBuffer.isView(body)) payload = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+      else if (body instanceof ArrayBuffer) payload = Buffer.from(body);
+      else payload = JSON.stringify(body);
+    }
 
     const opts = {
       method,
@@ -65,13 +74,14 @@ function requestJson({ url, method = 'GET', headers = {}, body, fingerprint, tim
     if (wantFp) opts.rejectUnauthorized = false; // trust = the pinned fingerprint, verified on secureConnect
 
     const req = lib.request(opts, (res) => {
-      let raw = '';
-      res.setEncoding('utf8');
-      res.on('data', (c) => { raw += c; });
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        const raw = buffer.toString('utf8');
         let json = null;
         try { json = raw ? JSON.parse(raw) : null; } catch { /* non-JSON */ }
-        resolve({ status: res.statusCode, raw, json });
+        resolve({ status: res.statusCode, raw, json, buffer, headers: res.headers || {} });
       });
     });
     // Pin the leaf cert as soon as the TLS handshake completes, before the
@@ -87,15 +97,26 @@ function requestJson({ url, method = 'GET', headers = {}, body, fingerprint, tim
 }
 
 // Adapts requestJson to the subset of the fetch() interface the agent uses
-// (status, ok, json(), text()), so existing modules can pin transparently.
+// (status, ok, headers.get(), json(), text(), arrayBuffer()), so every module
+// can pin transparently — including the binary consumers: selfUpdate needs
+// arrayBuffer() + the X-Release-* headers, speedtest needs arrayBuffer() and a
+// verbatim Buffer upload.
 function makePinnedFetch(fingerprint) {
   return async (url, { method = 'GET', headers = {}, body } = {}) => {
-    const { status, raw } = await requestJson({ url, method, headers, body, fingerprint });
+    const { status, raw, buffer, headers: resHeaders } = await requestJson({ url, method, headers, body, fingerprint });
     return {
       status,
       ok: status >= 200 && status < 300,
+      headers: {
+        get(name) {
+          const v = resHeaders[String(name).toLowerCase()];
+          if (v == null) return null;
+          return Array.isArray(v) ? v.join(', ') : String(v);
+        },
+      },
       async json() { return raw ? JSON.parse(raw) : null; },
       async text() { return raw; },
+      async arrayBuffer() { return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength); },
     };
   };
 }

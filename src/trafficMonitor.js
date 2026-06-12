@@ -56,6 +56,14 @@ function snapshot(readProc) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Cap on the per-interface list in a snapshot. The server rejects any single
+// result over 64 KiB, and a docker/k8s host can carry hundreds of (mostly
+// virtual) veth interfaces — without a cap one such host loses ALL traffic
+// reporting to permanent 400s. The busiest interfaces are kept (sorted by
+// rx+tx bytes over the window); `totals` still cover every interface, and the
+// snapshot says how many entries were left out (`interfacesOmitted`).
+const MAX_INTERFACES = 64;
+
 // Samples network traffic by reading /proc/net/dev twice `intervalMs` apart and
 // computing per-interface deltas and rates. Counters are injectable for tests.
 async function sampleTraffic({
@@ -65,6 +73,7 @@ async function sampleTraffic({
   now = () => Date.now(),
   includeLoopback = false,
   readIfaceMeta = defaultReadIfaceMeta,
+  maxInterfaces = MAX_INTERFACES,
 } = {}) {
   const t0 = now();
   const first = snapshot(readProc);
@@ -73,7 +82,7 @@ async function sampleTraffic({
   const second = snapshot(readProc);
 
   const elapsedSec = Math.max((t1 - t0) / 1000, 0.001);
-  const interfaces = [];
+  const entries = [];
   const totals = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, rxErrors: 0, txErrors: 0, rxDrop: 0, txDrop: 0 };
   const delta = (a, b, k) => Math.max((a[k] || 0) - (b[k] || 0), 0);
 
@@ -92,8 +101,7 @@ async function sampleTraffic({
     totals.rxPackets += rxPackets; totals.txPackets += txPackets;
     totals.rxErrors += rxErrors; totals.txErrors += txErrors;
     totals.rxDrop += rxDrop; totals.txDrop += txDrop;
-    const meta = await readIfaceMeta(iface);
-    interfaces.push({
+    entries.push({
       iface,
       rxBytes,
       txBytes,
@@ -105,15 +113,30 @@ async function sampleTraffic({
       txErrors,
       rxDrop,
       txDrop,
-      operStatus: meta.operStatus,
-      speedMbps: meta.speedMbps,
     });
+  }
+
+  // Cap AFTER totals so omitted interfaces still count there, and BEFORE the
+  // sysfs meta reads so a veth farm doesn't cost hundreds of file reads per
+  // sample. Order is unchanged when under the cap.
+  let interfacesOmitted = 0;
+  if (entries.length > maxInterfaces) {
+    entries.sort((a, b) => (b.rxBytes + b.txBytes) - (a.rxBytes + a.txBytes));
+    interfacesOmitted = entries.length - maxInterfaces;
+    entries.length = maxInterfaces;
+  }
+
+  const interfaces = [];
+  for (const entry of entries) {
+    const meta = await readIfaceMeta(entry.iface);
+    interfaces.push({ ...entry, operStatus: meta.operStatus, speedMbps: meta.speedMbps });
   }
 
   return {
     intervalMs,
     elapsedSec: Math.round(elapsedSec * 1000) / 1000,
     interfaces,
+    ...(interfacesOmitted ? { interfacesOmitted } : {}),
     totals: {
       ...totals,
       rxBytesPerSec: Math.round(totals.rxBytes / elapsedSec),
@@ -122,4 +145,4 @@ async function sampleTraffic({
   };
 }
 
-module.exports = { parseProcNetDev, snapshot, sampleTraffic, defaultReadIfaceMeta };
+module.exports = { parseProcNetDev, snapshot, sampleTraffic, defaultReadIfaceMeta, MAX_INTERFACES };

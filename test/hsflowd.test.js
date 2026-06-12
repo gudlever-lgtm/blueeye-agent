@@ -120,6 +120,27 @@ test('docker runtime defers to the sidecar instead of self-managing', async () =
   assert.equal(exec.calls.length, 0, 'must not shell out on a containerised agent');
 });
 
+// ---- isManaged: recognising OUR conf across restarts ------------------------
+
+test('isManaged recognises a conf this agent wrote (and survives a restart)', () => {
+  const m = createHsflowdManager({ exec: fakeExec([]), platform: 'linux', readFile: () => renderHsflowdConf() });
+  assert.equal(m.isManaged(), true);
+});
+
+test('isManaged never claims an operator-managed or absent conf', () => {
+  const operatorConf = createHsflowdManager({ exec: fakeExec([]), platform: 'linux', readFile: () => 'sflow { collector { ip = 10.0.0.9 } }' });
+  assert.equal(operatorConf.isManaged(), false);
+  const noConf = createHsflowdManager({ exec: fakeExec([]), platform: 'linux', readFile: () => null });
+  assert.equal(noConf.isManaged(), false);
+});
+
+test('isManaged is false on docker / non-linux (nothing to manage there)', () => {
+  const docker = createHsflowdManager({ exec: fakeExec([]), platform: 'linux', runtime: 'docker', readFile: () => renderHsflowdConf() });
+  assert.equal(docker.isManaged(), false);
+  const mac = createHsflowdManager({ exec: fakeExec([]), platform: 'darwin', readFile: () => renderHsflowdConf() });
+  assert.equal(mac.isManaged(), false);
+});
+
 test('enable: builds hsflowd from source when missing, writes conf, enables+starts, reports active', async () => {
   const writes = [];
   const calls = [];

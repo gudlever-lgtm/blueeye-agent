@@ -75,6 +75,31 @@ test('a plain proc config never touches hsflowd', async () => {
   }
 });
 
+test('a non-sflow config disables an exporter provisioned by a PREVIOUS run (conf marker)', async () => {
+  // Fresh process: the in-memory "we enabled it" flag is gone, but the manager
+  // recognises its own conf marker — the exporter must not be orphaned.
+  const server = await startFakeServer({ validTokens: ['valid'], monitorConfig: { source: 'proc' } });
+  const mgr = fakeManager();
+  mgr.isManaged = () => true;
+  const runtime = createAgentRuntime({
+    config: makeConfig(server), token: 'valid', agentId: 1, logger: silentLogger, hsflowdManager: mgr,
+  });
+  try {
+    const reconciled = onceEvent(runtime, 'hsflowd');
+    const reported = server.waitForWsMessage((m) => m.type === 'sflow.status');
+    runtime.start();
+    const r = await withTimeout(reconciled, 4000, 'hsflowd never reconciled');
+    assert.equal(r.state, 'inactive');
+    assert.equal(mgr.calls.disable, 1);
+    assert.equal(mgr.calls.enable.length, 0);
+    const status = await withTimeout(reported, 4000, 'no sflow.status reported');
+    assert.equal(status.state, 'inactive'); // the stop is visible server-side
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});
+
 test('sflow without the hsflowd flag does not provision an exporter (external-source case)', async () => {
   const server = await startFakeServer({
     validTokens: ['valid'],

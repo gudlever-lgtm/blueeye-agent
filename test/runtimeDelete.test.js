@@ -41,6 +41,37 @@ test('a delete command wipes the token, removes the agent, and reports completed
   }
 });
 
+test('a delete stops an agent-managed hsflowd exporter before removing the host install', async () => {
+  const server = await startFakeServer({ validTokens: ['valid'], monitorConfig: { source: 'proc' } });
+  const order = [];
+  const hsflowd = {
+    ...noopHsflowd,
+    isManaged: () => true, // e.g. provisioned by a previous run
+    disable: async () => { order.push('hsflowd-disable'); return { state: 'inactive' }; },
+  };
+  const selfDeleter = { wipeToken: () => order.push('wipe'), remove: () => order.push('remove') };
+  const runtime = createAgentRuntime({
+    config: makeConfig(server), token: 'valid', agentId: 1, logger: silentLogger,
+    hsflowdManager: hsflowd, selfDeleter, capabilities: systemd,
+  });
+  try {
+    const reported = server.waitForWsMessage((m) => m.type === 'action-result' && m.action === 'delete');
+    runtime.start();
+    await withTimeout(onceEvent(runtime, 'config'), 4000, 'no config');
+    server.sendCommandToAll({ name: 'delete', id: 'd2', auditId: 9 });
+    const msg = await withTimeout(reported, 4000, 'no delete action-result');
+    assert.equal(msg.ok, true);
+    // The startup reconcile may add its own disable; what matters is the
+    // sequence: exporter stopped before the wipe, removal after it.
+    const wipeIdx = order.indexOf('wipe');
+    assert.ok(order.slice(0, wipeIdx).includes('hsflowd-disable'), `exporter stopped before the token wipe (got: ${order.join(' -> ')})`);
+    assert.ok(order.indexOf('remove') > wipeIdx, 'removal happens after the wipe');
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});
+
 test('a docker-managed agent declines delete (the host removes it)', async () => {
   const server = await startFakeServer({ validTokens: ['valid'], monitorConfig: { source: 'proc' } });
   const calls = { wipe: 0, remove: 0 };

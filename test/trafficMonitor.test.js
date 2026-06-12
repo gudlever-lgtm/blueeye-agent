@@ -77,6 +77,45 @@ test('sampleTraffic computes per-interface deltas and rates (loopback excluded)'
   assert.equal(traffic.totals.txBytes, 4000);
 });
 
+test('sampleTraffic caps the interface list at the busiest N (veth farms vs the 64KiB result cap)', async () => {
+  // 8 interfaces with distinct traffic; cap at 3 -> the 3 busiest survive,
+  // totals still cover all 8, and the snapshot says how many were omitted.
+  const line = (name, bytes) => `  ${name}: ${bytes} 1 0 0 0 0 0 0 ${bytes} 1 0 0 0 0 0 0`;
+  const names = ['veth0', 'veth1', 'veth2', 'veth3', 'veth4', 'eth0', 'veth5', 'veth6'];
+  const s1 = ['h', 'h', ...names.map((n) => line(n, 0))].join('\n');
+  // eth0 moves the most bytes, veth6 second, veth5 third; the rest trickle.
+  const traffic = { veth0: 10, veth1: 20, veth2: 30, veth3: 40, veth4: 50, eth0: 9000, veth5: 700, veth6: 800 };
+  const s2 = ['h', 'h', ...names.map((n) => line(n, traffic[n]))].join('\n');
+  const snaps = [s1, s2];
+  let c = 0;
+  const out = await sampleTraffic({
+    readProc: () => snaps[c++],
+    sleepFn: async () => {},
+    intervalMs: 1000,
+    now: (() => { const v = [1000, 2000]; let i = 0; return () => v[i++]; })(),
+    readIfaceMeta: () => ({ operStatus: 'up', speedMbps: null }),
+    maxInterfaces: 3,
+  });
+  assert.equal(out.interfaces.length, 3);
+  assert.deepEqual(out.interfaces.map((i) => i.iface), ['eth0', 'veth6', 'veth5']); // busiest first
+  assert.equal(out.interfacesOmitted, 5);
+  // Totals still account for every interface, kept or omitted.
+  assert.equal(out.totals.rxBytes, Object.values(traffic).reduce((s, v) => s + v, 0));
+});
+
+test('sampleTraffic under the cap keeps its original order and omits the marker field', async () => {
+  const snapshots = [SNAP1, SNAP2];
+  let call = 0;
+  const out = await sampleTraffic({
+    readProc: () => snapshots[call++],
+    sleepFn: async () => {},
+    intervalMs: 1000,
+    maxInterfaces: 64,
+  });
+  assert.equal(out.interfaces.length, 1);
+  assert.equal('interfacesOmitted' in out, false); // shape unchanged for normal hosts
+});
+
 test('sampleTraffic returns empty interfaces when /proc is unreadable', async () => {
   const traffic = await sampleTraffic({
     readProc: () => {

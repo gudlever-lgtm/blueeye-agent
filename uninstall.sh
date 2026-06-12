@@ -49,8 +49,16 @@ HAVE_CONTAINER=0
 if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
   HAVE_CONTAINER=1
 fi
+# An hsflowd exporter the AGENT provisioned (recognised by the managed marker the
+# agent writes as the conf's first line). An operator's own hsflowd has no marker
+# and is never touched.
+HSFLOWD_CONF="/etc/hsflowd.conf"
+HAVE_HSFLOWD=0
+if [ -f "$HSFLOWD_CONF" ] && grep -q '^# Managed by blueeye-agent' "$HSFLOWD_CONF" 2>/dev/null; then
+  HAVE_HSFLOWD=1
+fi
 
-if [ "$HAVE_SERVICE" -eq 0 ] && [ "$HAVE_CONTAINER" -eq 0 ] && [ ! -d "$INSTALL_DIR" ] && [ ! -d "$STATE_DIR" ]; then
+if [ "$HAVE_SERVICE" -eq 0 ] && [ "$HAVE_CONTAINER" -eq 0 ] && [ "$HAVE_HSFLOWD" -eq 0 ] && [ ! -d "$INSTALL_DIR" ] && [ ! -d "$STATE_DIR" ]; then
   log "No BlueEye agent found on this host (no '$SERVICE_NAME' service, no '$CONTAINER' container, no $INSTALL_DIR/$STATE_DIR). Nothing to do."
   exit 0
 fi
@@ -59,6 +67,7 @@ fi
 warn "This will REMOVE the BlueEye agent from this machine:"
 [ "$HAVE_SERVICE" -eq 1 ]   && warn "  - systemd service '$SERVICE_NAME' (stop, disable, delete $UNIT)"
 [ "$HAVE_CONTAINER" -eq 1 ] && warn "  - Docker container '$CONTAINER' (stop, remove)"
+[ "$HAVE_HSFLOWD" -eq 1 ]   && warn "  - agent-managed hsflowd exporter (stop, disable, delete $HSFLOWD_CONF; the hsflowd binary stays installed)"
 [ -d "$INSTALL_DIR" ]       && warn "  - install directory $INSTALL_DIR (releases + current)"
 [ -d "$STATE_DIR" ]         && warn "  - state directory $STATE_DIR (incl. the stored enrollment token)"
 [ -d "$LOG_DIR" ]           && warn "  - log directory $LOG_DIR (local action trail)"
@@ -83,6 +92,12 @@ if [ "$HAVE_SERVICE" -eq 1 ]; then
   rm -f "$UNIT"
   rm -rf "${UNIT}.d"
   systemctl daemon-reload 2>/dev/null || true
+fi
+
+if [ "$HAVE_HSFLOWD" -eq 1 ]; then
+  log "Stopping agent-managed hsflowd exporter ..."
+  systemctl disable --now hsflowd 2>/dev/null || true
+  rm -f "$HSFLOWD_CONF"
 fi
 
 if [ "$HAVE_CONTAINER" -eq 1 ]; then
