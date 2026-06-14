@@ -298,11 +298,17 @@ Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
   - `snmp` ([`src/snmpMonitor.js`](src/snmpMonitor.js)): polls a Cisco device's
     IF-MIB high-capacity octet counters (ifHCInOctets/ifHCOutOctets) over SNMP —
     useful when the agent runs alongside the device, or on IOS without `/proc`.
+    Requires the optional `net-snmp` dependency: `npm install net-snmp` (kept out
+    of the agent's single-dependency default footprint). Until it is installed the
+    agent reports `snmp` under `unavailable` in its capabilities (`net-snmp not
+    installed`), so the dashboard explains why SNMP isn't offered rather than the
+    source silently never appearing.
 - **Capabilities + config:** on start the agent reports its capabilities
-  (`{ sources: [...] }`) to `POST /agents/me/capabilities` and fetches its
-  assigned source from `GET /agents/me/config`. It re-fetches the config on every
-  (re)connection so dashboard changes take effect immediately. Both sources
-  produce the same result format, so the server/dashboard treats them uniformly.
+  (`{ sources: [...], unavailable: { ... } }`) to `POST /agents/me/capabilities`
+  and fetches its assigned source from `GET /agents/me/config`. It re-fetches the
+  config on every (re)connection so dashboard changes take effect immediately. Both
+  sources produce the same result format, so the server/dashboard treats them
+  uniformly.
 - **Continuous reporting:** independently of server commands, the agent measures
   traffic and submits the result on a fixed interval
   (`BLUEEYE_REPORT_INTERVAL_MS`, default 60s; `0` disables it). This is how the
