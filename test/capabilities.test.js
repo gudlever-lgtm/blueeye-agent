@@ -24,6 +24,16 @@ test('detectCapabilities includes netflow and sflow by default (built-in collect
   assert.deepEqual(caps.sources, ['netflow', 'sflow']);
 });
 
+test('detectCapabilities explains WHY an optional source is unavailable', () => {
+  const caps = detectCapabilities({ canReadProc: () => false, hasSnmp: () => false });
+  assert.match(caps.unavailable.snmp, /net-snmp/);
+  assert.match(caps.unavailable.proc, /proc/);
+  // When a source IS available it must not appear in the unavailable map.
+  const ok = detectCapabilities({ canReadProc: () => true, hasSnmp: () => true });
+  assert.equal(ok.unavailable.snmp, undefined);
+  assert.equal(ok.unavailable.proc, undefined);
+});
+
 test('detectCapabilities reports the managed runtime', () => {
   const caps = detectCapabilities({ canReadProc: () => false, hasSnmp: () => false, hasNetflow: () => false, hasSflow: () => false, managed: 'systemd' });
   assert.equal(caps.managed, 'systemd');

@@ -22,14 +22,19 @@ function detectCapabilities({
   managed = detectManaged(),
 } = {}) {
   const sources = [];
-  if (canReadProc()) sources.push('proc');
-  if (hasSnmp()) sources.push('snmp');
+  const unavailable = {};
+  if (canReadProc()) sources.push('proc'); else unavailable.proc = '/proc/net/dev not readable';
+  if (hasSnmp()) sources.push('snmp'); else unavailable.snmp = 'net-snmp not installed (npm install net-snmp)';
   if (hasNetflow()) sources.push('netflow');
   if (hasSflow()) sources.push('sflow');
   // `managed` tells the server how this agent is supervised, so it knows whether
   // a one-click self-update is possible: 'systemd' (yes), 'docker'/'unmanaged'
   // (no — the host rebuilds those).
-  return { sources, agentVersion: version, managed };
+  //
+  // `unavailable` explains WHY an optional source isn't offered (e.g. the
+  // optional net-snmp dependency is absent), so the dashboard can surface it
+  // instead of SNMP just silently never appearing. Additive + metadata only.
+  return { sources, unavailable, agentVersion: version, managed };
 }
 
 // How this agent is supervised, which decides whether it can self-update:

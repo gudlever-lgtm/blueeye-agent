@@ -288,7 +288,12 @@ not by the running agent): `GET /enroll/agent-release` (metadata JSON),
 
 ## 2. WebSocket `/ws/agent`
 
-Connection: `ws(s)://<server>/ws/agent` with `Authorization: Bearer <token>`.
+Connection: `ws(s)://<server>/ws/agent` with `Authorization: Bearer <token>` and
+`X-BlueEye-Protocol: <n>` (the agent's wire-contract version from
+`src/protocol.js`; absent on a pre-versioning agent → the server treats it as 1).
+The server echoes its own version in the `connected` frame. A version mismatch is
+logged on both sides but is **never** fatal — the server stays backward-compatible
+so fielded agents update on their own schedule.
 Server rejects the upgrade with 401 (bad token → agent fatal, no reconnect) or
 403 (license/agent-cap — agent retries with backoff). On any other drop the
 agent reconnects with exponential backoff + jitter (50–100% of
@@ -311,7 +316,7 @@ recognise, and frames that fail JSON.parse, are silently ignored on both sides.
 
 | frame | shape | when |
 | --- | --- | --- |
-| `connected` | `{ type:'connected', agentId }` | immediately after the upgrade |
+| `connected` | `{ type:'connected', agentId, protocolVersion }` | immediately after the upgrade |
 | `command` | `{ type:'command', command: <string or object> }` | operator/dashboard actions, test packages, auto-install |
 
 `command` may be a bare string (`"run test"`) or an object whose verb is read

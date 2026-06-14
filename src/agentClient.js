@@ -5,6 +5,7 @@ const DefaultWebSocket = require('ws');
 const { computeBackoff } = require('./backoff');
 const { verifyPeerOrDestroy } = require('./httpsClient');
 const { normalizeFingerprint } = require('./fingerprint');
+const { PROTOCOL_VERSION } = require('./protocol');
 
 // Derives the WebSocket URL from the HTTP server URL (http->ws, https->wss).
 function toWsUrl(serverUrl, wsPath) {
@@ -105,7 +106,10 @@ function createAgentClient({
     };
 
     logger.info(`Connecting to ${wsUrl} ...`);
-    const wsOpts = { headers: { Authorization: `Bearer ${token}` } };
+    // Declare our wire-contract version so the server can detect a mismatch. The
+    // server echoes its own in the `connected` frame; neither side treats a
+    // mismatch as fatal.
+    const wsOpts = { headers: { Authorization: `Bearer ${token}`, 'X-BlueEye-Protocol': String(PROTOCOL_VERSION) } };
     const pinning = pin && wsUrl.startsWith('wss:');
     // Pin by verifying the exact leaf cert on secureConnect (Node skips
     // checkServerIdentity when rejectUnauthorized is false), before the upgrade
@@ -143,6 +147,12 @@ function createAgentClient({
       if (msg && msg.type === 'command') {
         emitter.emit('command', msg.command);
       } else if (msg && msg.type === 'connected') {
+        // Protocol-version check: warn (never fail) if the server speaks a
+        // different wire-contract version than we do.
+        const serverProtocol = Number(msg.protocolVersion) || 1;
+        if (serverProtocol !== PROTOCOL_VERSION) {
+          logger.warn(`Server protocol v${serverProtocol} != agent v${PROTOCOL_VERSION}; continuing (the server stays backward-compatible).`);
+        }
         emitter.emit('connected', msg);
       }
     });
