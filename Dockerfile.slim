@@ -1,0 +1,23 @@
+# BlueEye agent — slim image using a pre-built binary from blueeye-server.
+#
+# This Dockerfile is used by the install script when the server has already
+# built a self-contained agent binary (~60 MB).  The resulting image is
+# ~120 MB instead of the ~500 MB of node:22-alpine.
+#
+# The install script downloads the binary for the host architecture and places
+# it in the build context as `blueeye-agent-linux` before running docker build.
+FROM debian:12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ethtool curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY blueeye-agent-linux /usr/local/bin/blueeye-agent
+RUN chmod +x /usr/local/bin/blueeye-agent
+
+ENV NODE_ENV=production
+
+# The agent is an outbound client — it exposes no port. Configure it via env
+# (BLUEEYE_SERVER_URL, BLUEEYE_ENROLLMENT_CODE, BLUEEYE_TOKEN_PATH, ...).
+# Note: to measure host-wide traffic, run with `network_mode: host`.
+CMD ["/usr/local/bin/blueeye-agent"]
