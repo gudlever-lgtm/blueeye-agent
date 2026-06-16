@@ -1,6 +1,6 @@
 {
   "name": "blueeye-agent",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "description": "BlueEye agent — runs on customer machines and connects to blueeye-server.",
   "license": "MIT",
@@ -17,5 +17,17 @@
   },
   "dependencies": {
     "ws": "^8.18.0"
+  },
+  "pkg": {
+    "scripts": [
+      "src/**/*.js"
+    ],
+    "assets": [
+      "package.json"
+    ],
+    "ignoredModules": [
+      "bufferutil",
+      "utf-8-validate"
+    ]
   }
 }
