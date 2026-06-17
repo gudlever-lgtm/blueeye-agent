@@ -30,6 +30,7 @@ UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 [ "$(id -u)" = "0" ] || { echo "run with sudo (root)" >&2; exit 1; }
 command -v node >/dev/null || { echo "Node.js (>=20) is required" >&2; exit 1; }
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
+NODE_BIN=$(command -v node)
 
 # Fail fast on a first install that can't get credentials: neither a stored token
 # nor a one-time enrollment code. Without one the agent exits 1 on every boot and
@@ -65,8 +66,13 @@ tar -xzf "$TMP/agent.tgz" -C "$DEST"
 ln -sfn "$DEST" "$INSTALL_DIR/current.next"
 mv -T "$INSTALL_DIR/current.next" "$INSTALL_DIR/current"
 
-# 3) Install the systemd unit (templated with the server URL).
-sed "s#https://server.example#${SERVER_URL}#g" "$DEST/deploy/blueeye-agent.service" > "$UNIT"
+# 3) Install the systemd unit (template substitutions: server URL, node binary
+#    path, and install dir so non-default BLUEEYE_INSTALL_DIR works correctly).
+sed \
+  -e "s#https://server.example#${SERVER_URL}#g" \
+  -e "s#/usr/bin/node#${NODE_BIN}#g" \
+  -e "s#/opt/blueeye-agent#${INSTALL_DIR}#g" \
+  "$DEST/deploy/blueeye-agent.service" > "$UNIT"
 
 # Pin the self-update restart target to THIS unit's name (selfUpdate defaults to
 # 'blueeye-agent'); only matters when SERVICE_NAME was overridden, but harmless otherwise.
