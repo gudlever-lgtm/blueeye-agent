@@ -36,9 +36,9 @@ function collectorSampler(collector, logger, kind) {
 // proc/snmp produce a per-interface byte-rate snapshot; netflow/sflow produce a
 // flow summary (byPort/byProtocol/topTalkers). All are stored under the same
 // `traffic` field; the server reads whichever fields are present. Unknown
-// sources fall back to proc (Linux: /proc/net/dev; Windows: a persistent
-// powershell.exe — see trafficMonitorWin.js). Collector/platform factories are
-// injectable for tests.
+// sources fall back to proc (Linux: /proc/net/dev; macOS: netstat -ib;
+// Windows: a persistent powershell.exe — see trafficMonitorWin.js).
+// Collector/platform factories are injectable for tests.
 function createSampler(
   monitorConfig = { source: 'proc' },
   {
@@ -67,6 +67,11 @@ function createSampler(
 
   if (platform === 'win32') {
     return winTrafficFactory({ logger });
+  }
+
+  if (platform === 'darwin') {
+    const { sampleTraffic: sampleTrafficDarwin } = require('./trafficMonitorDarwin');
+    return ({ intervalMs }) => sampleTrafficDarwin({ intervalMs });
   }
 
   return ({ intervalMs }) => sampleTraffic({ intervalMs });
