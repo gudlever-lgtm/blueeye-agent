@@ -56,6 +56,10 @@ function createSampler(
     return collectorSampler(sflowFactory({ port: sf.port || 6343, bindAddress: sf.bindAddress || '0.0.0.0' }), logger, 'sflow');
   }
 
+  if (process.platform === 'darwin') {
+    const { sampleTraffic: sampleTrafficDarwin } = require('./trafficMonitorDarwin');
+    return ({ intervalMs }) => sampleTrafficDarwin({ intervalMs });
+  }
   return ({ intervalMs }) => sampleTraffic({ intervalMs });
 }
 
