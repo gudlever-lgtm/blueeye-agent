@@ -5,10 +5,11 @@ A Go port of the BlueEye monitoring agent, specified by
 whose wire behaviour the Node **blueeye-server** cannot distinguish from the
 Node agent — identical REST paths, WebSocket frames, headers and JSON shapes.
 
-> **Status.** This milestone implements the foundation (config, token store,
-> REST + WebSocket clients) and the **definition-driven collector engine** plus
-> the Linux collectors. Windows/macOS collectors, sFlow, self-update and the
-> shadow diffing are later milestones.
+> **Status.** Implemented: the foundation (config, token store, REST + WebSocket
+> clients), the **definition-driven collector engine**, the **persistent
+> PowerShell stream** (Windows engine infrastructure), and the Linux, Windows and
+> macOS collector definitions. sFlow, self-update and the shadow diffing are
+> later milestones.
 
 ## Collectors are DATA, not code
 
@@ -30,8 +31,20 @@ Definition shape (`internal/collector/definition.go`):
 ```
 
 Parsers: `regex_lines` (named groups), `columns` (index → field, optional
-`trim`/`delimiter`/`skip_line`), `json` (dotted/`jq`-style paths), `key_value`
-(`key: value`). Metric types: `gauge` / `counter`.
+`trim`/`delimiter`/`skip_line`/`dedupe_by`, and **negative indices** that count
+from the end so a variable-width middle column doesn't shift the trailing ones),
+`json` (dotted/`jq`-style paths), `key_value` (`key: value`). Metric types:
+`gauge` / `counter`.
+
+### Windows: persistent PowerShell stream
+
+On Windows the engine keeps one long-lived `powershell.exe` running a driver
+loop (`internal/collector/stream.go`). Collector bodies are written to its stdin
+and each run's output is framed by a per-request marker. The **stream is code;
+what runs in it is data** (definition `exec.powershell` bodies). It handles
+PowerShell-not-found (start fails → collector skips), the stream dying
+mid-collection (restart on next use), and stalled output (a per-collect timeout
+kills and restarts the session). macOS/Linux definitions use plain `exec`.
 
 ### Engine guarantees
 

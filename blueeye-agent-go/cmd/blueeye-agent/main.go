@@ -87,7 +87,13 @@ func main() {
 
 	_ = apiclient.New(cfg.ServerURL, creds.Token, nil) // REST client (results/config/etc.)
 
-	engine := collector.NewEngine(store, nil, logger, func(res collector.Result) {
+	// The runner dispatches command execs to OSRunner and powershell bodies to a
+	// persistent PowerShell stream (Windows). Close the stream on shutdown.
+	runner := collector.DefaultRunner(logger)
+	if sr, ok := runner.PS.(*collector.StreamRunner); ok {
+		defer sr.Close()
+	}
+	engine := collector.NewEngine(store, runner, logger, func(res collector.Result) {
 		// Emit as a `data` frame over the live channel; shadow-tagged when asked.
 		_ = res
 	})
