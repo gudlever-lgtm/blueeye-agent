@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gudlever-lgtm/blueeye-agent-go/internal/apiclient"
 	"github.com/gudlever-lgtm/blueeye-agent-go/internal/audit"
@@ -21,7 +23,9 @@ import (
 	"github.com/gudlever-lgtm/blueeye-agent-go/internal/config"
 	"github.com/gudlever-lgtm/blueeye-agent-go/internal/logx"
 	"github.com/gudlever-lgtm/blueeye-agent-go/internal/protocol"
+	"github.com/gudlever-lgtm/blueeye-agent-go/internal/sflow"
 	"github.com/gudlever-lgtm/blueeye-agent-go/internal/tokenstore"
+	"github.com/gudlever-lgtm/blueeye-agent-go/internal/upgrade"
 	"github.com/gudlever-lgtm/blueeye-agent-go/internal/wsclient"
 )
 
@@ -98,13 +102,30 @@ func main() {
 		_ = res
 	})
 
-	ws := wsclient.New(wsclient.Options{
+	// Self-update: verified binary replacement (Ed25519, fail-closed). The
+	// release trust anchor comes from BLUEEYE_RELEASE_PUBLIC_KEY; the collector
+	// definitions cache (a separate dir) is never touched by an upgrade.
+	releaseURL := fmt.Sprintf("%s/enroll/agent-binary?os=%s&arch=%s", cfg.ServerURL, runtime.GOOS, runtime.GOARCH)
+	updater := upgrade.New(upgrade.Config{
+		Download:  upgrade.HTTPDownloader(nil, releaseURL, creds.Token),
+		Audit:     auditLog,
+		PublicKey: upgrade.ResolveReleasePublicKey(os.Getenv),
+		Restart:   upgrade.SystemdRestart(cfg.ServiceName),
+		Logger:    logger,
+	})
+
+	// Declared before New so the handler closures can reference it.
+	var ws *wsclient.Client
+	ws = wsclient.New(wsclient.Options{
 		Config: cfg,
 		Token:  creds.Token,
 		Logger: logger,
 		Handlers: wsclient.Handlers{
 			OnConnected: func(c protocol.Connected) {
 				logger.Infof("connected as agent %d (server protocol v%d).", c.AgentID, c.ProtocolVersion)
+			},
+			OnCommand: func(raw json.RawMessage) {
+				handleCommand(ctx, raw, updater, ws, logger)
 			},
 			OnDefinitions: func(raw json.RawMessage) {
 				installDefinitions(raw, store, engine, ctx, logger)
@@ -116,6 +137,20 @@ func main() {
 		},
 	})
 
+	// sFlow: receive hsflowd datagrams on localhost:6343, decode locally, and
+	// forward a flow summary over the WebSocket channel. Gated on BLUEEYE_SFLOW
+	// until monitorConfig-driven activation lands.
+	if os.Getenv("BLUEEYE_SFLOW") != "" {
+		coll := sflow.New(sflow.Options{BindAddress: "127.0.0.1", Port: 6343, Logger: logger})
+		if err := coll.Start(ctx); err != nil {
+			logger.Warnf("sflow collector: %v", err)
+		} else {
+			interval := time.Duration(cfg.ReportIntervalMs) * time.Millisecond
+			fwd := sflow.NewForwarder(coll, ws.Send, interval, cfg.Shadow, logger)
+			go fwd.Run(ctx)
+		}
+	}
+
 	go engine.Run(ctx)
 	go ws.Run(ctx)
 	// Ask the server for the authoritative definition set (server response wins).
@@ -123,6 +158,57 @@ func main() {
 
 	<-ctx.Done()
 	logger.Infof("shutting down.")
+}
+
+// updateVerbs recognises the update command aliases (matches command.js).
+func isUpdateVerb(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "update", "self-update", "self_update", "selfupdate", "upgrade":
+		return true
+	}
+	return false
+}
+
+// handleCommand dispatches a `command` frame. Only the update command is wired
+// in this milestone; the rest are logged and ignored.
+func handleCommand(ctx context.Context, raw json.RawMessage, updater *upgrade.Updater, ws *wsclient.Client, logger *logx.Logger) {
+	var c struct {
+		Name      string          `json:"name"`
+		Action    string          `json:"action"`
+		Type      string          `json:"type"`
+		Command   string          `json:"command"`
+		Version   string          `json:"version"`
+		Signature string          `json:"signature"`
+		ID        json.RawMessage `json:"id"`
+		AuditID   json.RawMessage `json:"auditId"`
+	}
+	// The command may be a bare string or an object.
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		c.Name = s
+	} else {
+		_ = json.Unmarshal(raw, &c)
+	}
+	verb := firstNonEmpty(c.Name, c.Action, c.Type, c.Command)
+	if !isUpdateVerb(verb) {
+		logger.Debugf("ignoring command %q (not wired in this build)", verb)
+		return
+	}
+	_ = ws.Send(map[string]any{"type": "ack", "id": c.ID, "accepted": true, "runtime": "go"})
+	if err := updater.Update(ctx, upgrade.Command{Version: c.Version, Signature: c.Signature}); err != nil {
+		_ = ws.Send(map[string]any{"type": "action-result", "auditId": c.AuditID, "action": "upgrade", "ok": false, "detail": err.Error()})
+		return
+	}
+	_ = ws.Send(map[string]any{"type": "action-result", "auditId": c.AuditID, "action": "upgrade", "ok": true, "version": c.Version})
+}
+
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // installDefinitions applies a `definitions` frame (the ONLY trusted path) and
