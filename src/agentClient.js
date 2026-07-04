@@ -146,6 +146,9 @@ function createAgentClient({
       }
       if (msg && msg.type === 'command') {
         emitter.emit('command', msg.command);
+      } else if (msg && msg.type === 'transaction_config') {
+        // Server-pushed transaction-test config (active tests for this agent).
+        emitter.emit('transaction-config', Array.isArray(msg.tests) ? msg.tests : []);
       } else if (msg && msg.type === 'connected') {
         // Protocol-version check: warn (never fail) if the server speaks a
         // different wire-contract version than we do.

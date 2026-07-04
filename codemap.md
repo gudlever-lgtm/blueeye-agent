@@ -19,6 +19,7 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 | REST | [`src/apiClient.js`](src/apiClient.js) — Bearer-authenticated calls |
 | Traffic sources | proc · snmp · netflow · sflow (server picks per agent) |
 | Active probes | ping · tcp · dns · traceroute · http |
+| Transaction tests | [`src/transactions/`](src/transactions/) — server pushes `transaction_config` over WS; the manager schedules each http/tcp/dns/icmp test (`interval_sec` ±10% jitter), runs an executor (Node core `http`/`https`/`net`/`dns` + system `ping`), classifies the failure phase, buffers results (max 1000, oldest dropped) and flushes `transaction_result` batches on reconnect. Config persists to a local JSON file with secrets AES-256-GCM-encrypted (key derived from the token) |
 | Tests | `node --test` over [`test/`](test) against [`test-support/fakeServer.js`](test-support/fakeServer.js) |
 
 ## Boot sequence
