@@ -559,12 +559,35 @@ server. There is no PID/lock file; supervision is external (systemd/docker).
 
 ## 8. Undocumented / code-only behaviours (not in PROTOCOL.md/codemap/README, or doc-drifted)
 
-1. **No Windows/macOS traffic collector exists.** The `proc` source is Linux-only;
-   on other OSes it silently yields empty interfaces. README claims 64-bit
-   Linux only, but `system.js` reports `win32`/`darwin` at enrollment and
-   ping/traceroute parse those platforms — so a non-Linux agent *can* enroll and
-   run probes but reports **no traffic**. **The single biggest gap the Go rewrite
-   must close.**
+1. **Windows/macOS traffic collectors — now present on `main` (updated 2026-07-04).**
+   At the time this audit was written (`main` @ `57bd793`) the `proc` source was
+   Linux-only and non-Linux hosts reported **no traffic** — the single biggest
+   gap. That gap is now **closed on the Node side** by three PRs merged
+   afterwards (#45 Windows, #46 macOS, #47 transactions):
+   * **macOS** (`src/trafficMonitorDarwin.js`): `netstat -ib`, **Link-rows only**
+     (`<Link#N>`), MAC-presence detection to handle the variable Address column
+     (`base = col[3] has ':' ? 4 : 3`), per-interface deltas/rates in the **same
+     proc snapshot shape**; `rxDrop`/`txDrop` always `0`, `operStatus`/`speedMbps`
+     always `null`, `lo0` skipped, 64-interface cap.
+   * **Windows** (`src/trafficMonitorWin.js`): a **persistent `powershell.exe`**
+     spawned once (not per poll), ticking every 1 s and emitting one compact JSON
+     line per tick `{ts, ifaces:{name:{rxBytes,rxPackets,rxErrors,rxDrop,txBytes,
+     txPackets,txErrors,txDrop,operStatus,speedMbps}}}` from
+     `Get-NetAdapterStatistics` (packets = Unicast+Multicast+Broadcast) +
+     `Get-NetAdapter` (Status/LinkSpeed); respawn with backoff; `buildSnapshot()`
+     reused for deltas/rates. This is the same "persistent PowerShell stream"
+     shape the Go rewrite targets.
+   * Both emit the **proc per-interface delta/rate snapshot**, so the server reads
+     them uniformly.
+
+   **Go parity implication:** the Go rewrite's Windows/macOS collectors are
+   **definition-driven and emit raw cumulative counters** (server derives rates),
+   whereas the Node agent now emits **agent-side deltas/rates** in the proc
+   snapshot shape. These are wire-*different* traffic payloads. To keep the Node
+   server from distinguishing the two, either (a) the Go engine grows a
+   delta/rate stage that reshapes counter definitions into the proc snapshot, or
+   (b) the shadow-diff phase accepts the counter-vs-rate difference as expected.
+   Track this when reconciling the shadow output.
 2. **Version drift in docs.** `PROTOCOL.md`/`REFACTOR-AUDIT.md` say `0.9.x`;
    `package.json` is **0.11.1**. Treat the code, not the docs, as truth.
 3. **`X-BlueEye-Protocol: 1`** upgrade header and the whole protocol-version
