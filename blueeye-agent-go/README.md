@@ -7,9 +7,10 @@ Node agent — identical REST paths, WebSocket frames, headers and JSON shapes.
 
 > **Status.** Implemented: the foundation (config, token store, REST + WebSocket
 > clients), the **definition-driven collector engine**, the **persistent
-> PowerShell stream** (Windows engine infrastructure), and the Linux, Windows and
-> macOS collector definitions. sFlow, self-update and the shadow diffing are
-> later milestones.
+> PowerShell stream** (Windows engine infrastructure), the Linux/Windows/macOS
+> collector definitions, the **sFlow receive/decode/forward path**, and the
+> **Ed25519-verified self-update**. The `--shadow` diffing is the remaining
+> milestone.
 
 ## Collectors are DATA, not code
 
@@ -63,6 +64,29 @@ kills and restarts the session). macOS/Linux definitions use plain `exec`.
 - **Two-state audit** — install/replace writes `initiated` → `completed`/`failed`
   records (`internal/audit`).
 
+### sFlow (engine code, not a definition)
+
+`internal/sflow` receives hsflowd sFlow v5 datagrams on `localhost:6343`, decodes
+flow samples + counter samples locally into the **same shape as the Node agent's
+decoder** (rate-scaled 5-tuples, `PROTO_NAMES`, uncompressed IPv6 groups), and
+forwards an aggregated flow summary (`byPort`/`byProtocol`/`topTalkers`/`totals`)
+over the WebSocket channel. Malformed datagrams are **counted and dropped**, never
+fatal. The flow buffer is bounded (100k); when the channel is down the forwarder
+**drops the snapshot with a counter** rather than buffering unbounded
+(backpressure). Enable with `BLUEEYE_SFLOW=1` (monitorConfig-driven activation is
+a later step).
+
+### Self-update (Ed25519, fail-closed)
+
+`internal/upgrade` downloads a new binary over REST, verifies the **Ed25519
+signature over the canonical manifest before touching disk** (byte-for-byte
+canonicalization parity with `src/release/canonicalize.js`), and only then
+self-replaces: `rename`-into-place on Linux/macOS, rename-the-running-exe on
+Windows. Any verification error (no key, bad manifest, bad signature, checksum or
+version mismatch, download 404/500) **fails closed** — no swap, no restart. The
+whole flow is wrapped in a two-state audit (`initiated` → `completed`/`failed`),
+and the **collector definitions cache survives upgrades untouched**.
+
 ## Build & test
 
 ```bash
@@ -84,5 +108,7 @@ internal/backoff        jittered reconnect backoff
 internal/protocol       wire constants + frame shapes
 internal/audit          two-state audit records
 internal/collector      definitions, parsers, store, engine
-collectors/linux/*.json audited Linux collector definitions
+internal/sflow          sFlow v5 receive/decode/aggregate/forward
+internal/upgrade        Ed25519-verified binary self-update
+collectors/{linux,windows,darwin}/*.json  collector definitions
 ```
