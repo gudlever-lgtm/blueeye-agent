@@ -1,0 +1,22 @@
+{
+  "id": "linux.loadavg",
+  "version": 1,
+  "platform": "linux",
+  "interval_seconds": 60,
+  "exec": { "command": "cat", "args": ["/proc/loadavg"] },
+  "parser": {
+    "type": "columns",
+    "columns": [
+      { "index": 0, "field": "load1" },
+      { "index": 1, "field": "load5" },
+      { "index": 2, "field": "load15" }
+    ]
+  },
+  "output": {
+    "metrics": [
+      { "name": "load1",  "type": "gauge", "field": "load1" },
+      { "name": "load5",  "type": "gauge", "field": "load5" },
+      { "name": "load15", "type": "gauge", "field": "load15" }
+    ]
+  }
+}
