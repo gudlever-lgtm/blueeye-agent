@@ -19,6 +19,7 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 | REST | [`src/apiClient.js`](src/apiClient.js) — Bearer-authenticated calls |
 | Traffic sources | proc · snmp · netflow · sflow (server picks per agent) |
 | Active probes | ping · tcp · dns · traceroute · http |
+| Transaction tests | [`src/transactions/`](src/transactions/) — server pushes `transaction_config` over WS; the manager schedules each http/tcp/dns/icmp test (`interval_sec` ±10% jitter), runs an executor (Node core `http`/`https`/`net`/`dns` + system `ping`), classifies the failure phase, buffers results (max 1000, oldest dropped) and flushes `transaction_result` batches on reconnect. Config persists to a local JSON file with secrets AES-256-GCM-encrypted (key derived from the token) |
 | Tests | `node --test` over [`test/`](test) against [`test-support/fakeServer.js`](test-support/fakeServer.js) |
 
 ## Boot sequence
@@ -71,7 +72,7 @@ callers must `sampler.stop?.()` before replacing one.
 
 | `source` | Module | How it measures | Snapshot shape |
 | --- | --- | --- | --- |
-| `proc` (default) | [`trafficMonitor.js`](src/trafficMonitor.js) | reads `/proc/net/dev` twice, `intervalMs` apart | per-interface rx/tx bytes·packets·errors·drops + rates, `operStatus`/`speedMbps` from sysfs, `totals` |
+| `proc` (default) | [`trafficMonitor.js`](src/trafficMonitor.js) (Linux) / [`trafficMonitorWin.js`](src/trafficMonitorWin.js) (Windows) | Linux: reads `/proc/net/dev` twice, `intervalMs` apart. Windows: one persistent `powershell.exe` (spawned once, not per poll) ticks `Get-NetAdapterStatistics`/`Get-NetAdapter` and streams a JSON line per tick over stdout; both feed the same `buildSnapshot()` delta/rate computation | per-interface rx/tx bytes·packets·errors·drops + rates, `operStatus`/`speedMbps`, `totals` |
 | `snmp` | [`snmpMonitor.js`](src/snmpMonitor.js) | polls IF-MIB HC octet counters (+ health columns) twice over SNMP | same per-interface shape as proc (`source:'snmp'`) |
 | `netflow` | [`netflow/collector.js`](src/netflow/collector.js) | UDP :2055 collector, `drain()` per interval | flow summary: `byPort` / `byProtocol` / `topTalkers` / `totals` |
 | `sflow` | [`sflow/collector.js`](src/sflow/collector.js) | UDP :6343 collector, rate-scaled samples | same flow-summary shape (`sampled:true`) |
@@ -199,7 +200,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | Transport | [`agentClient.js`](src/agentClient.js), [`apiClient.js`](src/apiClient.js), [`backoff.js`](src/backoff.js) |
 | Commands | [`command.js`](src/command.js) |
 | Measurement orchestration | [`testRunner.js`](src/testRunner.js), [`monitor.js`](src/monitor.js), [`systemMetrics.js`](src/systemMetrics.js) |
-| Traffic sources | [`trafficMonitor.js`](src/trafficMonitor.js), [`snmpMonitor.js`](src/snmpMonitor.js), [`netflow/`](src/netflow), [`sflow/`](src/sflow) |
+| Traffic sources | [`trafficMonitor.js`](src/trafficMonitor.js), [`trafficMonitorWin.js`](src/trafficMonitorWin.js), [`snmpMonitor.js`](src/snmpMonitor.js), [`netflow/`](src/netflow), [`sflow/`](src/sflow) |
 | Active probes | [`probes/`](src/probes) |
 | Logging | [`logger.js`](src/logger.js) |
 
@@ -235,7 +236,7 @@ self-contained and need no MySQL.
 | Runtime: connect / 401 / reconnect / run-test | [`test/runtime.test.js`](test/runtime.test.js) |
 | Continuous reporting | [`test/reporting.test.js`](test/reporting.test.js) |
 | Capabilities + monitor config | [`test/capabilities.test.js`](test/capabilities.test.js), [`test/monitorConfig.test.js`](test/monitorConfig.test.js) |
-| Traffic / SNMP / system metrics | [`test/trafficMonitor.test.js`](test/trafficMonitor.test.js), [`test/snmpMonitor.test.js`](test/snmpMonitor.test.js), [`test/systemMetrics.test.js`](test/systemMetrics.test.js) |
+| Traffic / SNMP / system metrics | [`test/trafficMonitor.test.js`](test/trafficMonitor.test.js), [`test/trafficMonitorWin.test.js`](test/trafficMonitorWin.test.js), [`test/monitor.test.js`](test/monitor.test.js), [`test/snmpMonitor.test.js`](test/snmpMonitor.test.js), [`test/systemMetrics.test.js`](test/systemMetrics.test.js) |
 | NetFlow / sFlow | [`test/netflow.test.js`](test/netflow.test.js), [`test/netflowTemplated.test.js`](test/netflowTemplated.test.js), [`test/sflow.test.js`](test/sflow.test.js) |
 | Probes | [`test/probes.test.js`](test/probes.test.js) |
 | Test runner envelope | [`test/testRunner.test.js`](test/testRunner.test.js) |

@@ -18,6 +18,11 @@ const { createHsflowdManager } = require('./sflow/hsflowd');
 const { detectCapabilities } = require('./capabilities');
 const { collectNicInfo } = require('./nicInfo');
 const { makePinnedFetch } = require('./httpsClient');
+const path = require('path');
+const { createSecretStore } = require('./transactions/secretStore');
+const { createConfigStore } = require('./transactions/configStore');
+const { createResultBuffer } = require('./transactions/buffer');
+const { createTransactionManager } = require('./transactions/manager');
 
 // Hard cap on how many targets one scheduled cycle will probe, so a giant
 // configured/nameserver list can't turn into a burst.
@@ -103,6 +108,22 @@ function createAgentRuntime({
     backoff: config.backoff,
     WebSocketImpl,
     certFingerprint: fp,
+  });
+
+  // Transaction-test executor: runs server-pushed http/tcp/dns/icmp tests on their
+  // own schedule (interval_sec ± 10% jitter), buffers results while offline (max
+  // 1000, oldest dropped) and flushes on reconnect. Secrets are persisted
+  // encrypted with a key derived from the token, and decrypted only in memory.
+  const transactionConfigPath = config.transactionConfigPath
+    || path.join(path.dirname(config.tokenPath || '.'), 'transactions.json');
+  const txManager = createTransactionManager({
+    send: (obj) => client.send(obj),
+    configStore: createConfigStore({ filePath: transactionConfigPath, secretStore: createSecretStore(token), logger }),
+    buffer: createResultBuffer({ max: 1000 }),
+    logger,
+  });
+  client.on('transaction-config', (tests) => {
+    try { txManager.applyConfig(tests); } catch (err) { logger.warn(`Failed to apply transaction config: ${err.message}`); }
   });
 
   let reportTimer = null;
@@ -368,6 +389,8 @@ function createAgentRuntime({
     if (!fatal) {
       reportCapabilities().catch(() => {});
       loadServerConfig().catch(() => {});
+      // Flush any transaction results buffered while we were offline.
+      try { txManager.flush(); } catch (err) { logger.warn(`Transaction flush failed: ${err.message}`); }
     }
   });
   client.on('connected', (m) => emitter.emit('connected', m));
@@ -627,11 +650,15 @@ function createAgentRuntime({
         if (fatal) return;
         startReporting();
         startScheduledProbes();
+        // Start running any persisted transaction tests (server pushes fresh
+        // config on connect, which replaces these).
+        try { txManager.start(); } catch (err) { logger.warn(`Transaction manager start failed: ${err.message}`); }
       })();
     },
     stop() {
       stopReporting();
       stopScheduledProbes();
+      txManager.stop();
       if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
       client.stop();
     },

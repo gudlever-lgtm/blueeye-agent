@@ -64,24 +64,18 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // snapshot says how many entries were left out (`interfacesOmitted`).
 const MAX_INTERFACES = 64;
 
-// Samples network traffic by reading /proc/net/dev twice `intervalMs` apart and
-// computing per-interface deltas and rates. Counters are injectable for tests.
-async function sampleTraffic({
-  readProc = defaultReadProc,
-  intervalMs = 1000,
-  sleepFn = sleep,
-  now = () => Date.now(),
+// Turns two cumulative-counter snapshots (keyed by interface name, same shape
+// as parseProcNetDev's return value) `elapsedSec` apart into the per-interface
+// delta + rate report. Pulled out of sampleTraffic so other platforms' traffic
+// sources (e.g. trafficMonitorWin.js) can feed it counters from a different
+// origin while reusing this computation unchanged.
+async function buildSnapshot(first, second, {
+  intervalMs,
+  elapsedSec,
   includeLoopback = false,
   readIfaceMeta = defaultReadIfaceMeta,
   maxInterfaces = MAX_INTERFACES,
 } = {}) {
-  const t0 = now();
-  const first = snapshot(readProc);
-  await sleepFn(intervalMs);
-  const t1 = now();
-  const second = snapshot(readProc);
-
-  const elapsedSec = Math.max((t1 - t0) / 1000, 0.001);
   const entries = [];
   const totals = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, rxErrors: 0, txErrors: 0, rxDrop: 0, txDrop: 0 };
   const delta = (a, b, k) => Math.max((a[k] || 0) - (b[k] || 0), 0);
@@ -145,4 +139,24 @@ async function sampleTraffic({
   };
 }
 
-module.exports = { parseProcNetDev, snapshot, sampleTraffic, defaultReadIfaceMeta, MAX_INTERFACES };
+// Samples network traffic by reading /proc/net/dev twice `intervalMs` apart and
+// computing per-interface deltas and rates. Counters are injectable for tests.
+async function sampleTraffic({
+  readProc = defaultReadProc,
+  intervalMs = 1000,
+  sleepFn = sleep,
+  now = () => Date.now(),
+  includeLoopback = false,
+  readIfaceMeta = defaultReadIfaceMeta,
+  maxInterfaces = MAX_INTERFACES,
+} = {}) {
+  const t0 = now();
+  const first = snapshot(readProc);
+  await sleepFn(intervalMs);
+  const t1 = now();
+  const second = snapshot(readProc);
+  const elapsedSec = Math.max((t1 - t0) / 1000, 0.001);
+  return buildSnapshot(first, second, { intervalMs, elapsedSec, includeLoopback, readIfaceMeta, maxInterfaces });
+}
+
+module.exports = { parseProcNetDev, snapshot, sampleTraffic, buildSnapshot, defaultReadIfaceMeta, MAX_INTERFACES };

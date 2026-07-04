@@ -4,6 +4,7 @@ const { sampleTraffic } = require('./trafficMonitor');
 const { sampleSnmp } = require('./snmpMonitor');
 const { createNetflowCollector } = require('./netflow/collector');
 const { createSflowCollector } = require('./sflow/collector');
+const { createWinTrafficSampler } = require('./trafficMonitorWin');
 const { silentLogger } = require('./logger');
 
 // Wraps a UDP flow collector (netflow/sflow) as a sampler: start it in the
@@ -35,10 +36,18 @@ function collectorSampler(collector, logger, kind) {
 // proc/snmp produce a per-interface byte-rate snapshot; netflow/sflow produce a
 // flow summary (byPort/byProtocol/topTalkers). All are stored under the same
 // `traffic` field; the server reads whichever fields are present. Unknown
-// sources fall back to proc. Collector factories are injectable for tests.
+// sources fall back to proc (Linux: /proc/net/dev; macOS: netstat -ib;
+// Windows: a persistent powershell.exe — see trafficMonitorWin.js).
+// Collector/platform factories are injectable for tests.
 function createSampler(
   monitorConfig = { source: 'proc' },
-  { netflowFactory = createNetflowCollector, sflowFactory = createSflowCollector, logger = silentLogger } = {}
+  {
+    netflowFactory = createNetflowCollector,
+    sflowFactory = createSflowCollector,
+    winTrafficFactory = createWinTrafficSampler,
+    platform = process.platform,
+    logger = silentLogger,
+  } = {}
 ) {
   const cfg = monitorConfig || {};
 
@@ -54,6 +63,15 @@ function createSampler(
   if (cfg.source === 'sflow') {
     const sf = cfg.sflow || {};
     return collectorSampler(sflowFactory({ port: sf.port || 6343, bindAddress: sf.bindAddress || '0.0.0.0' }), logger, 'sflow');
+  }
+
+  if (platform === 'win32') {
+    return winTrafficFactory({ logger });
+  }
+
+  if (platform === 'darwin') {
+    const { sampleTraffic: sampleTrafficDarwin } = require('./trafficMonitorDarwin');
+    return ({ intervalMs }) => sampleTrafficDarwin({ intervalMs });
   }
 
   return ({ intervalMs }) => sampleTraffic({ intervalMs });

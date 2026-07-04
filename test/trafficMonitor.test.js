@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseProcNetDev, sampleTraffic } = require('../src/trafficMonitor');
+const { parseProcNetDev, sampleTraffic, buildSnapshot } = require('../src/trafficMonitor');
 
 const SNAP1 = `Inter-|   Receive                                                |  Transmit
  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
@@ -126,4 +126,23 @@ test('sampleTraffic returns empty interfaces when /proc is unreadable', async ()
   });
   assert.deepEqual(traffic.interfaces, []);
   assert.equal(traffic.totals.rxBytes, 0);
+});
+
+test('buildSnapshot (extracted for non-/proc sources, e.g. trafficMonitorWin.js) takes two cumulative-counter snapshots directly', async () => {
+  const first = { eth0: { rxBytes: 1000, rxPackets: 10, rxErrors: 0, rxDrop: 0, txBytes: 2000, txPackets: 12, txErrors: 0, txDrop: 0 } };
+  const second = { eth0: { rxBytes: 3000, rxPackets: 20, rxErrors: 1, rxDrop: 0, txBytes: 6000, txPackets: 24, txErrors: 0, txDrop: 2 } };
+  const traffic = await buildSnapshot(first, second, {
+    intervalMs: 1000,
+    elapsedSec: 1,
+    readIfaceMeta: () => ({ operStatus: 'Up', speedMbps: 1000 }),
+  });
+  assert.equal(traffic.interfaces.length, 1);
+  const eth0 = traffic.interfaces[0];
+  assert.equal(eth0.rxBytes, 2000);
+  assert.equal(eth0.txBytes, 4000);
+  assert.equal(eth0.rxErrors, 1);
+  assert.equal(eth0.txDrop, 2);
+  assert.equal(eth0.operStatus, 'Up');
+  assert.equal(eth0.speedMbps, 1000);
+  assert.equal(traffic.totals.rxBytes, 2000);
 });
