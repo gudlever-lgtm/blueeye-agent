@@ -1,0 +1,37 @@
+{
+  "id": "windows.net_stats",
+  "version": 1,
+  "platform": "windows",
+  "interval_seconds": 60,
+  "exec": {
+    "powershell": "Get-NetAdapterStatistics | ForEach-Object { \"$($_.Name)|$($_.ReceivedBytes)|$($_.SentBytes)|$($_.ReceivedUnicastPackets)|$($_.SentUnicastPackets)|$($_.ReceivedPacketErrors)|$($_.OutboundPacketErrors)|$($_.ReceivedDiscardedPackets)|$($_.OutboundDiscardedPackets)\" }"
+  },
+  "parser": {
+    "type": "columns",
+    "delimiter": "|",
+    "columns": [
+      { "index": 0, "field": "iface" },
+      { "index": 1, "field": "rx_bytes" },
+      { "index": 2, "field": "tx_bytes" },
+      { "index": 3, "field": "rx_packets" },
+      { "index": 4, "field": "tx_packets" },
+      { "index": 5, "field": "rx_errors" },
+      { "index": 6, "field": "tx_errors" },
+      { "index": 7, "field": "rx_drop" },
+      { "index": 8, "field": "tx_drop" }
+    ]
+  },
+  "output": {
+    "label_fields": ["iface"],
+    "metrics": [
+      { "name": "net_rx_bytes",   "type": "counter", "field": "rx_bytes" },
+      { "name": "net_rx_packets", "type": "counter", "field": "rx_packets" },
+      { "name": "net_rx_errors",  "type": "counter", "field": "rx_errors" },
+      { "name": "net_rx_drop",    "type": "counter", "field": "rx_drop" },
+      { "name": "net_tx_bytes",   "type": "counter", "field": "tx_bytes" },
+      { "name": "net_tx_packets", "type": "counter", "field": "tx_packets" },
+      { "name": "net_tx_errors",  "type": "counter", "field": "tx_errors" },
+      { "name": "net_tx_drop",    "type": "counter", "field": "tx_drop" }
+    ]
+  }
+}

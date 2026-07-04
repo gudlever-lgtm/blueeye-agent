@@ -1,0 +1,32 @@
+{
+  "id": "darwin.net_ib",
+  "version": 1,
+  "platform": "darwin",
+  "interval_seconds": 60,
+  "exec": { "command": "netstat", "args": ["-ib"] },
+  "parser": {
+    "type": "columns",
+    "skip_line": "^Name",
+    "dedupe_by": "iface",
+    "columns": [
+      { "index": 0, "field": "iface" },
+      { "index": -7, "field": "rx_packets" },
+      { "index": -6, "field": "rx_errors" },
+      { "index": -5, "field": "rx_bytes" },
+      { "index": -4, "field": "tx_packets" },
+      { "index": -3, "field": "tx_errors" },
+      { "index": -2, "field": "tx_bytes" }
+    ]
+  },
+  "output": {
+    "label_fields": ["iface"],
+    "metrics": [
+      { "name": "net_rx_bytes",   "type": "counter", "field": "rx_bytes" },
+      { "name": "net_rx_packets", "type": "counter", "field": "rx_packets" },
+      { "name": "net_rx_errors",  "type": "counter", "field": "rx_errors" },
+      { "name": "net_tx_bytes",   "type": "counter", "field": "tx_bytes" },
+      { "name": "net_tx_packets", "type": "counter", "field": "tx_packets" },
+      { "name": "net_tx_errors",  "type": "counter", "field": "tx_errors" }
+    ]
+  }
+}
