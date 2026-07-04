@@ -8,9 +8,32 @@ Node agent — identical REST paths, WebSocket frames, headers and JSON shapes.
 > **Status.** Implemented: the foundation (config, token store, REST + WebSocket
 > clients), the **definition-driven collector engine**, the **persistent
 > PowerShell stream** (Windows engine infrastructure), the Linux/Windows/macOS
-> collector definitions, the **sFlow receive/decode/forward path**, and the
-> **Ed25519-verified self-update**. The `--shadow` diffing is the remaining
-> milestone.
+> collector definitions, the **sFlow receive/decode/forward path**, the
+> **Ed25519-verified self-update**, and **live-server data exchange** (enrollment,
+> bundled default collectors, and reporting over `/agents/results`). The
+> `--shadow` diffing is the remaining milestone.
+
+## Exchanging data with a live server
+
+The agent is a **drop-in against a stock blueeye-server** — it speaks the audited
+REST/WS protocol and needs no server changes to stream data:
+
+1. **Enroll or reuse the token** — first start exchanges the one-time code for a
+   token (`POST /agents/enroll`), stored `0600`; later starts reuse it.
+2. **Bundled default collectors** — the platform collector definitions are
+   **embedded in the binary** (`builtins.Definitions()`), seeded as the floor of
+   the store, so the agent has a working collector set immediately even though a
+   stock server pushes none. Disk cache and server-pushed definitions still
+   override by version.
+3. **Handshake** — on every (re)connect it reports capabilities
+   (`POST /agents/me/capabilities`) and fetches its config (`GET /agents/me/config`).
+4. **Report** — each collection cycle is posted to `POST /agents/results`. For the
+   network collectors the reporter computes the per-interface **delta + rate +
+   totals**, producing the **same `traffic` snapshot shape as the Node agent**
+   (a true drop-in). A 401 there is fatal.
+
+The full loop is covered by an end-to-end test (`internal/e2e`) that drives the
+real REST + WS + engine + reporter stack against a contract-faithful stub server.
 
 ## Collectors are DATA, not code
 
@@ -110,5 +133,8 @@ internal/audit          two-state audit records
 internal/collector      definitions, parsers, store, engine
 internal/sflow          sFlow v5 receive/decode/aggregate/forward
 internal/upgrade        Ed25519-verified binary self-update
-collectors/{linux,windows,darwin}/*.json  collector definitions
+internal/report         collector Results -> /agents/results envelopes (traffic deltas)
+internal/e2e            end-to-end data-exchange test vs a stub server
+builtins.go             embeds the default collector definitions into the binary
+collectors/{linux,windows,darwin}/*.json  collector definitions (bundled)
 ```
