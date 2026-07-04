@@ -83,10 +83,17 @@ func (p *Parser) parseColumns(b []byte) []Row {
 		row := Row{}
 		ok := false
 		for _, col := range p.Columns {
-			if col.Index < 0 || col.Index >= len(fields) {
+			// Negative indices count from the end, so a variable-width middle
+			// column (e.g. netstat -ib's Address, present for a NIC with a MAC but
+			// blank for lo0) doesn't shift the trailing counter columns.
+			idx := col.Index
+			if idx < 0 {
+				idx = len(fields) + idx
+			}
+			if idx < 0 || idx >= len(fields) {
 				continue
 			}
-			v := fields[col.Index]
+			v := fields[idx]
 			if col.Trim != "" {
 				v = strings.Trim(v, col.Trim)
 			}
@@ -97,7 +104,28 @@ func (p *Parser) parseColumns(b []byte) []Row {
 			rows = append(rows, row)
 		}
 	}
+	if p.DedupeBy != "" {
+		rows = dedupeFirst(rows, p.DedupeBy)
+	}
 	return rows
+}
+
+// dedupeFirst keeps the first row for each distinct value of the given field,
+// preserving order. Rows lacking the field are kept as-is.
+func dedupeFirst(rows []Row, field string) []Row {
+	seen := map[string]bool{}
+	out := rows[:0:0]
+	for _, r := range rows {
+		key, ok := r[field]
+		if ok {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 func splitTrim(line, delim string) []string {

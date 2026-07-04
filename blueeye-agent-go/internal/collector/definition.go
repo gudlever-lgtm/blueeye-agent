@@ -67,6 +67,12 @@ type Parser struct {
 	// columns
 	Delimiter string   `json:"delimiter,omitempty"` // default: any whitespace
 	Columns   []Column `json:"columns,omitempty"`
+	// DedupeBy keeps only the FIRST row for each distinct value of the named
+	// field (columns parser). This handles `netstat -ib`'s quirk of emitting one
+	// row per address family per interface: the first (Link#) row carries the
+	// cumulative counters, so keeping it and dropping the rest avoids
+	// double-counting.
+	DedupeBy string `json:"dedupe_by,omitempty"`
 	// A line is skipped when it matches SkipLine (columns/key_value/regex).
 	SkipLine string `json:"skip_line,omitempty"`
 	// Trim removes a trailing token from a key/field value (e.g. ":" on iface).
