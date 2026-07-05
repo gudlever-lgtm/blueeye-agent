@@ -88,9 +88,33 @@ func (s *Store) LoadCache() error {
 		if err := d.Validate(); err != nil {
 			continue // ignore a corrupt/invalid cached definition
 		}
-		s.defs[d.ID] = d
+		s.putIfNewer(d)
 	}
 	return nil
+}
+
+// Seed installs the binary's bundled default definitions as the floor: an id is
+// added only when absent or when the bundled version is newer. This gives the
+// agent a working collector set even before the server pushes any definitions
+// (and the server's live response still overrides by version). Invalid entries
+// are skipped.
+func (s *Store) Seed(defs []Definition) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, d := range defs {
+		if d.Validate() != nil {
+			continue
+		}
+		s.putIfNewer(d)
+	}
+}
+
+// putIfNewer stores d when it is absent or strictly newer. Caller holds the lock.
+func (s *Store) putIfNewer(d Definition) {
+	if ex, ok := s.defs[d.ID]; ok && d.Version <= ex.Version {
+		return
+	}
+	s.defs[d.ID] = d
 }
 
 // Install validates and applies a definition received from the live channel.
