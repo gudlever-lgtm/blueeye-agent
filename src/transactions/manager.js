@@ -40,6 +40,7 @@ function createTransactionManager({
 
   function scheduleTest(test) {
     const id = test.id;
+    let handle = null; // this chain's live timer; identity marks chain ownership
     const tick = async () => {
       let result;
       try {
@@ -49,11 +50,19 @@ function createTransactionManager({
       }
       buffer.push(result);
       flush();
-      // Reschedule only if still active and not replaced/removed.
-      if (started && timers.has(id)) timers.set(id, unrefed(setTimeoutFn(tick, jitteredMs(test.interval_sec))));
+      // Reschedule only if still active AND this chain still owns the id.
+      // applyConfig() can replace the schedule while run() is awaited; the
+      // map then holds the replacement's handle, and rescheduling here would
+      // leave two live timer chains racing for one id (duplicate results +
+      // the stale test definition kept alive). The replacement chain owns it.
+      if (started && timers.get(id) === handle) {
+        handle = unrefed(setTimeoutFn(tick, jitteredMs(test.interval_sec)));
+        timers.set(id, handle);
+      }
     };
     if (timers.has(id)) clearTimeoutFn(timers.get(id));
-    timers.set(id, unrefed(setTimeoutFn(tick, jitteredMs(test.interval_sec))));
+    handle = unrefed(setTimeoutFn(tick, jitteredMs(test.interval_sec)));
+    timers.set(id, handle);
   }
 
   function clearAllTimers() {

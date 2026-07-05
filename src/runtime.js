@@ -127,6 +127,7 @@ function createAgentRuntime({
   });
 
   let reportTimer = null;
+  let reportingStarted = false; // true once the bootstrap called startReporting()
   let probeTimer = null;
   let fatal = false;
   let monitorConfig = { source: 'proc' };
@@ -238,10 +239,19 @@ function createAgentRuntime({
       // UDP socket) before swapping in the new source.
       if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
       currentSampler = samplerFactory(monitorConfig, { logger });
+      const prevIntervalMs = effectiveIntervalMs;
       effectiveIntervalMs =
         Number.isInteger(mc.intervalMs) && mc.intervalMs > 0 ? mc.intervalMs : config.reportIntervalMs;
       logger.info(`Monitor source: ${monitorConfig.source} (report every ${effectiveIntervalMs}ms).`);
       emitter.emit('config', monitorConfig);
+      // A reconnect can carry a changed reporting interval; the bootstrap timer
+      // keeps its old cadence unless restarted here. Only after the bootstrap
+      // has started reporting — during bootstrap loadServerConfig() runs first
+      // and startReporting() follows right after.
+      if (reportingStarted && effectiveIntervalMs !== prevIntervalMs) {
+        stopReporting();
+        startReporting();
+      }
       await reconcileHsflowd();
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
@@ -290,6 +300,7 @@ function createAgentRuntime({
 
   function startReporting() {
     if (fatal) return;
+    reportingStarted = true;
     if (!effectiveIntervalMs || effectiveIntervalMs <= 0) {
       logger.info('Continuous reporting disabled (interval <= 0).');
       return;

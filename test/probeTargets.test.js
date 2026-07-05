@@ -18,6 +18,25 @@ test('parseConfiguredTargets parses the common forms', () => {
   );
 });
 
+test('parseConfiguredTargets keeps IPv6 literals intact (bare, typed, bracketed, trailing port)', () => {
+  assert.deepEqual(
+    parseConfiguredTargets('2606:4700:4700::1111, ping:2606:4700::1111, [2001:db8::1], [2001:db8::1]:443, tcp:[2001:db8::2]:22, tcp:2606:4700:4700::1111:443, dns:2001:db8::53'),
+    [
+      { type: 'ping', host: '2606:4700:4700::1111' },
+      { type: 'ping', host: '2606:4700::1111' },
+      { type: 'ping', host: '2001:db8::1' },
+      { type: 'tcp', host: '2001:db8::1', port: 443 },
+      { type: 'tcp', host: '2001:db8::2', port: 22 },
+      { type: 'tcp', host: '2606:4700:4700::1111', port: 443 },
+      { type: 'dns', host: '2001:db8::53' },
+    ]
+  );
+  // objects with IPv6 hosts survive the normalizeOne round-trip
+  assert.deepEqual(parseConfiguredTargets([{ type: 'tcp', host: '2001:db8::9', port: 8443 }]), [
+    { type: 'tcp', host: '2001:db8::9', port: 8443 },
+  ]);
+});
+
 test('parseConfiguredTargets accepts an array of strings/objects and drops invalid tcp', () => {
   assert.deepEqual(parseConfiguredTargets(['ping:1.1.1.1', { type: 'tcp', host: 'h', port: 22 }]), [
     { type: 'ping', host: '1.1.1.1' }, { type: 'tcp', host: 'h', port: 22 },
