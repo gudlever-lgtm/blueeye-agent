@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const net = require('net');
 
 const PROBE_TYPES = new Set(['ping', 'tcp', 'dns', 'traceroute']);
 
@@ -11,6 +12,10 @@ const PROBE_TYPES = new Set(['ping', 'tcp', 'dns', 'traceroute']);
 //   "tcp:host:443"       → tcp host:443
 //   "dns:example.com"    → dns example.com
 //   "host:443"           → tcp host:443 (host + numeric port, no type)
+// IPv6 literals are supported — their colons are address characters, not
+// separators: "2606:4700::1111", "ping:2606:4700::1111", "[2606:4700::1111]",
+// "tcp:[2606:4700::1111]:443" and "tcp:2606:4700::1111:443" (port read from
+// the right when what precedes it is a valid IPv6 address).
 // Invalid entries (e.g. a tcp target without a valid port) are dropped.
 function parseConfiguredTargets(value) {
   if (Array.isArray(value)) return value.map(normalizeOne).filter(Boolean);
@@ -24,16 +29,49 @@ function normalizeOne(item) {
   return parseOneSpec(`${item.type || 'ping'}:${item.host || item.target || ''}${item.port ? `:${item.port}` : ''}`);
 }
 
+// "[v6]" or "[v6]:port" → { host, port } (port may be undefined); else null.
+function splitBracketed(s) {
+  const m = s.match(/^\[([^\]]+)\](?::(\d+))?$/);
+  if (!m) return null;
+  return { host: m[1], port: m[2] !== undefined ? Number(m[2]) : undefined };
+}
+
 function parseOneSpec(s) {
   if (!s) return null;
+  // A bare IPv6 literal — its colons are address chars, not separators.
+  if (net.isIPv6(s)) return { type: 'ping', host: s };
   const parts = s.split(':');
   let type = 'ping';
   let host;
   let port;
-  if (PROBE_TYPES.has(parts[0].toLowerCase()) && parts.length >= 2) {
+  const bare = splitBracketed(s);
+  if (bare) {
+    host = bare.host;
+    if (bare.port !== undefined) { type = 'tcp'; port = bare.port; }
+  } else if (PROBE_TYPES.has(parts[0].toLowerCase()) && parts.length >= 2) {
     type = parts[0].toLowerCase();
-    host = parts[1];
-    if (parts[2] !== undefined) port = Number(parts[2]);
+    const rest = s.slice(parts[0].length + 1);
+    const br = splitBracketed(rest);
+    const lastColon = rest.lastIndexOf(':');
+    const tail = lastColon === -1 ? '' : rest.slice(lastColon + 1);
+    const headIsV6 = /^\d+$/.test(tail) && net.isIPv6(rest.slice(0, lastColon));
+    if (br) {
+      host = br.host;
+      port = br.port;
+    } else if (type === 'tcp' && headIsV6) {
+      // tcp needs a port, so the host:port reading wins — with '::'
+      // compression "…::1111:443" can ALSO parse as one valid IPv6 address.
+      host = rest.slice(0, lastColon); // e.g. "tcp:2606:4700::1111:443"
+      port = Number(tail);
+    } else if (net.isIPv6(rest)) {
+      host = rest; // e.g. "ping:2606:4700::1111" (no port)
+    } else if (headIsV6) {
+      host = rest.slice(0, lastColon);
+      port = Number(tail);
+    } else {
+      host = parts[1];
+      if (parts[2] !== undefined) port = Number(parts[2]);
+    }
   } else if (parts.length === 2 && /^\d+$/.test(parts[1])) {
     type = 'tcp'; host = parts[0]; port = Number(parts[1]);
   } else {
