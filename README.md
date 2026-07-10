@@ -22,9 +22,9 @@ built-in `fetch`, so there is no external HTTP SDK.
 
 ## Requirements
 
-- Node.js >= 18 (udviklet og testet på Node 22)
-- 64-bit host (`linux/amd64` eller `linux/arm64`)
-- Adgang til en kørende `blueeye-server`
+- Node.js >= 18 (developed and tested on Node 22)
+- 64-bit host (`linux/amd64` or `linux/arm64`)
+- Access to a running `blueeye-server`
 
 ## Getting started
 
@@ -86,14 +86,14 @@ BLUEEYE_ENROLLMENT_CODE=<one-time-code> \
 ./install.sh
 ```
 
-Opdatér senere med `git pull` og kør `./install.sh` igen (eller kør scriptet et
-vilkårligt sted — uden et checkout kloner det selv repoet). Valgfrie env:
-`NETWORK_MODE=bridge`, `CONTAINER`, `IMAGE`, `TOKEN_VOLUME`. Styr containeren med
+Update later with `git pull` and run `./install.sh` again (or run the script from
+anywhere — without a checkout it clones the repo itself). Optional env:
+`NETWORK_MODE=bridge`, `CONTAINER`, `IMAGE`, `TOKEN_VOLUME`. Manage the container with
 `docker logs -f blueeye-agent` / `docker restart blueeye-agent`.
 
-Imaget bygges til en **64-bit** platform. `install.sh` detekterer host-arkitekturen
-automatisk (`linux/amd64` eller `linux/arm64`); overstyr med `PLATFORM`, fx
-`PLATFORM=linux/arm64 ./install.sh`. 32-bit hosts understøttes ikke.
+The image is built for a **64-bit** platform. `install.sh` detects the host
+architecture automatically (`linux/amd64` or `linux/arm64`); override with `PLATFORM`, e.g.
+`PLATFORM=linux/arm64 ./install.sh`. 32-bit hosts are not supported.
 
 ## Running as a service
 
@@ -241,41 +241,41 @@ Env overrides: `SERVICE_NAME`, `BLUEEYE_INSTALL_DIR`, `CONTAINER`, `IMAGE`,
 (If you installed from a checkout with the Docker `install.sh`, you can run
 `sudo ./uninstall.sh` from that checkout instead.)
 
-## Konfiguration (fil + env)
+## Configuration (file + env)
 
-Konfiguration læses fra en JSON-fil og kan overstyres af miljøvariabler
-(rækkefølge: indbyggede defaults → config-fil → env). Se
-[`config.example.json`](config.example.json) og [`.env.example`](.env.example).
+Configuration is read from a JSON file and can be overridden by environment variables
+(order: built-in defaults → config file → env). See
+[`config.example.json`](config.example.json) and [`.env.example`](.env.example).
 
-| Felt (fil)        | Env-variabel                 | Standard                       | Beskrivelse                         |
+| Field (file)      | Env variable                 | Default                        | Description                         |
 | ----------------- | ---------------------------- | ------------------------------ | ----------------------------------- |
-| (fil-sti)         | `BLUEEYE_AGENT_CONFIG`       | `./blueeye-agent.config.json`  | Sti til JSON-config                 |
+| (file path)       | `BLUEEYE_AGENT_CONFIG`       | `./blueeye-agent.config.json`  | Path to the JSON config             |
 | `serverUrl`       | `BLUEEYE_SERVER_URL`         | `http://localhost:3000`        | blueeye-server URL                  |
-| `enrollmentCode`  | `BLUEEYE_ENROLLMENT_CODE`    | (ingen)                        | Engangskode — kun ved første start  |
-| `serverCertFingerprint` | `BLUEEYE_SERVER_CERT_FINGERPRINT` | (ingen)             | SHA-256 af serverens TLS-cert — pinnes ved https |
-| `tokenPath`       | `BLUEEYE_TOKEN_PATH`         | `<agent-dir>/.blueeye-agent/token` | Hvor tokenet gemmes (0600) — relativt til agentens egen mappe, ikke cwd |
-| `heartbeatMs`     | `BLUEEYE_HEARTBEAT_MS`       | `15000`                        | Interval for heartbeat-besked       |
-| `reconnectBaseMs` | `BLUEEYE_RECONNECT_BASE_MS`  | `1000`                         | Backoff-basis ved reconnect         |
-| `reconnectMaxMs`  | `BLUEEYE_RECONNECT_MAX_MS`   | `30000`                        | Backoff-loft                        |
-| `probeIntervalMs` | `BLUEEYE_PROBE_INTERVAL_MS`  | `60000`                        | Planlagte probes — `0` slår fra     |
-| `probeCount`      | `BLUEEYE_PROBE_COUNT`        | `3`                            | Antal forsøg pr. planlagt probe     |
+| `enrollmentCode`  | `BLUEEYE_ENROLLMENT_CODE`    | (none)                         | One-time code — first start only    |
+| `serverCertFingerprint` | `BLUEEYE_SERVER_CERT_FINGERPRINT` | (none)              | SHA-256 of the server's TLS cert — pinned for https |
+| `tokenPath`       | `BLUEEYE_TOKEN_PATH`         | `<agent-dir>/.blueeye-agent/token` | Where the token is stored (0600) — relative to the agent's own directory, not cwd |
+| `heartbeatMs`     | `BLUEEYE_HEARTBEAT_MS`       | `15000`                        | Heartbeat message interval          |
+| `reconnectBaseMs` | `BLUEEYE_RECONNECT_BASE_MS`  | `1000`                         | Backoff base for reconnect          |
+| `reconnectMaxMs`  | `BLUEEYE_RECONNECT_MAX_MS`   | `30000`                        | Backoff ceiling                     |
+| `probeIntervalMs` | `BLUEEYE_PROBE_INTERVAL_MS`  | `60000`                        | Scheduled probes — `0` disables     |
+| `probeCount`      | `BLUEEYE_PROBE_COUNT`        | `3`                            | Attempts per scheduled probe        |
 | `probeGateway`    | `BLUEEYE_PROBE_GATEWAY`      | `true`                         | Auto-ping default gateway           |
-| `probeDns`        | `BLUEEYE_PROBE_DNS`          | `true`                         | Auto-ping DNS-servere (resolv.conf) |
-| `probeTargets`    | `BLUEEYE_PROBE_TARGETS`      | (ingen)                        | Ekstra mål, fx `ping:1.1.1.1,tcp:host:443` |
+| `probeDns`        | `BLUEEYE_PROBE_DNS`          | `true`                         | Auto-ping DNS servers (resolv.conf) |
+| `probeTargets`    | `BLUEEYE_PROBE_TARGETS`      | (none)                         | Extra targets, e.g. `ping:1.1.1.1,tcp:host:443` |
 
-> **Planlagte probes:** agenten kører som standard hvert 60. sekund et lille sæt
-> reachability-probes — den auto-opdagede default gateway + DNS-servere
-> (`/etc/resolv.conf`) plus evt. `probeTargets` — og indsender dem til serveren, så
-> flåde-sundheden er udfyldt uden manuel kørsel. Kun metadata (mål + timings),
-> aldrig pakke-indhold. Sæt `BLUEEYE_PROBE_INTERVAL_MS=0` for at slå det fra.
+> **Scheduled probes:** by default the agent runs a small set of reachability
+> probes every 60 seconds — the auto-discovered default gateway + DNS servers
+> (`/etc/resolv.conf`) plus any `probeTargets` — and submits them to the server, so
+> fleet health is populated without manual runs. Metadata only (target + timings),
+> never packet contents. Set `BLUEEYE_PROBE_INTERVAL_MS=0` to disable it.
 
-> Hvis engangskoden gives via env, kan agenten ikke fjerne den derfra — fjern
-> den selv efter første start. (Agenten enroller alligevel ikke igen, så længe
-> der findes et gemt token.)
+> If the one-time code is provided via env, the agent cannot remove it from there —
+> remove it yourself after the first start. (The agent won't re-enroll anyway as long
+> as a stored token exists.)
 
-## Enrollment (første opstart)
+## Enrollment (first start)
 
-1. Agenten samler `hostname`, `platform`, `arch`.
+1. The agent gathers `hostname`, `platform`, `arch`.
 2. `POST /agents/enroll { code, hostname, platform, arch }`.
 3. The returned token is stored locally in a file with **restrictive permissions
    (0600)**, and `enrollmentCode` is removed from the config file.
