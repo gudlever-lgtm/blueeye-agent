@@ -38,6 +38,19 @@ async function main() {
     return;
   }
 
+  // `blueeye-agent doctor` — run the connection self-test and exit. Meant to be
+  // run right after install (the installer calls it) or by hand on an offline
+  // agent: it reports why it can't connect and how to fix it. Read-only.
+  if (cmd === 'doctor' || cmd === 'check' || cmd === 'test-connection') {
+    const { runDoctor, formatReport } = require('./doctor');
+    const config = loadConfig();
+    logger.info('Running BlueEye agent connection self-test...');
+    const report = await runDoctor({ config });
+    process.stdout.write(`${formatReport(report)}\n`);
+    process.exit(report.connected ? 0 : 1);
+    return;
+  }
+
   if (cmd) {
     logger.error(`Unknown command: ${cmd}\n${USAGE}`);
     process.exit(1);

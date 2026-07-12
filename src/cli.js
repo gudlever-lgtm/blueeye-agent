@@ -28,9 +28,12 @@ const USAGE = `blueeye-agent — BlueEye monitoring agent
 Usage:
   blueeye-agent                      run the agent (uses the stored token)
   blueeye-agent enroll --code <CODE> [--server <URL>] [--fingerprint <SHA256>] [--force]
+  blueeye-agent doctor               test connectivity to the server and suggest fixes
   blueeye-agent --help
 
 The enroll command exchanges a one-time code for a permanent token and stores it.
+The doctor command checks config, DNS, TCP, HTTP, token auth and the WebSocket,
+printing a concrete suggestion for anything that fails (exit 0 = connected).
 Server URL and certificate fingerprint are remembered, so the service started
 afterwards reaches the right server with certificate pinning.`;
 
