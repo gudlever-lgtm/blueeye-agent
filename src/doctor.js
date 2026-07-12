@@ -5,6 +5,7 @@ const net = require('net');
 const { readToken } = require('./tokenStore');
 const { requestJson, verifyPeerOrDestroy } = require('./httpsClient');
 const { normalizeFingerprint } = require('./fingerprint');
+const { resolveEffectiveServerUrl } = require('./serverUrl');
 const DefaultWebSocket = require('ws');
 
 // `blueeye-agent doctor` — a connection self-test meant to be run right after
@@ -88,7 +89,7 @@ async function runDoctor({
   timeoutMs = 8000,
 } = {}) {
   const checks = [];
-  const serverUrl = String((config && config.serverUrl) || '').replace(/\/+$/, '');
+  let serverUrl = String((config && config.serverUrl) || '').replace(/\/+$/, '');
   const fingerprint = normalizeFingerprint((config && config.serverCertFingerprint) || '');
 
   // 1) Server URL configured + parseable.
@@ -105,6 +106,20 @@ async function runDoctor({
   const haveToken = !!(creds && creds.token);
   if (haveToken) checks.push(pass('token', `Enrolled as agent ${creds.agentId ?? '?'} (token stored).`));
   else checks.push(fail('token', 'No stored token — this host is not enrolled.', 'Re-run the installer with a fresh one-time code, or: blueeye-agent enroll --code <CODE> --server <URL>.'));
+
+  // Self-heal http→https so the doctor tests the SAME endpoint the running agent
+  // uses (the agent adopts the redirect target at boot). Otherwise the doctor
+  // stops at the http redirect and skips the WebSocket check — hiding the real
+  // problem, e.g. a proxy that 404s the WS upgrade even though HTTPS + REST work.
+  if (url && url.protocol === 'http:') {
+    let effective = serverUrl;
+    try { effective = await resolveEffectiveServerUrl({ serverUrl, request, fingerprint, timeoutMs }); } catch { effective = serverUrl; }
+    if (effective && effective !== serverUrl) {
+      checks.push(pass('scheme', `Server forces HTTPS — testing ${effective} (the agent auto-upgrades from ${serverUrl}). Set BLUEEYE_PUBLIC_URL=${effective} on the server to make it explicit.`));
+      serverUrl = effective;
+      url = new URL(effective);
+    }
+  }
 
   if (!url) return finish(checks);
 
@@ -170,6 +185,7 @@ async function runDoctor({
     const wsRes = await tryWs({ serverUrl, token: creds.token, fingerprint, WebSocketImpl, timeoutMs });
     if (wsRes.ok) checks.push(pass('websocket', 'WebSocket /ws/agent connected and the server acknowledged.'));
     else if (wsRes.status === 401) checks.push(fail('websocket', 'WebSocket handshake rejected (HTTP 401).', 'Same as the auth check — the token is not accepted; re-enroll the agent.'));
+    else if (wsRes.status === 404) checks.push(fail('websocket', 'WebSocket handshake returned HTTP 404 on /ws/agent.', 'HTTP + auth work, so the backend is fine — a 404 on the WebSocket means the reverse proxy in front of the server is not forwarding the WebSocket upgrade for /ws/agent (it hands the backend a plain GET). Configure the proxy to proxy WebSockets on that path: forward the Upgrade and Connection headers (nginx: proxy_set_header Upgrade $http_upgrade; Connection "upgrade"; proxy_http_version 1.1). Test: curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" ' + serverUrl + '/ws/agent  → expect 101, not 404.'));
     else checks.push(fail('websocket', `WebSocket did not connect (${wsRes.detail}).`, 'If HTTP works but the WebSocket does not, a reverse proxy or firewall is likely blocking the WebSocket upgrade on /ws/agent — allow Upgrade/Connection headers through to the server.'));
   } else {
     checks.push(skip('websocket', 'Skipped — needs a stored token and a reachable server.'));

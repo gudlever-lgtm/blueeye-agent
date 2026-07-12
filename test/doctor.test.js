@@ -30,6 +30,7 @@ function fakeWs(behavior) {
 }
 const WS_CONNECTED = fakeWs((ws) => ws.emit('message', JSON.stringify({ type: 'connected' })));
 const WS_401 = fakeWs((ws) => ws.emit('unexpected-response', {}, { statusCode: 401 }));
+const WS_404 = fakeWs((ws) => ws.emit('unexpected-response', {}, { statusCode: 404 }));
 const WS_ERR = fakeWs((ws) => ws.emit('error', new Error('ECONNREFUSED')));
 
 const baseDeps = {
@@ -122,19 +123,22 @@ test('TLS error suggests pinning the self-signed cert', async () => {
   assert.match(byName(report, 'http').suggestion, /fingerprint|pin/i);
 });
 
-test('http→https redirect (301) is named precisely, with the https fix', async () => {
+test('a redirect that cannot be auto-upgraded (cross-host) still fails the http check', async () => {
+  // resolveEffectiveServerUrl refuses a cross-host redirect, so the http check
+  // sees the 3xx itself and reports it (belt-and-suspenders for the self-heal).
+  const request = async ({ url }) => {
+    if (url.endsWith('/enroll/config')) return { status: 301, headers: { location: 'https://other-host.example/enroll/config' } };
+    return { status: 200 };
+  };
   const report = await runDoctor({
     ...baseDeps,
     config: { ...GOOD_CONFIG, serverUrl: 'http://blueeye.example.dk' },
-    request: makeRequest({ '/enroll/config': { status: 301, headers: { location: 'https://blueeye.example.dk/enroll/config' } } }),
+    request,
   });
+  assert.equal(byName(report, 'scheme'), undefined); // not auto-upgraded (cross-host)
   const http = byName(report, 'http');
   assert.equal(http.ok, false);
   assert.match(http.detail, /redirected .*301/i);
-  assert.match(http.suggestion, /https/);
-  assert.match(http.suggestion, /BLUEEYE_PUBLIC_URL|--server https/);
-  // WebSocket can't run once HTTP is unusable.
-  assert.equal(byName(report, 'websocket').skipped, true);
 });
 
 test('unreachable server suggests a curl probe', async () => {
@@ -169,6 +173,35 @@ test('403 on auth points at the licence', async () => {
 });
 
 // ---- websocket -------------------------------------------------------------
+test('https-forcing server: doctor self-heals to https and pins the WS 404 on the proxy', async () => {
+  // http config, server 301s /enroll/config to https; over https everything works
+  // except the WebSocket, which the proxy 404s.
+  const request = async ({ url }) => {
+    if (/^http:\/\//.test(url) && url.endsWith('/enroll/config')) {
+      return { status: 301, headers: { location: 'https://blueeye.example.dk/enroll/config' } };
+    }
+    if (url.endsWith('/enroll/config')) return { status: 200, headers: {} };
+    if (url.endsWith('/agents/me/config')) return { status: 200 };
+    return { status: 404 };
+  };
+  const report = await runDoctor({
+    ...baseDeps,
+    config: { serverUrl: 'http://blueeye.example.dk', tokenPath: '/x', serverCertFingerprint: '' },
+    request,
+    WebSocketImpl: WS_404,
+  });
+  // Self-heal noted, and the checks now run against https (so they pass up to WS).
+  assert.equal(byName(report, 'scheme').ok, true);
+  assert.match(byName(report, 'scheme').detail, /https/);
+  assert.equal(byName(report, 'http').ok, true);
+  assert.equal(byName(report, 'auth').ok, true);
+  // The real problem is surfaced: WS 404 → proxy not forwarding the upgrade.
+  const ws = byName(report, 'websocket');
+  assert.equal(ws.ok, false);
+  assert.match(ws.detail, /404/);
+  assert.match(ws.suggestion, /proxy|Upgrade/i);
+});
+
 test('websocket 401 is reported', async () => {
   const report = await runDoctor({
     ...baseDeps,
