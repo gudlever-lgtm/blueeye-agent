@@ -122,6 +122,21 @@ test('TLS error suggests pinning the self-signed cert', async () => {
   assert.match(byName(report, 'http').suggestion, /fingerprint|pin/i);
 });
 
+test('http→https redirect (301) is named precisely, with the https fix', async () => {
+  const report = await runDoctor({
+    ...baseDeps,
+    config: { ...GOOD_CONFIG, serverUrl: 'http://blueeye.example.dk' },
+    request: makeRequest({ '/enroll/config': { status: 301, headers: { location: 'https://blueeye.example.dk/enroll/config' } } }),
+  });
+  const http = byName(report, 'http');
+  assert.equal(http.ok, false);
+  assert.match(http.detail, /redirected .*301/i);
+  assert.match(http.suggestion, /https/);
+  assert.match(http.suggestion, /BLUEEYE_PUBLIC_URL|--server https/);
+  // WebSocket can't run once HTTP is unusable.
+  assert.equal(byName(report, 'websocket').skipped, true);
+});
+
 test('unreachable server suggests a curl probe', async () => {
   const report = await runDoctor({
     ...baseDeps,
