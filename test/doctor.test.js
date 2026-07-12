@@ -201,7 +201,8 @@ test('https-forcing server: doctor self-heals to https and pins the WS 404 on th
   assert.equal(ws.ok, false);
   assert.match(ws.detail, /404/);
   assert.match(ws.suggestion, /lighttpd/i);
-  assert.match(ws.suggestion, /Caddy|nginx|HAProxy/);
+  assert.match(ws.suggestion, /proxy\.header/);
+  assert.match(ws.suggestion, /upgrade.*enable/);
 });
 
 test('WS 404 without a lighttpd banner gives the generic Upgrade-header fix', async () => {
