@@ -15,7 +15,7 @@ set -euo pipefail
 #   sudo ./uninstall.sh --yes      # no prompt
 #   sudo ./uninstall.sh --purge    # also remove the Docker image + token volume
 #
-# Env overrides: SERVICE_NAME, BLUEEYE_INSTALL_DIR, BLUEEYE_STATE_DIR, BLUEEYE_LOG_DIR, CONTAINER, IMAGE, TOKEN_VOLUME
+# Env overrides: SERVICE_NAME, BLUEEYE_INSTALL_DIR, BLUEEYE_STATE_DIR, BLUEEYE_LOG_DIR, CONTAINER, IMAGE, TOKEN_VOLUME, UNIT
 #
 # NOTE: this removes the agent locally only. To remove it from the BlueEye
 # server's list too, open the dashboard -> Agents -> Delete.
@@ -25,9 +25,14 @@ INSTALL_DIR="${BLUEEYE_INSTALL_DIR:-/opt/blueeye-agent}"
 CONTAINER="${CONTAINER:-blueeye-agent}"
 IMAGE="${IMAGE:-blueeye-agent}"
 TOKEN_VOLUME="${TOKEN_VOLUME:-blueeye-agent-data}"
-UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
+UNIT="${UNIT:-/etc/systemd/system/${SERVICE_NAME}.service}"
 STATE_DIR="${BLUEEYE_STATE_DIR:-/var/lib/blueeye-agent}"
 LOG_DIR="${BLUEEYE_LOG_DIR:-/var/log/blueeye-agent}"
+# The one-time enrollment code is written to this systemd drop-in on first install
+# (see scripts/install-systemd.sh). Track it INDEPENDENTLY of the unit file so a
+# leftover code is always cleared — even if the unit was already removed — otherwise
+# a stale code lingers and re-surfaces as the server's "expired/exhausted" rejection.
+ENROLL_DROPIN="${UNIT}.d/20-enroll.conf"
 
 ASSUME_YES=0
 PURGE=0
@@ -45,6 +50,7 @@ warn() { printf '[blueeye] %s\n' "$*" >&2; }
 
 # What's present on this host?
 HAVE_SERVICE=0; [ -f "$UNIT" ] && HAVE_SERVICE=1
+HAVE_ENROLL_CODE=0; [ -f "$ENROLL_DROPIN" ] && HAVE_ENROLL_CODE=1
 HAVE_CONTAINER=0
 if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
   HAVE_CONTAINER=1
@@ -58,7 +64,7 @@ if [ -f "$HSFLOWD_CONF" ] && grep -q '^# Managed by blueeye-agent' "$HSFLOWD_CON
   HAVE_HSFLOWD=1
 fi
 
-if [ "$HAVE_SERVICE" -eq 0 ] && [ "$HAVE_CONTAINER" -eq 0 ] && [ "$HAVE_HSFLOWD" -eq 0 ] && [ ! -d "$INSTALL_DIR" ] && [ ! -d "$STATE_DIR" ]; then
+if [ "$HAVE_SERVICE" -eq 0 ] && [ "$HAVE_CONTAINER" -eq 0 ] && [ "$HAVE_HSFLOWD" -eq 0 ] && [ "$HAVE_ENROLL_CODE" -eq 0 ] && [ ! -d "$INSTALL_DIR" ] && [ ! -d "$STATE_DIR" ]; then
   log "No BlueEye agent found on this host (no '$SERVICE_NAME' service, no '$CONTAINER' container, no $INSTALL_DIR/$STATE_DIR). Nothing to do."
   exit 0
 fi
@@ -70,6 +76,7 @@ warn "This will REMOVE the BlueEye agent from this machine:"
 [ "$HAVE_HSFLOWD" -eq 1 ]   && warn "  - agent-managed hsflowd exporter (stop, disable, delete $HSFLOWD_CONF; the hsflowd binary stays installed)"
 [ -d "$INSTALL_DIR" ]       && warn "  - install directory $INSTALL_DIR (releases + current)"
 [ -d "$STATE_DIR" ]         && warn "  - state directory $STATE_DIR (incl. the stored enrollment token)"
+[ "$HAVE_ENROLL_CODE" -eq 1 ] && warn "  - stored one-time enrollment code (systemd drop-in $ENROLL_DROPIN)"
 [ -d "$LOG_DIR" ]           && warn "  - log directory $LOG_DIR (local action trail)"
 [ "$PURGE" -eq 1 ]          && warn "  - Docker image '$IMAGE' and token volume '$TOKEN_VOLUME' (--purge)"
 warn "It does NOT remove the agent from the BlueEye server — do that in the dashboard (Agents -> Delete)."
@@ -92,6 +99,18 @@ if [ "$HAVE_SERVICE" -eq 1 ]; then
   rm -f "$UNIT"
   rm -rf "${UNIT}.d"
   systemctl daemon-reload 2>/dev/null || true
+fi
+
+# Always clear the stored one-time enrollment code, independent of the unit removal
+# above (which only runs when the .service file still exists). This guarantees an
+# ORPHANED code — unit already gone, drop-in left behind — is cleaned too, so it can
+# never be reused on a later re-install and rejected as expired/exhausted. Idempotent:
+# a no-op if the block above already took the whole ${UNIT}.d directory.
+if [ "$HAVE_ENROLL_CODE" -eq 1 ] && [ -f "$ENROLL_DROPIN" ]; then
+  log "Clearing stored one-time enrollment code ($ENROLL_DROPIN) ..."
+  rm -f "$ENROLL_DROPIN"
+  rmdir "${UNIT}.d" 2>/dev/null || true  # drop the drop-in dir if it's now empty
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
 fi
 
 if [ "$HAVE_HSFLOWD" -eq 1 ]; then
