@@ -196,6 +196,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | Concern | Files |
 | --- | --- |
 | Lifecycle / wiring | [`index.js`](src/index.js), [`runtime.js`](src/runtime.js), [`bootstrap.js`](src/bootstrap.js) |
+| Connection self-test | [`doctor.js`](src/doctor.js) — `blueeye-agent doctor`: config→token→DNS→TCP→HTTP→auth→WebSocket, each failure with a fix suggestion (run post-install / on an offline agent) |
 | Identity / config | [`config.js`](src/config.js), [`system.js`](src/system.js), [`tokenStore.js`](src/tokenStore.js), [`enroll.js`](src/enroll.js), [`capabilities.js`](src/capabilities.js), [`nicInfo.js`](src/nicInfo.js) |
 | Transport | [`agentClient.js`](src/agentClient.js), [`apiClient.js`](src/apiClient.js), [`backoff.js`](src/backoff.js) |
 | Commands | [`command.js`](src/command.js) |
