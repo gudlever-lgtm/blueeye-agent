@@ -98,7 +98,8 @@ fi
 
 # Enroll on first install: the agent exchanges the one-time code for a token on
 # its first boot (written to BLUEEYE_TOKEN_PATH). The code is one-time, so leaving
-# it in the drop-in is harmless; remove it later if you prefer.
+# it in the drop-in is harmless; uninstall.sh clears it (delete 20-enroll.conf by
+# hand sooner if you prefer).
 if [ -n "$CODE" ] && [ ! -f "$STATE_DIR/token" ]; then
   mkdir -p "${UNIT}.d"
   { echo "[Service]"; echo "Environment=BLUEEYE_ENROLLMENT_CODE=${CODE}"; } > "${UNIT}.d/20-enroll.conf"
