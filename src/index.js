@@ -8,6 +8,7 @@ const { ensureToken } = require('./bootstrap');
 const { createAgentRuntime } = require('./runtime');
 const { parseArgs, runEnroll, USAGE } = require('./cli');
 const { makePinnedFetch } = require('./httpsClient');
+const { resolveEffectiveServerUrl } = require('./serverUrl');
 
 // CLI entry point. This is the only place that calls process.exit — all the
 // logic lives in injectable modules so it can be tested without spawning a
@@ -63,6 +64,16 @@ async function main() {
   logger.info(
     `BlueEye agent starting on ${systemInfo.hostname} (${systemInfo.platform}/${systemInfo.arch}).`
   );
+
+  // Self-heal an http:// URL against an HTTPS-forcing server: if the server
+  // redirects to https on the same host, adopt it now so the WebSocket uses wss://
+  // (it won't follow a redirect) and the REST auth header isn't dropped on the
+  // http→https hop (which otherwise looks like a fatal 401). No-op for https URLs.
+  config.serverUrl = await resolveEffectiveServerUrl({
+    serverUrl: config.serverUrl,
+    fingerprint: config.serverCertFingerprint,
+    logger,
+  });
   logger.info(`Server: ${config.serverUrl}`);
 
   // Pin the server's cert on the enrollment request too (it carries the one-time
