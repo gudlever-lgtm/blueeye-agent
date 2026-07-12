@@ -129,6 +129,19 @@ async function runDoctor({
   try {
     const res = await request({ url: `${serverUrl}/enroll/config`, fingerprint, timeoutMs });
     if (res.status === 200) { httpOk = true; checks.push(pass('http', `Server answered at ${serverUrl} (GET /enroll/config → 200).`)); }
+    else if (res.status >= 300 && res.status < 400) {
+      // A redirect is the classic "forces HTTPS" proxy: GET/POST survive it
+      // (they follow redirects) but the WebSocket handshake does NOT, and the
+      // Authorization header is dropped across an http→https hop (→ a spurious
+      // 401 the agent treats as fatal). So the agent MUST use the target scheme.
+      const loc = (res.headers && (res.headers.location || res.headers.Location)) || '';
+      const target = loc ? String(loc).replace(/\/enroll\/config.*$/, '') : `${isHttps ? 'https' : 'http'}s://${host}`;
+      const toHttps = !isHttps && (/^https:/i.test(loc) || !loc);
+      checks.push(fail('http', `Server redirected GET /enroll/config with HTTP ${res.status}${loc ? ` → ${loc}` : ''}.`,
+        toHttps
+          ? `The server is forcing HTTPS. Point the agent at the https:// URL: set BLUEEYE_PUBLIC_URL=https://${host} on the server and reinstall, or re-enroll with --server https://${host}. (Over an http:// URL the agent uses ws://, and the WebSocket handshake won't follow the redirect — that's the "handshake failed: HTTP ${res.status}" in the log, followed by a 401 because the redirect drops the auth header.)`
+          : `Point BLUEEYE_SERVER_URL at the redirect target (${target}) and re-enroll — the WebSocket handshake does not follow redirects.`));
+    }
     else checks.push(fail('http', `Server responded HTTP ${res.status} to GET /enroll/config.`, 'The host is reachable but did not answer as a BlueEye server — verify BLUEEYE_SERVER_URL points at the server itself (not a proxy or error page).'));
   } catch (e) {
     const m = String((e && (e.message || e.code)) || e);
