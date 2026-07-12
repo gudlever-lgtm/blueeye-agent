@@ -5,6 +5,7 @@ const { readToken, saveToken } = require('./tokenStore');
 const { clearEnrollmentCode, writeConfigValues } = require('./config');
 const { normalizeFingerprint } = require('./fingerprint');
 const { requestJson, makePinnedFetch } = require('./httpsClient');
+const { resolveEffectiveServerUrl } = require('./serverUrl');
 
 // Parses argv (the full process.argv). The first non-flag token is the command
 // (e.g. "enroll"); the rest are --flag value pairs.
@@ -49,19 +50,31 @@ function codedError(message, code, extra = {}) {
 // token already stored it does nothing (unless --force). Throws on failure
 // WITHOUT writing a token.
 async function runEnroll({ opts, config, systemInfo, logger, fetchImpl, requestImpl = requestJson }) {
-  const serverUrl = String(opts.server || config.serverUrl || '').replace(/\/+$/, '');
+  let serverUrl = String(opts.server || config.serverUrl || '').replace(/\/+$/, '');
   if (!serverUrl) throw codedError('No server URL — pass --server or set BLUEEYE_SERVER_URL.', 'NO_SERVER');
   if (!opts.code) throw codedError('Missing --code (the enrollment code).', 'NO_CODE');
 
-  // Idempotent: don't re-enroll a machine that already has a token.
+  let fingerprint = normalizeFingerprint(opts.fingerprint || config.serverCertFingerprint || '');
+  // Follow an http→https redirect up front so token validation and enrollment use
+  // the server's real scheme (an http URL against an HTTPS-forcing proxy would
+  // otherwise see a redirect instead of the true 200/401).
+  serverUrl = await resolveEffectiveServerUrl({ serverUrl, request: requestImpl, fingerprint, logger });
+
+  // Idempotent — but only for a WORKING token. If the stored token is rejected
+  // (the agent was deleted or re-enrolled on the server), a freshly supplied code
+  // should replace the dead token instead of being ignored — otherwise re-running
+  // the installer with a new code is a no-op and the agent stays broken on the
+  // dead token.
   const existing = readToken(config.tokenPath);
   if (existing && !opts.force) {
-    logger.info(`Already enrolled as agent ${existing.agentId}; nothing to do (use --force to re-enroll).`);
-    return { ok: true, already: true, agentId: existing.agentId };
+    if (await isTokenAccepted({ serverUrl, token: existing.token, fingerprint, requestImpl })) {
+      logger.info(`Already enrolled as agent ${existing.agentId}; nothing to do (use --force to re-enroll).`);
+      return { ok: true, already: true, agentId: existing.agentId };
+    }
+    logger.warn(`Stored token (agent ${existing.agentId}) is no longer accepted by the server — re-enrolling with the provided code.`);
   }
 
   const isHttps = /^https:/i.test(serverUrl);
-  let fingerprint = normalizeFingerprint(opts.fingerprint || config.serverCertFingerprint || '');
 
   // If we have no fingerprint but the server is https, discover it from
   // /enroll/config (trust-on-first-use). The embedded fingerprint (install.sh /
@@ -92,6 +105,18 @@ async function runEnroll({ opts, config, systemInfo, logger, fetchImpl, requestI
   logger.info(`Enrolled as agent ${result.agentId}. Token stored at ${config.tokenPath}.`);
   if (fingerprint) logger.info(`Server certificate pinned (${fingerprint.slice(0, 17)}…).`);
   return { ok: true, agentId: result.agentId, fingerprintPinned: Boolean(fingerprint) };
+}
+
+// True unless the server DEFINITIVELY rejects the token (HTTP 401). Any other
+// status, or an unreachable/unverifiable server, returns true — so a transient
+// error never destroys a working enrollment (we only re-enroll on a hard 401).
+async function isTokenAccepted({ serverUrl, token, fingerprint, requestImpl, timeoutMs = 8000 }) {
+  try {
+    const res = await requestImpl({ url: `${serverUrl}/agents/me/config`, headers: { Authorization: `Bearer ${token}` }, fingerprint, timeoutMs });
+    return !(res && res.status === 401);
+  } catch {
+    return true;
+  }
 }
 
 module.exports = { parseArgs, runEnroll, USAGE };

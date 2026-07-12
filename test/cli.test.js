@@ -69,15 +69,34 @@ test('runEnroll requires a code', async () => {
   );
 });
 
-test('runEnroll is idempotent: skips when a token already exists', async () => {
-  const server = await startFakeServer({ acceptCode: 'good' });
+test('runEnroll is idempotent: skips when a WORKING token already exists', async () => {
+  // The server still accepts 'existing', so the fresh code is not used.
+  const server = await startFakeServer({ acceptCode: 'good', validTokens: ['existing'] });
   try {
     const dir = tmp();
     const config = cfg(dir);
     fs.writeFileSync(config.tokenPath, JSON.stringify({ agentId: 3, token: 'existing' }));
     const res = await runEnroll({ opts: { code: 'good', server: server.url }, config, systemInfo, logger: silentLogger });
     assert.equal(res.already, true);
-    assert.equal(server.enrollments.length, 0); // never contacted the server
+    assert.equal(server.enrollments.length, 0); // never enrolled
+  } finally {
+    await server.close();
+  }
+});
+
+test('runEnroll re-enrolls with the provided code when the stored token is rejected (401)', async () => {
+  // The server does NOT accept 'dead-token' (agent deleted/re-enrolled server-side),
+  // so a fresh install with a new code must replace it instead of skipping.
+  const server = await startFakeServer({ acceptCode: 'good', issuedToken: 'fresh-tok', issuedAgentId: 42 });
+  try {
+    const dir = tmp();
+    const config = cfg(dir);
+    fs.writeFileSync(config.tokenPath, JSON.stringify({ agentId: 3, token: 'dead-token' }));
+    const res = await runEnroll({ opts: { code: 'good', server: server.url }, config, systemInfo, logger: silentLogger });
+    assert.notEqual(res.already, true);
+    assert.equal(res.agentId, 42);
+    assert.equal(readToken(config.tokenPath).token, 'fresh-tok'); // dead token replaced
+    assert.equal(server.enrollments.length, 1); // the new code was used
   } finally {
     await server.close();
   }
