@@ -180,7 +180,7 @@ test('https-forcing server: doctor self-heals to https and pins the WS 404 on th
     if (/^http:\/\//.test(url) && url.endsWith('/enroll/config')) {
       return { status: 301, headers: { location: 'https://blueeye.example.dk/enroll/config' } };
     }
-    if (url.endsWith('/enroll/config')) return { status: 200, headers: {} };
+    if (url.endsWith('/enroll/config')) return { status: 200, headers: { server: 'lighttpd/1.4.59' } };
     if (url.endsWith('/agents/me/config')) return { status: 200 };
     return { status: 404 };
   };
@@ -195,11 +195,26 @@ test('https-forcing server: doctor self-heals to https and pins the WS 404 on th
   assert.match(byName(report, 'scheme').detail, /https/);
   assert.equal(byName(report, 'http').ok, true);
   assert.equal(byName(report, 'auth').ok, true);
-  // The real problem is surfaced: WS 404 → proxy not forwarding the upgrade.
+  // The real problem is surfaced: WS 404, and the lighttpd banner drives a
+  // lighttpd-specific fix (it can't proxy WebSockets at all).
   const ws = byName(report, 'websocket');
   assert.equal(ws.ok, false);
   assert.match(ws.detail, /404/);
-  assert.match(ws.suggestion, /proxy|Upgrade/i);
+  assert.match(ws.suggestion, /lighttpd/i);
+  assert.match(ws.suggestion, /Caddy|nginx|HAProxy/);
+});
+
+test('WS 404 without a lighttpd banner gives the generic Upgrade-header fix', async () => {
+  const request = async ({ url }) => {
+    if (url.endsWith('/enroll/config')) return { status: 200, headers: { server: 'nginx' } };
+    if (url.endsWith('/agents/me/config')) return { status: 200 };
+    return { status: 404 };
+  };
+  const report = await runDoctor({ ...baseDeps, config: GOOD_CONFIG, request, WebSocketImpl: WS_404 });
+  const ws = byName(report, 'websocket');
+  assert.equal(ws.ok, false);
+  assert.match(ws.suggestion, /Upgrade/);
+  assert.ok(!/lighttpd does NOT/.test(ws.suggestion));
 });
 
 test('websocket 401 is reported', async () => {

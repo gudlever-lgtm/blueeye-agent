@@ -141,8 +141,10 @@ async function runDoctor({
 
   // 5) HTTP(S) reachability — unauthenticated GET /enroll/config.
   let httpOk = false;
+  let serverBanner = '';
   try {
     const res = await request({ url: `${serverUrl}/enroll/config`, fingerprint, timeoutMs });
+    serverBanner = (res.headers && (res.headers.server || res.headers.Server)) || '';
     if (res.status === 200) { httpOk = true; checks.push(pass('http', `Server answered at ${serverUrl} (GET /enroll/config → 200).`)); }
     else if (res.status >= 300 && res.status < 400) {
       // A redirect is the classic "forces HTTPS" proxy: GET/POST survive it
@@ -185,7 +187,16 @@ async function runDoctor({
     const wsRes = await tryWs({ serverUrl, token: creds.token, fingerprint, WebSocketImpl, timeoutMs });
     if (wsRes.ok) checks.push(pass('websocket', 'WebSocket /ws/agent connected and the server acknowledged.'));
     else if (wsRes.status === 401) checks.push(fail('websocket', 'WebSocket handshake rejected (HTTP 401).', 'Same as the auth check — the token is not accepted; re-enroll the agent.'));
-    else if (wsRes.status === 404) checks.push(fail('websocket', 'WebSocket handshake returned HTTP 404 on /ws/agent.', 'HTTP + auth work, so the backend is fine — a 404 on the WebSocket means the reverse proxy in front of the server is not forwarding the WebSocket upgrade for /ws/agent (it hands the backend a plain GET). Configure the proxy to proxy WebSockets on that path: forward the Upgrade and Connection headers (nginx: proxy_set_header Upgrade $http_upgrade; Connection "upgrade"; proxy_http_version 1.1). Test: curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" ' + serverUrl + '/ws/agent  → expect 101, not 404.'));
+    else if (wsRes.status === 404) {
+      const banner = serverBanner ? ` (Server: ${serverBanner})` : '';
+      // lighttpd's mod_proxy cannot proxy WebSocket upgrades at all — it forwards
+      // /ws/agent to the backend as a plain GET (no route → 404). No lighttpd
+      // directive fixes it; the proxy itself has to change. Detect and say so.
+      const suggestion = /lighttpd/i.test(serverBanner)
+        ? `The reverse proxy is lighttpd${banner}, and lighttpd does NOT support proxying WebSocket upgrades — it forwards /ws/agent as a plain GET, so the backend 404s. No lighttpd config fixes this. Put a WebSocket-capable proxy in front of BlueEye instead: Caddy ("blueeye-server.gnf.dk { reverse_proxy 127.0.0.1:3000 }" — auto-TLS + WS), or nginx/HAProxy/Apache(mod_proxy_wstunnel). REST already works, so only the live channel needs it.`
+        : `HTTP + auth work, so the backend is fine${banner} — a 404 on the WebSocket means the reverse proxy is not forwarding the WebSocket upgrade for /ws/agent (it hands the backend a plain GET). Forward the Upgrade/Connection headers (nginx: proxy_set_header Upgrade $http_upgrade; Connection "upgrade"; proxy_http_version 1.1). Test: curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" ${serverUrl}/ws/agent → expect 101, not 404.`;
+      checks.push(fail('websocket', `WebSocket handshake returned HTTP 404 on /ws/agent${banner}.`, suggestion));
+    }
     else checks.push(fail('websocket', `WebSocket did not connect (${wsRes.detail}).`, 'If HTTP works but the WebSocket does not, a reverse proxy or firewall is likely blocking the WebSocket upgrade on /ws/agent — allow Upgrade/Connection headers through to the server.'));
   } else {
     checks.push(skip('websocket', 'Skipped — needs a stored token and a reachable server.'));
