@@ -36,6 +36,13 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 4. `createAgentRuntime({...}).start()`.
 5. Signals: `SIGINT`/`SIGTERM` → `runtime.stop()` + exit 0; `'fatal'` → exit 1.
 
+Every exit goes through `exit(code)`, which first drains lingering network
+handles ([`shutdown.js`](src/shutdown.js) `closeNetworkHandles` — undici's
+global dispatcher + the http/https global agents). A bare `process.exit()` that
+races libuv's teardown of an undici keep-alive socket aborts on Windows with a
+native assertion and a non-zero code — which made a *successful* `enroll` look
+like a failure to the installer (`$LASTEXITCODE -ne 0` → "enrollment failed").
+
 ## Architecture
 
 ```
@@ -195,7 +202,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 
 | Concern | Files |
 | --- | --- |
-| Lifecycle / wiring | [`index.js`](src/index.js), [`runtime.js`](src/runtime.js), [`bootstrap.js`](src/bootstrap.js) |
+| Lifecycle / wiring | [`index.js`](src/index.js), [`runtime.js`](src/runtime.js), [`bootstrap.js`](src/bootstrap.js), [`shutdown.js`](src/shutdown.js) |
 | Connection self-test | [`doctor.js`](src/doctor.js) — `blueeye-agent doctor`: config→token→DNS→TCP→HTTP→auth→WebSocket, each failure with a fix suggestion (run post-install / on an offline agent) |
 | Scheme self-heal | [`serverUrl.js`](src/serverUrl.js) — `resolveEffectiveServerUrl`: if an http:// server redirects to https on the same host, adopt it at boot so WS uses wss:// and REST keeps its auth header (index.js, before the runtime) |
 | Identity / config | [`config.js`](src/config.js), [`system.js`](src/system.js), [`tokenStore.js`](src/tokenStore.js), [`enroll.js`](src/enroll.js), [`capabilities.js`](src/capabilities.js), [`nicInfo.js`](src/nicInfo.js) |

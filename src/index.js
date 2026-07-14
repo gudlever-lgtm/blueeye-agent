@@ -9,6 +9,17 @@ const { createAgentRuntime } = require('./runtime');
 const { parseArgs, runEnroll, USAGE } = require('./cli');
 const { makePinnedFetch } = require('./httpsClient');
 const { resolveEffectiveServerUrl } = require('./serverUrl');
+const { closeNetworkHandles } = require('./shutdown');
+
+// Drain lingering network handles, then exit. On Windows a bare process.exit()
+// that races libuv's teardown of an undici keep-alive socket (Node's built-in
+// fetch) aborts with a native assertion and a non-zero code — which made a
+// SUCCESSFUL `enroll` look like a failure to the installer. Closing those handles
+// first makes the exit clean everywhere.
+async function exit(code) {
+  await closeNetworkHandles();
+  process.exit(code);
+}
 
 // CLI entry point. This is the only place that calls process.exit — all the
 // logic lives in injectable modules so it can be tested without spawning a
@@ -19,7 +30,7 @@ async function main() {
 
   if (opts.help || cmd === 'help') {
     process.stdout.write(`${USAGE}\n`);
-    process.exit(0);
+    await exit(0);
     return;
   }
 
@@ -30,11 +41,11 @@ async function main() {
     const systemInfo = collectSystemInfo();
     try {
       await runEnroll({ opts, config, systemInfo, logger });
-      process.exit(0);
+      await exit(0);
     } catch (err) {
       const detail = err.detail ? ` — ${JSON.stringify(err.detail)}` : '';
       logger.error(`Enrollment failed: ${err.message}${detail}`);
-      process.exit(1);
+      await exit(1);
     }
     return;
   }
@@ -48,13 +59,13 @@ async function main() {
     logger.info('Running BlueEye agent connection self-test...');
     const report = await runDoctor({ config });
     process.stdout.write(`${formatReport(report)}\n`);
-    process.exit(report.connected ? 0 : 1);
+    await exit(report.connected ? 0 : 1);
     return;
   }
 
   if (cmd) {
     logger.error(`Unknown command: ${cmd}\n${USAGE}`);
-    process.exit(1);
+    await exit(1);
     return;
   }
 
@@ -88,7 +99,7 @@ async function main() {
   } catch (err) {
     const detail = err.detail ? ` — ${JSON.stringify(err.detail)}` : '';
     logger.error(`${err.message}${detail}`);
-    process.exit(1);
+    await exit(1);
     return;
   }
 
@@ -103,7 +114,7 @@ async function main() {
   // operator decide. The agent never re-enrolls on its own.
   runtime.on('fatal', () => {
     logger.error('Agent is in a fatal state; exiting. Manual re-enrollment is required.');
-    process.exit(1);
+    exit(1);
   });
 
   runtime.start();
@@ -111,7 +122,7 @@ async function main() {
   function shutdown(signal) {
     logger.info(`Received ${signal}; shutting down.`);
     runtime.stop();
-    process.exit(0);
+    exit(0);
   }
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
