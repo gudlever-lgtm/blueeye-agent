@@ -36,4 +36,22 @@ function fail(type, target, error) {
   return { type, target, ok: false, attempts: 0, success: 0, rttMs: null, minMs: null, maxMs: null, jitterMs: null, lossPct: 100, error: String(error) };
 }
 
-module.exports = { clampInt, round, summarize, fail };
+// Validates a host/target that will be handed to a system tool (ping,
+// traceroute) as an argv element. execFile means there is no shell, so the only
+// residual risk is a target that the tool itself parses as an OPTION — e.g. a
+// host of `-f` becoming a flood-ping flag. We reject anything with a leading `-`
+// and anything outside the hostname/IPv4/IPv6 character set. Returns the trimmed
+// host, or null when unsafe. Callers should ALSO place the host after a `--`
+// end-of-options marker in argv (belt-and-braces on Unix tools).
+function safeHost(raw) {
+  const host = String(raw == null ? '' : raw).trim();
+  if (!host || host.length > 255) return null;
+  if (host.startsWith('-')) return null;
+  // Letters, digits, dot, hyphen (hostnames); colon + brackets + percent (IPv6
+  // with optional zone id). Nothing that a shell or option parser would treat
+  // specially.
+  if (!/^[A-Za-z0-9._:%[\]-]+$/.test(host)) return null;
+  return host;
+}
+
+module.exports = { clampInt, round, summarize, fail, safeHost };

@@ -1,16 +1,22 @@
 'use strict';
 
 const { execFile } = require('child_process');
-const { fail, round } = require('./stats');
+const { fail, round, safeHost } = require('./stats');
 
 // ICMP ping probe via the system `ping`. Parses packet-loss% and the
 // min/avg/max/mdev RTT summary (Linux/macOS and Windows formats). `exec` is
 // injectable so tests parse canned output without spawning a process.
 function pingProbe(spec, { exec = execFile, platform = process.platform } = {}) {
-  const host = String((spec && (spec.host || spec.target)) || '').trim();
-  if (!host) return Promise.resolve(fail('ping', host, 'invalid host'));
+  const rawHost = String((spec && (spec.host || spec.target)) || '').trim();
+  const host = safeHost(rawHost);
+  if (!host) return Promise.resolve(fail('ping', rawHost, 'invalid host'));
   const count = Math.max(1, Math.min(20, Number.parseInt(spec.count, 10) || 4));
-  const args = platform === 'win32' ? ['-n', String(count), host] : ['-c', String(count), '-w', '10', host];
+  // `--` marks the end of options so a host can never be parsed as a flag; on
+  // Windows `ping` has no such marker, but safeHost() has already rejected any
+  // leading-`-` target, so option injection is closed on both paths.
+  const args = platform === 'win32'
+    ? ['-n', String(count), host]
+    : ['-c', String(count), '-w', '10', '--', host];
   return new Promise((resolve) => {
     exec('ping', args, { timeout: 20000 }, (err, stdout) => {
       const parsed = parsePing(String(stdout || ''));

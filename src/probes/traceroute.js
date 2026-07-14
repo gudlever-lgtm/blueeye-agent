@@ -1,7 +1,7 @@
 'use strict';
 
 const { execFile } = require('child_process');
-const { round } = require('./stats');
+const { round, safeHost } = require('./stats');
 
 // Path probe via the system `traceroute` (Linux/macOS) / `tracert` (Windows).
 // MTR-style: sends several probes per hop (`-q queries`) so every hop carries not
@@ -10,16 +10,20 @@ const { round } = require('./stats');
 //   [{ hop, ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs }]
 // `exec`/`platform` are injectable for tests.
 function traceroute(spec, { exec = execFile, platform = process.platform } = {}) {
-  const host = String((spec && (spec.host || spec.target)) || '').trim();
-  if (!host) return Promise.resolve({ type: 'traceroute', target: host, ok: false, error: 'invalid host', hops: [] });
+  const rawHost = String((spec && (spec.host || spec.target)) || '').trim();
+  const host = safeHost(rawHost);
+  if (!host) return Promise.resolve({ type: 'traceroute', target: rawHost, ok: false, error: 'invalid host', hops: [] });
   const maxHops = Math.max(1, Math.min(40, Number.parseInt(spec.maxHops, 10) || 20));
   // Windows tracert always sends 3 probes/hop and has no "queries" flag; on
   // Linux/macOS the operator can pick how many (default 3, the MTR-ish sweet spot).
   const queries = platform === 'win32' ? 3 : Math.max(1, Math.min(10, Number.parseInt(spec.queries, 10) || 3));
   const bin = platform === 'win32' ? 'tracert' : 'traceroute';
+  // `--` ends option parsing so the host can never be read as a flag (Unix);
+  // Windows `tracert` has no such marker but safeHost() already rejected any
+  // leading-`-` target above.
   const args = platform === 'win32'
     ? ['-d', '-h', String(maxHops), host]
-    : ['-n', '-m', String(maxHops), '-q', String(queries), '-w', '2', host];
+    : ['-n', '-m', String(maxHops), '-q', String(queries), '-w', '2', '--', host];
   return new Promise((resolve) => {
     exec(bin, args, { timeout: 60000 }, (err, stdout) => {
       const hops = parseTraceroute(String(stdout || ''), queries);

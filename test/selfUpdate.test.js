@@ -108,6 +108,52 @@ test('update() refuses an archive with a path-traversal member (tar-slip)', asyn
   assert.equal(calls.find((c) => c.cmd === 'tar' && c.args.includes('-xzf')), undefined, 'must not extract');
 });
 
+test('update() refuses an UNSIGNED update when a release public key is pinned (signature downgrade)', async () => {
+  const calls = [];
+  const exec = (cmd, args) => { calls.push({ cmd, args }); return { status: 0 }; };
+  const updater = createSelfUpdater({ installDir: '/opt/x', exec, fsImpl: makeFakeFs(), logger: quiet });
+  await assert.rejects(
+    () => updater.update({ serverUrl: 'http://s', token: 't', expectedSha: SHA, publicKey: 'PINNED-KEY', fetchImpl: okFetch() }),
+    /refusing unsigned update/
+  );
+  assert.equal(calls.find((c) => c.cmd === 'tar'), undefined, 'must not download/extract on a downgrade');
+});
+
+test('update() refuses an unsigned update when signed updates are required', async () => {
+  const updater = createSelfUpdater({ installDir: '/opt/x', exec: () => ({ status: 0 }), fsImpl: makeFakeFs(), logger: quiet });
+  await assert.rejects(
+    () => updater.update({ serverUrl: 'http://s', token: 't', expectedSha: SHA, requireSigned: true, fetchImpl: okFetch() }),
+    /refusing unsigned update/
+  );
+});
+
+test('update() refuses a legacy update that carries NO sha256 (unverified bytes)', async () => {
+  const calls = [];
+  const exec = (cmd, args) => { calls.push({ cmd, args }); return { status: 0 }; };
+  const updater = createSelfUpdater({ installDir: '/opt/x', exec, fsImpl: makeFakeFs(), logger: quiet });
+  await assert.rejects(
+    () => updater.update({ serverUrl: 'http://s', token: 't', fetchImpl: okFetch() }),
+    /no sha256 to verify/
+  );
+  assert.equal(calls.find((c) => c.cmd === 'tar' && c.args.includes('-xzf')), undefined, 'must not extract unverified code');
+});
+
+test('update() refuses an archive containing a symlink member (symlink-slip)', async () => {
+  const calls = [];
+  const exec = (cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd === 'tar' && args.includes('-tzf')) return { status: 0, stdout: 'pkg/app.js\npkg/link\n' };
+    if (cmd === 'tar' && args.includes('-tvzf')) return { status: 0, stdout: '-rw-r--r-- 0/0 10 pkg/app.js\nlrwxrwxrwx 0/0 0 pkg/link -> /etc\n' };
+    return { status: 0 };
+  };
+  const updater = createSelfUpdater({ installDir: '/opt/x', exec, fsImpl: makeFakeFs(), logger: quiet });
+  await assert.rejects(
+    () => updater.update({ serverUrl: 'http://s', token: 't', expectedSha: SHA, fetchImpl: okFetch() }),
+    /link member/
+  );
+  assert.equal(calls.find((c) => c.cmd === 'tar' && c.args.includes('-xzf')), undefined, 'must not extract a link archive');
+});
+
 test('restart() asks systemd to restart the unit without blocking', () => {
   const calls = [];
   const exec = (cmd, args) => { calls.push({ cmd, args }); return { status: 0 }; };

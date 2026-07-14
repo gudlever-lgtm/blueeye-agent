@@ -109,7 +109,14 @@ function createAgentClient({
     // Declare our wire-contract version so the server can detect a mismatch. The
     // server echoes its own in the `connected` frame; neither side treats a
     // mismatch as fatal.
-    const wsOpts = { headers: { Authorization: `Bearer ${token}`, 'X-BlueEye-Protocol': String(PROTOCOL_VERSION) } };
+    // Cap inbound frames at 1 MB. `ws` defaults to 100 MB, which a malicious or
+    // compromised server could use to push a huge frame straight into JSON.parse
+    // below and pressure the agent's memory. Server commands are tiny, so 1 MB is
+    // generous. (The server enforces the same cap on the agent->server direction.)
+    const wsOpts = {
+      headers: { Authorization: `Bearer ${token}`, 'X-BlueEye-Protocol': String(PROTOCOL_VERSION) },
+      maxPayload: 1024 * 1024,
+    };
     const pinning = pin && wsUrl.startsWith('wss:');
     // Pin by verifying the exact leaf cert on secureConnect (Node skips
     // checkServerIdentity when rejectUnauthorized is false), before the upgrade

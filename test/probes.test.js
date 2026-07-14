@@ -6,7 +6,7 @@ const { EventEmitter } = require('events');
 
 const { tcpProbe } = require('../src/probes/tcp');
 const { dnsProbe } = require('../src/probes/dns');
-const { parsePing } = require('../src/probes/ping');
+const { parsePing, pingProbe } = require('../src/probes/ping');
 const { traceroute, parseTraceroute } = require('../src/probes/traceroute');
 const { httpProbe, normalizeUrl } = require('../src/probes/http');
 const { curlProbe } = require('../src/probes/curl');
@@ -137,6 +137,32 @@ test('parseTraceroute aggregates multi-sample hops into loss + jitter (MTR-style
   assert.equal(hops[2].recv, 2);
   assert.equal(hops[2].lossPct, 33.33);
   assert.equal(hops[2].rttMs, 13);
+});
+
+test('ping rejects an option-looking host (argument injection) without spawning', async () => {
+  let spawned = false;
+  const exec = (_cmd, _args, _opts, cb) => { spawned = true; cb(null, ''); };
+  const res = await pingProbe({ host: '-f' }, { exec, platform: 'linux' });
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'invalid host');
+  assert.equal(spawned, false, 'must not spawn ping for an unsafe host');
+});
+
+test('ping passes a safe host after a `--` end-of-options marker', async () => {
+  let seenArgs = null;
+  const exec = (_cmd, args, _opts, cb) => { seenArgs = args; cb(null, '0% packet loss\nrtt min/avg/max/mdev = 1/1/1/0 ms'); };
+  await pingProbe({ host: 'example.com', count: 2 }, { exec, platform: 'linux' });
+  assert.ok(seenArgs.includes('--'), 'argv contains the -- guard');
+  assert.equal(seenArgs[seenArgs.indexOf('--') + 1], 'example.com', 'host follows --');
+});
+
+test('traceroute rejects an option-looking host without spawning', async () => {
+  let spawned = false;
+  const exec = (_bin, _args, _opts, cb) => { spawned = true; cb(null, ''); };
+  const res = await traceroute({ host: '--help' }, { exec, platform: 'linux' });
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'invalid host');
+  assert.equal(spawned, false, 'must not spawn traceroute for an unsafe host');
 });
 
 test('traceroute reports a reason when the command is missing, not a blank run', async () => {
