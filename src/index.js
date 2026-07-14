@@ -11,14 +11,25 @@ const { makePinnedFetch } = require('./httpsClient');
 const { resolveEffectiveServerUrl } = require('./serverUrl');
 const { closeNetworkHandles } = require('./shutdown');
 
-// Drain lingering network handles, then exit. On Windows a bare process.exit()
-// that races libuv's teardown of an undici keep-alive socket (Node's built-in
-// fetch) aborts with a native assertion and a non-zero code — which made a
-// SUCCESSFUL `enroll` look like a failure to the installer. Closing those handles
-// first makes the exit clean everywhere.
+// Exit cleanly on every platform.
+//
+// A bare process.exit() FORCES libuv to tear down immediately, even while the
+// sockets from the last HTTP request are still finishing their close on the next
+// loop tick. On Windows that race trips a native assertion
+// (`!(handle->flags & UV_HANDLE_CLOSING)`, src\win\async.c:94) and aborts with a
+// NON-ZERO code — AFTER the work already succeeded. That is what made a good
+// `enroll` (token stored) look like a failure to the installer.
+//
+// So we do NOT force-exit. We close what we can (undici's global dispatcher + the
+// http/https agents), set the exit code, and let the event loop DRAIN and end the
+// process naturally — a natural exit never closes libuv's internal async handle
+// while work is pending, so it cannot trip the assertion. A single unref'd backstop
+// hard-exits only if some handle unexpectedly keeps the loop alive; being unref'd,
+// it never delays an otherwise-clean exit.
 async function exit(code) {
+  process.exitCode = code;
   await closeNetworkHandles();
-  process.exit(code);
+  setTimeout(() => process.exit(code), 3000).unref();
 }
 
 // CLI entry point. This is the only place that calls process.exit — all the
