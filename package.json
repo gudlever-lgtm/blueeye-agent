@@ -1,6 +1,6 @@
 {
   "name": "blueeye-agent",
-  "version": "0.16.5",
+  "version": "0.16.6",
   "private": true,
   "description": "BlueEye agent — runs on customer machines and connects to blueeye-server.",
   "license": "MIT",

@@ -92,7 +92,14 @@ async function runEnroll({ opts, config, systemInfo, logger, fetchImpl, requestI
     } catch { /* best-effort — proceed without discovery */ }
   }
 
-  const effectiveFetch = fetchImpl || (isHttps && fingerprint ? makePinnedFetch(fingerprint) : fetch);
+  // Enroll over core http/https (makePinnedFetch), never Node's built-in fetch
+  // (undici). undici holds a keep-alive socket open after the POST; this one-shot
+  // CLI exits right afterwards, and that lingering socket is exactly what races
+  // process teardown into a native crash on Windows. Core http/https keeps no
+  // keep-alive by default, so the loop drains cleanly. makePinnedFetch pins the
+  // leaf cert when a fingerprint is known and otherwise does normal TLS validation
+  // (empty fingerprint = no pin), matching the previous behaviour.
+  const effectiveFetch = fetchImpl || makePinnedFetch(fingerprint);
   const result = await enroll({ serverUrl, code: opts.code, systemInfo, fetchImpl: effectiveFetch });
   if (!result.ok) {
     throw codedError(`Enrollment rejected by server (HTTP ${result.status ?? '?'}).`, 'ENROLL_FAILED', { detail: result.detail });

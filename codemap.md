@@ -36,12 +36,17 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 4. `createAgentRuntime({...}).start()`.
 5. Signals: `SIGINT`/`SIGTERM` → `runtime.stop()` + exit 0; `'fatal'` → exit 1.
 
-Every exit goes through `exit(code)`, which first drains lingering network
-handles ([`shutdown.js`](src/shutdown.js) `closeNetworkHandles` — undici's
-global dispatcher + the http/https global agents). A bare `process.exit()` that
-races libuv's teardown of an undici keep-alive socket aborts on Windows with a
-native assertion and a non-zero code — which made a *successful* `enroll` look
-like a failure to the installer (`$LASTEXITCODE -ne 0` → "enrollment failed").
+Every exit goes through `exit(code)`, which sets `process.exitCode`, drains
+lingering network handles ([`shutdown.js`](src/shutdown.js) `closeNetworkHandles`
+— undici's global dispatcher + the http/https global agents) and then lets the
+event loop **drain naturally** (an unref'd backstop hard-exits only if a handle
+unexpectedly lingers). It deliberately does *not* `process.exit()`: a forced exit
+races libuv's teardown of the sockets from the last request, and on Windows that
+trips a native assertion (`src\win\async.c:94`) that aborts with a non-zero code —
+which made a *successful* `enroll` look like a failure to the installer
+(`$LASTEXITCODE -ne 0` → "enrollment failed"). The `enroll` CLI also runs over
+core http/https ([`cli.js`](src/cli.js) → `makePinnedFetch`), never undici, so no
+keep-alive socket is left open to drain in the first place.
 
 ## Architecture
 
