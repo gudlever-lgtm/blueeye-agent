@@ -42,7 +42,10 @@ function createSelfUpdater({
 
   // Downloads + verifies + installs the new release. Throws (with a `.code`) on
   // any failure; resolves with { ok, sha, version } on success. Does NOT restart.
-  async function update({ serverUrl, token, expectedSha, expectedVersion, signature, publicKey, fetchImpl }) {
+  //
+  // `requireSigned` (or env BLUEEYE_REQUIRE_SIGNED_UPDATES) forces the signed
+  // path; a pinned `publicKey` implies it. Injectable so tests can exercise both.
+  async function update({ serverUrl, token, expectedSha, expectedVersion, signature, publicKey, fetchImpl, requireSigned }) {
     const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
     if (!doFetch) throw fail('NO_FETCH', 'no fetch implementation available');
 
@@ -51,6 +54,18 @@ function createSelfUpdater({
     // touches disk. Without one, fall back to the legacy source bundle (sha256
     // only) so existing deployments keep working.
     const signed = !!signature;
+
+    // Fail CLOSED against a signature downgrade. If this agent has pinned a
+    // release public key (the installer bakes it in) or signed updates are
+    // explicitly required, refuse ANY update that arrives without a signature —
+    // otherwise a malicious/compromised server, or an on-path attacker on a
+    // plain-HTTP link, could simply omit the signature to force the weaker
+    // legacy path and get arbitrary code executed as the agent's (often root) user.
+    const requireSignedEnv = /^(1|true|yes|on)$/i.test(String(process.env.BLUEEYE_REQUIRE_SIGNED_UPDATES || '').trim());
+    const mustBeSigned = requireSigned === true || !!publicKey || requireSignedEnv;
+    if (!signed && mustBeSigned) {
+      throw fail('SIGNATURE_REQUIRED', 'refusing unsigned update: a release public key is pinned or signed updates are required (possible signature downgrade)');
+    }
     const base = String(serverUrl || '').replace(/\/+$/, '');
     const url = `${base}${signed ? '/enroll/agent-release.tgz' : '/enroll/agent-source.tgz'}`;
     logger.info(`[update] downloading ${url}`);
@@ -85,7 +100,13 @@ function createSelfUpdater({
       version = manifest.version;
       logger.info(`[update] signature OK (v${manifest.version}, sha ${sha.slice(0, 12)}…)`);
     } else {
-      if (expectedSha && sha !== expectedSha) {
+      // Legacy source bundle: the sha256 is the ONLY integrity check, so it is
+      // mandatory. Without it we would extract and execute unverified bytes — the
+      // exact fail-open hole the signed path closes. Refuse rather than trust.
+      if (!expectedSha) {
+        throw fail('NO_CHECKSUM', 'legacy update carries no sha256 to verify against — refusing to install unverified code');
+      }
+      if (sha !== expectedSha) {
         throw fail('CHECKSUM_MISMATCH', `checksum mismatch (expected ${expectedSha}, got ${sha}) — refusing to install`);
       }
       logger.info(`[update] checksum OK (${sha})`);
@@ -113,6 +134,21 @@ function createSelfUpdater({
       const norm = path.normalize(name);
       if (path.isAbsolute(name) || norm === '..' || norm.startsWith(`..${path.sep}`) || norm.startsWith('../')) {
         throw fail('UNSAFE_ARCHIVE', `refusing to extract: archive contains an unsafe path "${name}"`);
+      }
+    }
+
+    // Defense in depth: a name-only check can't catch a symlink/hardlink member
+    // whose *target* escapes the root (e.g. `link -> /etc` followed by
+    // `link/passwd`), which `tar -xzf` would follow on extraction. Inspect the
+    // verbose listing's type flag and refuse any link member. Best-effort: if the
+    // verbose listing isn't available we still have the name check above.
+    const v = exec('tar', ['-tvzf', tgz], { encoding: 'utf8' });
+    if (v && v.status === 0 && v.stdout) {
+      for (const line of String(v.stdout).split('\n')) {
+        const type = line.trim()[0];
+        if (type === 'l' || type === 'h') {
+          throw fail('UNSAFE_ARCHIVE', `refusing to extract: archive contains a link member (${line.trim().slice(0, 80)})`);
+        }
       }
     }
   }
