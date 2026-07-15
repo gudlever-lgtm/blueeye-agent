@@ -202,6 +202,21 @@ test('icmp: timeout (killed)', async () => {
   assert.equal(r.status, 'timeout');
 });
 
+test('icmp: SECURITY a target starting with "-" is rejected and ping is never spawned', async () => {
+  let spawned = false;
+  const r = await icmpExecutor({ id: 1, type: 'icmp', target: '-f' }, { exec: () => { spawned = true; }, platform: 'linux', now: () => 0 });
+  assert.equal(r.status, 'error');
+  assert.equal(r.detail.errno, 'INVALID_TARGET');
+  assert.equal(spawned, false);
+});
+
+test('icmp: the host is placed after -- (end-of-options) on unix', async () => {
+  let capturedArgs = null;
+  await icmpExecutor({ id: 1, type: 'icmp', target: '1.2.3.4' }, { exec: (c, a, o, cb) => { capturedArgs = a; cb(null, LINUX_PING); }, platform: 'linux', now: () => 0 });
+  assert.ok(capturedArgs.includes('--'));
+  assert.equal(capturedArgs[capturedArgs.length - 1], '1.2.3.4');
+});
+
 // ---- runTransaction dispatch ----
 
 test('runTransaction: unknown type → error, never throws', async () => {
