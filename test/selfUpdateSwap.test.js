@@ -76,6 +76,32 @@ test('a signed update with the symlink layout extracts a NEW release dir and ato
   assert.ok(fsr.ops.some(([op, p]) => op === 'write' && p === '/opt/blueeye-agent/releases/.previous'));
 });
 
+test('SECURITY: a legacy update whose version is a path traversal is refused before any fs write', async () => {
+  const tarball = Buffer.from('agent-bytes');
+  const fsr = recordingFs();
+  const updater = createSelfUpdater({
+    ...LAYOUT,
+    // tar listing is empty (assertSafeTar passes); the version guard must fire.
+    exec: () => ({ status: 0, stdout: '' }),
+    fsImpl: fsr,
+    logger: quiet,
+  });
+  await assert.rejects(
+    () => updater.update({
+      serverUrl: 'http://s', token: 't',
+      expectedSha: sha(tarball),
+      expectedVersion: '../../../../etc', // hostile, unsigned server-supplied version
+      fetchImpl: async () => ({
+        ok: true, status: 200, headers: { get: () => null },
+        arrayBuffer: async () => Uint8Array.from(tarball).buffer,
+      }),
+    }),
+    (err) => err.code === 'BAD_VERSION',
+  );
+  // No directory outside the releases root was created or rm -rf'd.
+  assert.ok(!fsr.ops.some(([op, p]) => (op === 'rm' || op === 'mkdir') && String(p).includes('etc')));
+});
+
 test('rollback repoints current at the recorded previous release', () => {
   const fsr = recordingFs();
   fsr.readFileSync = () => '/opt/blueeye-agent/releases/0.2.0';

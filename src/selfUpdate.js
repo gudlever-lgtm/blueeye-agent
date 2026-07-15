@@ -186,8 +186,30 @@ function createSelfUpdater({
   // atomically repoint `current` (rename over the symlink is atomic on POSIX), so
   // a crash mid-update never leaves a half-written LIVE tree. Records the prior
   // release for rollback() and prunes old ones.
+  // A release `version` becomes a directory name under releasesDir (and is then
+  // rm -rf'd + recreated), so it MUST be a plain, self-contained token. In the
+  // legacy/unsigned path `version` is `expectedVersion`, taken verbatim from the
+  // server's update command — an unvalidated value like '../../../etc' would let
+  // a malicious/compromised server escape the releases root and delete an
+  // arbitrary directory as the agent's (often root) user before any payload is
+  // even extracted. Reject anything that isn't a bare release token, and assert
+  // the resolved path stays inside releasesDir. (The signed path passes the
+  // authenticated manifest.version, but validating it too is cheap defense.)
+  function assertSafeVersion(version) {
+    const v = String(version);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v) || v.includes('..')) {
+      throw fail('BAD_VERSION', `refusing update: unsafe release version "${v}"`);
+    }
+    const root = path.resolve(releasesDir);
+    const resolved = path.resolve(root, v);
+    if (resolved !== path.join(root, v) || !(resolved + path.sep).startsWith(root + path.sep)) {
+      throw fail('BAD_VERSION', `refusing update: release version "${v}" escapes the releases directory`);
+    }
+    return v;
+  }
+
   function atomicInstall(tgz, version) {
-    const newDir = path.join(releasesDir, String(version));
+    const newDir = path.join(releasesDir, assertSafeVersion(version));
     try { fsImpl.mkdirSync(releasesDir, { recursive: true }); } catch { /* exists */ }
     try { fsImpl.rmSync(newDir, { recursive: true, force: true }); } catch { /* none */ }
     fsImpl.mkdirSync(newDir, { recursive: true });
