@@ -8,6 +8,7 @@ const SPEEDTEST = /^speed[\s_-]?test$/i;
 const DIAGNOSE = /^(diagnose|diag|doctor|self[\s_-]?check|health[\s_-]?check)$/i;
 const DELETE = /^(delete|self[\s_-]?delete|uninstall)$/i;
 const INSTALL_TOOL = /^install[\s_-]?tool$/i;
+const EVIDENCE = /^evidence(?:[\s_-]?snapshot)?$/i;
 
 function verbOf(command) {
   if (typeof command === 'string') return command.trim();
@@ -70,4 +71,12 @@ function isInstallToolCommand(command) {
   return INSTALL_TOOL.test(verbOf(command)) && !!command && typeof command.tool === 'string' && command.tool.trim() !== '';
 }
 
-module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand };
+// Recognises a read-only evidence-snapshot command: { name: 'evidence', id,
+// snapshotId, clusterId, commandSetVersion, items:[...], signature? }. The agent
+// collects ONLY the items on its own read-only allowlist (src/evidenceCollector.js)
+// and replies with per-item results — never a write action.
+function isEvidenceCommand(command) {
+  return EVIDENCE.test(verbOf(command));
+}
+
+module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand };

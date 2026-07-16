@@ -3,7 +3,10 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand } = require('./command');
+const { createEvidenceCollector } = require('./evidenceCollector');
+const { verifyManifest } = require('./release/verifyManifest');
+const fs = require('fs');
 const { createSelfUpdater } = require('./selfUpdate');
 const { createSelfDeleter } = require('./selfDelete');
 const { createToolInstaller } = require('./toolInstaller');
@@ -80,6 +83,8 @@ function createAgentRuntime({
   toolInstaller = null,
   actionLog = null,
   hsflowdManager = null,
+  // The release trust anchor; injectable for tests. Defaults to the embedded key.
+  releasePublicKey = resolveReleasePublicKey(),
 }) {
   const emitter = new EventEmitter();
   const updater = selfUpdater || createSelfUpdater({ logger });
@@ -91,9 +96,6 @@ function createAgentRuntime({
   // Local, server-independent action trail. Path comes from the env at
   // provisioning (BLUEEYE_ACTION_LOG); a no-op when unset. Never logs secrets.
   const actions = actionLog || createActionLog({ path: process.env.BLUEEYE_ACTION_LOG || '' });
-  // The agent's release trust anchor — used to verify a signed update before it
-  // touches disk. Resolved once at startup.
-  const releasePublicKey = resolveReleasePublicKey();
   // When a cert fingerprint is configured and the server is https, pin it on the
   // REST calls too (the WS client pins separately). Falls back to the injected
   // fetch (or global fetch) otherwise — so tests that inject a fetch are unaffected.
@@ -607,9 +609,59 @@ function createAgentRuntime({
     }
   }
 
+  // Read-only evidence collectors (Fase 6). Each returns bounded text from a
+  // read-only source the agent already has — /proc counters, the neighbour table,
+  // its own live state. No writes, no new SNMP OID scope. Best-effort per item.
+  const evidenceCollectors = {
+    'agent.state': async () => [
+      `connected: ${client && typeof client.isConnected === 'function' ? (client.isConnected() ? 'yes' : 'no') : 'unknown'}`,
+      `lastReportAt: ${lastReportAt ? new Date(lastReportAt).toISOString() : 'never'}`,
+      `sources: ${(capabilities.sources || []).join(', ') || 'none'}`,
+      `monitorSource: ${monitorConfig && monitorConfig.source ? monitorConfig.source : 'unknown'}`,
+      `agentVersion: ${capabilities.agentVersion || 'unknown'}`,
+    ].join('\n'),
+    'iface.counters': async () => fs.readFileSync('/proc/net/dev', 'utf8'),
+    'arp.table': async () => fs.readFileSync('/proc/net/arp', 'utf8'),
+    'snmp.reads': async () => (monitorConfig && monitorConfig.source === 'snmp'
+      ? `SNMP collector target: ${(monitorConfig.snmp && monitorConfig.snmp.host) || 'configured'} (read-only counters already polled by the collector).`
+      : 'SNMP not configured on this agent.'),
+  };
+
+  // Handles a read-only evidence-snapshot command. Verifies the server signature
+  // (when the release key is configured — reusing the release verifier), enforces
+  // the agent's OWN read-only allowlist per item, collects, and replies. Never
+  // performs a write action; a non-allowlisted item is refused.
+  async function handleEvidence(command) {
+    // Defense in depth: if the command is signed AND we have the pinned key, it
+    // MUST verify or we refuse the whole snapshot (fail closed).
+    if (command && command.signature && releasePublicKey) {
+      const payload = {
+        name: command.name, snapshotId: command.snapshotId, clusterId: command.clusterId,
+        commandSetVersion: command.commandSetVersion, items: command.items,
+      };
+      if (!verifyManifest(payload, command.signature, releasePublicKey)) {
+        actions.log('evidence.refused', { reason: 'bad-signature', snapshotId: command.snapshotId });
+        client.send({ type: 'command-result', id: command.id, ok: false, error: 'evidence command signature verification failed' });
+        return;
+      }
+    }
+    const collector = createEvidenceCollector({ collectors: evidenceCollectors });
+    const items = await collector.collect(command && command.items);
+    actions.log('evidence.capture', { snapshotId: command && command.snapshotId, items: items.map((i) => ({ name: i.name, status: i.status })) });
+    client.send({
+      type: 'command-result', id: command && command.id, ok: true,
+      evidence: { commandSetVersion: command && command.commandSetVersion, items },
+    });
+    emitter.emit('evidence-captured', { snapshotId: command && command.snapshotId, items });
+  }
+
   client.on('command', async (command) => {
     if (isPingCommand(command)) {
       handlePing(command);
+      return;
+    }
+    if (isEvidenceCommand(command)) {
+      await handleEvidence(command);
       return;
     }
     if (isDiagnoseCommand(command)) {
