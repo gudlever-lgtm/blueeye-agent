@@ -158,6 +158,14 @@ Server → agent commands ([`command.js`](src/command.js)):
   report back via `action-result`. The tool is checked against the agent's OWN allowlist in
   [`toolInstaller.js`](src/toolInstaller.js) (apt/dnf/yum/zypper/apk/pacman) — the agent never
   installs an arbitrary package the server names. Docker-managed agents decline.
+- **evidence** (`evidence(?:[\s_-]?snapshot)?` + `snapshotId`/`clusterId`/`commandSetVersion`/
+  `items`/optional `signature`) → collect a READ-ONLY diagnostic snapshot and reply
+  `command-result` with per-item results. The agent enforces its OWN read-only allowlist in
+  [`evidenceCollector.js`](src/evidenceCollector.js) (`iface.counters`/`arp.table`/`snmp.reads`/
+  `agent.state`) and **hard-refuses** anything else **without invoking a collector** — the
+  server's allowlist is not trusted (defense in depth). When a release public key is
+  configured, a signed command with a bad signature is refused (reuses
+  [`verifyManifest.js`](src/release/verifyManifest.js)). Never a write action.
 
 ## Configuration & environment
 
