@@ -29,6 +29,18 @@ See **[codemap.md](codemap.md)** for the module map.
 a recognizer in `src/command.js` + a handler in `src/runtime.js` + a `fakeServer`
 endpoint (if it calls back) + tests.
 
+## ai-codex (AI codebase index)
+
+- [`ai-codex`](https://github.com/skibidiskib/ai-codex) generates a compact, token-cheap
+  `.ai-codex/` index for AI assistants. Run it with `npm run codex` (wraps
+  `npx ai-codex`); defaults come from `codex.config.json`.
+- **Status: currently a no-op here.** ai-codex only reads ESM `export`/TypeScript,
+  Next.js/SvelteKit routing, and Prisma/Drizzle schemas. This agent is CommonJS + plain
+  Node.js (see conventions above), so every generator is skipped and `.ai-codex/` comes
+  out empty. **Rely on [codemap.md](codemap.md)** for the module map. The `codex` script +
+  config are kept wired up so the index starts producing output if the stack ever adopts
+  TS.
+
 ## Sister repos
 
 - **blueeye-server** — the on‑prem server the agent reports to and is managed from.

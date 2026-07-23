@@ -1,0 +1,5 @@
+{
+  "output": ".ai-codex",
+  "include": ["src"],
+  "exclude": ["node_modules", "test", "test-support", "docker", "deploy", "scripts", "blueeye-agent-go"]
+}
