@@ -159,6 +159,12 @@ Server → agent commands ([`command.js`](src/command.js)):
   report back via `action-result`. The tool is checked against the agent's OWN allowlist in
   [`toolInstaller.js`](src/toolInstaller.js) (apt/dnf/yum/zypper/apk/pacman) — the agent never
   installs an arbitrary package the server names. Docker-managed agents decline.
+- **run-discovery** (`run[\s_-]?discovery|discovery[\s_-]?sweep|sweep` + a `discovery` object
+  `{ cidrs?, ports?, rateLimit?, addressCap?, requestId? }`) → sweep the CIDR scope from THIS
+  agent's vantage (empty `cidrs` ⇒ the agent's own subnet via `localIps.collectLocalCidrs`),
+  native probes only ([`discovery/`](src/discovery), TCP-connect + rDNS, rate-limited,
+  scope-capped), and `POST /agents/discovery-results` with the candidates. A scope refusal
+  (empty/over-cap) is reported as `{ refused, reason }`, never a crash. Never a write action.
 - **evidence** (`evidence(?:[\s_-]?snapshot)?` + `snapshotId`/`clusterId`/`commandSetVersion`/
   `items`/optional `signature`) → collect a READ-ONLY diagnostic snapshot and reply
   `command-result` with per-item results. The agent enforces its OWN read-only allowlist in

@@ -3,7 +3,9 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand } = require('./command');
+const { createScanner, DiscoveryScopeError } = require('./discovery/scanner');
+const { collectLocalCidrs } = require('./localIps');
 const { createEvidenceCollector } = require('./evidenceCollector');
 const { verifyManifest } = require('./release/verifyManifest');
 const fs = require('fs');
@@ -82,6 +84,8 @@ function createAgentRuntime({
   collectNic = collectNicInfo,
   collectLocalIps = collectLocalIpsDefault,
   collectConns = collectConnections,
+  discoveryScanner = createScanner(),
+  collectCidrs = collectLocalCidrs,
   selfUpdater = null,
   selfDeleter = null,
   toolInstaller = null,
@@ -209,6 +213,58 @@ function createAgentRuntime({
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
       logger.error(`Failed to run/submit probe: ${err.message}`);
       reportError('probe', err);
+      emitter.emit('command-error', err);
+      return false;
+    }
+  }
+
+  // Runs an active-discovery sweep from THIS agent's vantage and reports the
+  // candidates. Scope resolution: the server-provided CIDRs, or — when empty —
+  // this host's own subnet(s) ("scan the segment I'm on"). The scanner enforces
+  // the address cap + scope guard and refuses an empty/over-cap scope (reported
+  // back as a refusal, not a crash). Native probes only; never a write action.
+  async function runDiscoveryAndSubmit(spec) {
+    const d = spec && typeof spec === 'object' ? spec : {};
+    const requestId = d.requestId != null ? d.requestId : null;
+    let cidrs = Array.isArray(d.cidrs) ? d.cidrs.map((c) => String(c).trim()).filter(Boolean) : [];
+    let derivedFromSelf = false;
+    if (!cidrs.length) { cidrs = collectCidrs(); derivedFromSelf = true; }
+    const startedAt = new Date().toISOString();
+    try {
+      const result = await discoveryScanner.scan({
+        cidrs,
+        addressCap: d.addressCap != null ? Number(d.addressCap) : 65536,
+        ratePerSec: d.rateLimit != null ? Number(d.rateLimit) : 50,
+        portList: Array.isArray(d.ports) && d.ports.length ? d.ports.map(Number).filter((n) => n > 0) : undefined,
+      });
+      const payload = {
+        requestId,
+        scope: cidrs,
+        derivedFromSelf,
+        addresses: result.addresses,
+        probed: result.probed.length,
+        candidates: result.candidates,
+        startedAt,
+        endedAt: new Date().toISOString(),
+      };
+      await api.postDiscoveryResults(payload);
+      logger.info(`Discovery swept ${result.addresses} addr(s) in ${cidrs.join(', ') || '(none)'} → ${result.candidates.length} candidate(s).`);
+      emitter.emit('discovery-submitted', payload);
+      return true;
+    } catch (err) {
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+      // A scope refusal is an expected outcome, not an error — report it so the
+      // server can audit "refused (reason)" instead of the sweep vanishing.
+      if (err instanceof DiscoveryScopeError) {
+        try {
+          await api.postDiscoveryResults({ requestId, scope: cidrs, derivedFromSelf, refused: true, reason: err.code, candidates: [], startedAt, endedAt: new Date().toISOString() });
+        } catch { /* best-effort */ }
+        logger.warn(`Discovery refused: ${err.code}.`);
+        emitter.emit('discovery-refused', { reason: err.code });
+        return false;
+      }
+      logger.error(`Failed to run/submit discovery: ${err.message}`);
+      reportError('discovery', err);
       emitter.emit('command-error', err);
       return false;
     }
@@ -704,6 +760,11 @@ function createAgentRuntime({
     if (isRunProbeCommand(command)) {
       logger.info(`Received run-probe command (${command.probe.type}).`);
       await runProbeAndSubmit(command.probe);
+      return;
+    }
+    if (isRunDiscoveryCommand(command)) {
+      logger.info('Received run-discovery command; sweeping configured scope.');
+      await runDiscoveryAndSubmit(command.discovery);
       return;
     }
     if (!isRunTestCommand(command)) {
