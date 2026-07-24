@@ -13,7 +13,8 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "codex": "npx --yes ai-codex"
   },
   "dependencies": {
     "ws": "^8.18.0"
