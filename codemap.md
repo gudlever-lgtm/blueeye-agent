@@ -108,7 +108,8 @@ UDP packet ─▶ collector.js ─▶ parse ─▶ flow records ─▶ aggregate
 | [`netflow/parseV5.js`](src/netflow/parseV5.js) | Pure parser for NetFlow v5 packets → `{ header, flows }`. |
 | [`netflow/parseTemplated.js`](src/netflow/parseTemplated.js) | NetFlow v9 + IPFIX; learns Template FlowSets, caches them across packets. |
 | [`netflow/fields.js`](src/netflow/fields.js) | IE field decoders + `applyField`/`finaliseFlow`; `PROTO_NAMES`. |
-| [`netflow/aggregate.js`](src/netflow/aggregate.js) | Folds flow records into per-port/proto/talker summaries (shared by sflow). |
+| [`netflow/aggregate.js`](src/netflow/aggregate.js) | Folds flow records into per-port/proto/talker summaries + a capped per-5-tuple `flows` list (proto+ports, feeds the server's service dependency graph). Shared by sflow. |
+| [`localIps.js`](src/localIps.js) | This host's own non-loopback IPs (`os.networkInterfaces()`), reported as `capabilities.ips` so the server can resolve a flow IP back to the host. |
 | [`sflow/parse.js`](src/sflow/parse.js) | Parses sFlow v5 datagrams; scales sampled bytes by sampling rate. |
 | [`sflow/decodePacket.js`](src/sflow/decodePacket.js) | Decodes the sampled raw frame (Eth+IPv4/IPv6+TCP/UDP) to a 5-tuple. |
 | [`sflow/hsflowd.js`](src/sflow/hsflowd.js) | Self-managed hsflowd lifecycle (install/configure/start/stop + state machine) so a host exports sFlow to its own collector. Docker agents defer to the [hsflowd sidecar](docker/hsflowd). |

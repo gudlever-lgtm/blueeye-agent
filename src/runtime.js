@@ -20,6 +20,7 @@ const { createSampler } = require('./monitor');
 const { createHsflowdManager } = require('./sflow/hsflowd');
 const { detectCapabilities } = require('./capabilities');
 const { collectNicInfo } = require('./nicInfo');
+const { collectLocalIps: collectLocalIpsDefault } = require('./localIps');
 const { makePinnedFetch } = require('./httpsClient');
 const path = require('path');
 const { createSecretStore } = require('./transactions/secretStore');
@@ -78,6 +79,7 @@ function createAgentRuntime({
   probeRunner = runProbe,
   resolveTargets = resolveProbeTargets,
   collectNic = collectNicInfo,
+  collectLocalIps = collectLocalIpsDefault,
   selfUpdater = null,
   selfDeleter = null,
   toolInstaller = null,
@@ -220,6 +222,10 @@ function createAgentRuntime({
       const nic = await collectNic();
       if (Array.isArray(nic) && nic.length) payload = { ...capabilities, nic };
     } catch { /* NIC inventory is best-effort */ }
+    try {
+      const ips = collectLocalIps();
+      if (Array.isArray(ips) && ips.length) payload = { ...payload, ips };
+    } catch { /* own-IP list is best-effort */ }
     try {
       await api.postCapabilities(payload);
       const nicNote = payload.nic ? ` + ${payload.nic.length} NIC(s)` : '';
