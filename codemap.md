@@ -149,7 +149,7 @@ What the agent calls on **blueeye-server** (mirrored by the fake server):
 | `POST /agents/results` | [`apiClient.js`](src/apiClient.js) | traffic results. |
 | `POST /agents/probe-results` | [`apiClient.js`](src/apiClient.js) | probe results. |
 | `GET /agents/me/config` | [`apiClient.js`](src/apiClient.js) | returns `{ monitorConfig }` (which source to use). |
-| `POST /agents/me/capabilities` | [`apiClient.js`](src/apiClient.js) | reports `{ sources, agentVersion, managed, nic }` — sources/version/runtime ([`capabilities.js`](src/capabilities.js)) plus the per-interface NIC driver/firmware inventory ([`nicInfo.js`](src/nicInfo.js), `ethtool -i` + sysfs; for fleet firmware-drift detection). |
+| `POST /agents/me/capabilities` | [`apiClient.js`](src/apiClient.js) | reports `{ sources, agentVersion, managed, nic, ips, connections }` — sources/version/runtime ([`capabilities.js`](src/capabilities.js)), the per-interface NIC driver/firmware inventory ([`nicInfo.js`](src/nicInfo.js), `ethtool -i` + sysfs; for fleet firmware-drift detection), own IPs ([`localIps.js`](src/localIps.js)), and the established-TCP **connection table** folded into directed service-dependency edges ([`connTable.js`](src/connTable.js), `ss`/`netstat`/Get-NetTCPConnection — metadata only) so a `proc`/`snmp` host with no flow exporter still feeds the server's service dependency graph. |
 
 Server → agent commands ([`command.js`](src/command.js)):
 - **run-test** (`run[\s_-]?test`) → measure traffic + system, `POST /agents/results`.
@@ -224,6 +224,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | Commands | [`command.js`](src/command.js) |
 | Measurement orchestration | [`testRunner.js`](src/testRunner.js), [`monitor.js`](src/monitor.js), [`systemMetrics.js`](src/systemMetrics.js) |
 | Traffic sources | [`trafficMonitor.js`](src/trafficMonitor.js), [`trafficMonitorWin.js`](src/trafficMonitorWin.js), [`snmpMonitor.js`](src/snmpMonitor.js), [`netflow/`](src/netflow), [`sflow/`](src/sflow) |
+| Connection table | [`connTable.js`](src/connTable.js) — established-TCP edges from `ss`/`netstat`/Get-NetTCPConnection (pure per-platform parsers + orientation + aggregation; injectable exec), reported in `capabilities.connections` |
 | Active probes | [`probes/`](src/probes) |
 | Logging | [`logger.js`](src/logger.js) |
 
