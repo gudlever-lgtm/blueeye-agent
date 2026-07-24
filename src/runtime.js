@@ -20,6 +20,7 @@ const { createSampler } = require('./monitor');
 const { createHsflowdManager } = require('./sflow/hsflowd');
 const { detectCapabilities } = require('./capabilities');
 const { collectNicInfo } = require('./nicInfo');
+const { collectConnections } = require('./connTable');
 const { collectLocalIps: collectLocalIpsDefault } = require('./localIps');
 const { makePinnedFetch } = require('./httpsClient');
 const path = require('path');
@@ -80,6 +81,7 @@ function createAgentRuntime({
   resolveTargets = resolveProbeTargets,
   collectNic = collectNicInfo,
   collectLocalIps = collectLocalIpsDefault,
+  collectConns = collectConnections,
   selfUpdater = null,
   selfDeleter = null,
   toolInstaller = null,
@@ -227,9 +229,16 @@ function createAgentRuntime({
       if (Array.isArray(ips) && ips.length) payload = { ...payload, ips };
     } catch { /* own-IP list is best-effort */ }
     try {
+      // Established-TCP connection table → directed service-dependency edges, so a
+      // proc/snmp-only host (no NetFlow/sFlow) still feeds the server's graph.
+      const connections = await collectConns();
+      if (Array.isArray(connections) && connections.length) payload = { ...payload, connections };
+    } catch { /* connection table is best-effort */ }
+    try {
       await api.postCapabilities(payload);
       const nicNote = payload.nic ? ` + ${payload.nic.length} NIC(s)` : '';
-      logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}${nicNote}`);
+      const connNote = payload.connections ? ` + ${payload.connections.length} conn edge(s)` : '';
+      logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}${nicNote}${connNote}`);
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not report capabilities (${err.message}).`);
