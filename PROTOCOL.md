@@ -98,8 +98,11 @@ WS (re)connect (converges the stored agent version after a self-update).
     "nic": [ {                                         // optional; omitted when empty/unreadable
       "iface": "eth0", "driver": "e1000e", "driverVersion": "...",
       "firmwareVersion": "...", "busInfo": "0000:00:1f.6", "pciId": "8086:15b8"
-    } ]
-} }
+    } ],
+    "ips": ["10.0.0.5", "2001:db8::1"]                 // optional; this host's own non-loopback IPs
+} }                                                     //   (src/localIps.js) — lets the server resolve a
+                                                        //   flow IP back to the host for the service
+                                                        //   dependency graph. Additive + metadata only.
 // 200 response
 { "agentId": 42, "capabilities": { ...echoed, nic normalised... } }
 ```
@@ -172,9 +175,17 @@ drain()` + `src/netflow/aggregate.js`): flow summary since the last drain.
   "totals": { "bytes": 0, "packets": 0, "flows": 0 },
   "byPort":     [ { "port": 443, "bytes": 0, "packets": 0, "flows": 0 }, ... ],      // top 50 by bytes
   "byProtocol": [ { "protocol": "tcp", "bytes": 0, "packets": 0, "flows": 0 }, ... ], // top 50
-  "topTalkers": [ { "pair": "10.0.0.1->93.184.216.34", "bytes": 0, "packets": 0, "flows": 0 }, ... ] // top 50
+  "topTalkers": [ { "pair": "10.0.0.1->93.184.216.34", "bytes": 0, "packets": 0, "flows": 0 }, ... ], // top 50
+  "flows": [ { "srcIp": "10.0.0.1", "dstIp": "10.0.0.9", "proto": "tcp",  // top 200 by bytes; per-5-tuple
+              "srcPort": 51000, "dstPort": 443, "bytes": 0, "packets": 0, "flows": 0 }, ... ]
 }
 ```
+
+`flows` is the full-5-tuple form the server prefers (populates `flow_records.proto` /
+`dst_port`, and feeds the **service dependency graph**); `byPort`/`byProtocol`/
+`topTalkers` are unchanged. All additive — an older server ignores `flows` and keeps
+using `topTalkers`; a newer server falls back to `topTalkers` when `flows` is absent
+(e.g. a `proc`/`snmp` source, which produces interface counters, not per-flow rows).
 
 **System metrics** (`src/systemMetrics.js`):
 
