@@ -44,6 +44,7 @@ function startFakeServer(options = {}) {
   const enrollments = [];
   const receivedResults = [];
   const receivedCapabilities = [];
+  const receivedDiscovery = [];
   const receivedSpeedtests = [];
   const monitorConfig = options.monitorConfig || { source: 'proc' };
   const sockets = new Set();
@@ -153,6 +154,20 @@ function startFakeServer(options = {}) {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/agents/discovery-results') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid agent token' }));
+        return;
+      }
+      const body = await readJson(req);
+      receivedDiscovery.push({ token, body });
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, ingested: Array.isArray(body.candidates) ? body.candidates.length : 0 }));
+      return;
+    }
+
     // Speed-test bandwidth + result endpoints (agent token).
     if (req.method === 'GET' && req.url.startsWith('/speedtest/download')) {
       const u = new URL(req.url, 'http://localhost');
@@ -238,6 +253,7 @@ function startFakeServer(options = {}) {
         enrollments,
         receivedResults,
         receivedCapabilities,
+        receivedDiscovery,
         receivedSpeedtests,
         socketCount: () => sockets.size,
         sendCommandToAll,

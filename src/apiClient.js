@@ -64,6 +64,17 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     return jsonOrEmpty(res);
   }
 
+  // Posts active-discovery candidates found by this agent's scan.
+  async function postDiscoveryResults(payload) {
+    const res = await fetchImpl(`${serverUrl}/agents/discovery-results`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    assertOk(res, 'posting discovery results', 'post discovery results');
+    return jsonOrEmpty(res);
+  }
+
   // Posts an active throughput ("speed test") result for this agent.
   async function postSpeedtest(result) {
     const res = await fetchImpl(`${serverUrl}/speedtest/results`, {
@@ -86,7 +97,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     return jsonOrEmpty(res);
   }
 
-  return { postResults, getConfig, postCapabilities, postProbeResults, postSpeedtest };
+  return { postResults, getConfig, postCapabilities, postProbeResults, postDiscoveryResults, postSpeedtest };
 }
 
 module.exports = { createApiClient };

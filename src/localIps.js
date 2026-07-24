@@ -32,4 +32,38 @@ function collectLocalIps({ networkInterfaces = () => os.networkInterfaces() } = 
   return [...out];
 }
 
-module.exports = { collectLocalIps };
+// Collects this host's own IPv4 SUBNETS (network CIDRs), derived from each
+// interface's cidr (e.g. "192.168.1.34/24" → "192.168.1.0/24"). Used as the
+// default active-discovery scope when an admin leaves the scope blank: "scan the
+// segment this agent is on". Loopback / link-local / IPv6 are skipped, and a /31
+// or /32 is dropped (nothing useful to sweep). Deduped. Injectable for tests.
+function collectLocalCidrs({ networkInterfaces = () => os.networkInterfaces() } = {}) {
+  const out = new Set();
+  let ifaces;
+  try {
+    ifaces = networkInterfaces() || {};
+  } catch {
+    return [];
+  }
+  for (const list of Object.values(ifaces)) {
+    for (const a of Array.isArray(list) ? list : []) {
+      if (!a || a.internal || a.family !== 'IPv4' || !a.cidr) continue;
+      const addr = String(a.address || '');
+      if (addr.startsWith('169.254.')) continue; // link-local
+      const m = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})$/.exec(String(a.cidr));
+      if (!m) continue;
+      const prefix = Number(m[2]);
+      if (!Number.isInteger(prefix) || prefix < 8 || prefix > 30) continue; // sane sweepable range
+      // Network address for the prefix (mask off the host bits).
+      const parts = m[1].split('.').map(Number);
+      const ipInt = ((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3];
+      const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+      const net = (ipInt & mask) >>> 0;
+      const network = `${(net >>> 24) & 255}.${(net >>> 16) & 255}.${(net >>> 8) & 255}.${net & 255}`;
+      out.add(`${network}/${prefix}`);
+    }
+  }
+  return [...out];
+}
+
+module.exports = { collectLocalIps, collectLocalCidrs };

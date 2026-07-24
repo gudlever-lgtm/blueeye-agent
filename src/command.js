@@ -9,6 +9,7 @@ const DIAGNOSE = /^(diagnose|diag|doctor|self[\s_-]?check|health[\s_-]?check)$/i
 const DELETE = /^(delete|self[\s_-]?delete|uninstall)$/i;
 const INSTALL_TOOL = /^install[\s_-]?tool$/i;
 const EVIDENCE = /^evidence(?:[\s_-]?snapshot)?$/i;
+const RUN_DISCOVERY = /^(run[\s_-]?discovery|discovery[\s_-]?sweep|sweep)$/i;
 
 function verbOf(command) {
   if (typeof command === 'string') return command.trim();
@@ -79,4 +80,13 @@ function isEvidenceCommand(command) {
   return EVIDENCE.test(verbOf(command));
 }
 
-module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand };
+// Recognises a "run discovery" command: { name: 'run-discovery', discovery: {
+// cidrs?, ports?, rateLimit?, addressCap?, requestId? } } — sweep the configured
+// CIDR scope from THIS agent's network vantage (empty scope ⇒ the agent's own
+// subnet) and report the live hosts back. Native probes only, rate-limited,
+// scope-capped; never a write action.
+function isRunDiscoveryCommand(command) {
+  return RUN_DISCOVERY.test(verbOf(command)) && !!command && typeof command.discovery === 'object' && command.discovery !== null;
+}
+
+module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand };
