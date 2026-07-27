@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BlueEye agent uninstaller — removes the agent from THIS machine.
+# BlueEyes agent uninstaller — removes the agent from THIS machine.
 #
 # Auto-detects how the agent was installed and removes it:
 #   - systemd service (Node install): stop + disable + delete the unit + drop-ins
@@ -17,7 +17,7 @@ set -euo pipefail
 #
 # Env overrides: SERVICE_NAME, BLUEEYE_INSTALL_DIR, BLUEEYE_STATE_DIR, BLUEEYE_LOG_DIR, CONTAINER, IMAGE, TOKEN_VOLUME, UNIT
 #
-# NOTE: this removes the agent locally only. To remove it from the BlueEye
+# NOTE: this removes the agent locally only. To remove it from the BlueEyes
 # server's list too, open the dashboard -> Agents -> Delete.
 
 SERVICE_NAME="${SERVICE_NAME:-blueeye-agent}"
@@ -65,12 +65,12 @@ if [ -f "$HSFLOWD_CONF" ] && grep -q '^# Managed by blueeye-agent' "$HSFLOWD_CON
 fi
 
 if [ "$HAVE_SERVICE" -eq 0 ] && [ "$HAVE_CONTAINER" -eq 0 ] && [ "$HAVE_HSFLOWD" -eq 0 ] && [ "$HAVE_ENROLL_CODE" -eq 0 ] && [ ! -d "$INSTALL_DIR" ] && [ ! -d "$STATE_DIR" ]; then
-  log "No BlueEye agent found on this host (no '$SERVICE_NAME' service, no '$CONTAINER' container, no $INSTALL_DIR/$STATE_DIR). Nothing to do."
+  log "No BlueEyes agent found on this host (no '$SERVICE_NAME' service, no '$CONTAINER' container, no $INSTALL_DIR/$STATE_DIR). Nothing to do."
   exit 0
 fi
 
 # Warn — spell out exactly what will be removed before doing anything.
-warn "This will REMOVE the BlueEye agent from this machine:"
+warn "This will REMOVE the BlueEyes agent from this machine:"
 [ "$HAVE_SERVICE" -eq 1 ]   && warn "  - systemd service '$SERVICE_NAME' (stop, disable, delete $UNIT)"
 [ "$HAVE_CONTAINER" -eq 1 ] && warn "  - Docker container '$CONTAINER' (stop, remove)"
 [ "$HAVE_HSFLOWD" -eq 1 ]   && warn "  - agent-managed hsflowd exporter (stop, disable, delete $HSFLOWD_CONF; the hsflowd binary stays installed)"
@@ -79,7 +79,7 @@ warn "This will REMOVE the BlueEye agent from this machine:"
 [ "$HAVE_ENROLL_CODE" -eq 1 ] && warn "  - stored one-time enrollment code (systemd drop-in $ENROLL_DROPIN)"
 [ -d "$LOG_DIR" ]           && warn "  - log directory $LOG_DIR (local action trail)"
 [ "$PURGE" -eq 1 ]          && warn "  - Docker image '$IMAGE' and token volume '$TOKEN_VOLUME' (--purge)"
-warn "It does NOT remove the agent from the BlueEye server — do that in the dashboard (Agents -> Delete)."
+warn "It does NOT remove the agent from the BlueEyes server — do that in the dashboard (Agents -> Delete)."
 
 if [ "$ASSUME_YES" -ne 1 ]; then
   printf '[blueeye] Proceed with uninstall? [y/N] ' >&2
@@ -144,5 +144,5 @@ if [ -d "$LOG_DIR" ]; then
   rm -rf "$LOG_DIR"
 fi
 
-log "Done — the BlueEye agent has been removed from this machine."
+log "Done — the BlueEyes agent has been removed from this machine."
 log "If you haven't already, delete it in the dashboard too: Agents -> Delete."

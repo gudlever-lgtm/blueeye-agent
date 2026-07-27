@@ -1,5 +1,5 @@
-# BlueEye hsflowd sidecar — turns a Linux host into an sFlow v5 exporter that
-# samples the host's own traffic and ships it to the BlueEye agent's local
+# BlueEyes hsflowd sidecar — turns a Linux host into an sFlow v5 exporter that
+# samples the host's own traffic and ships it to the BlueEyes agent's local
 # collector (127.0.0.1:6343 by default). Run it alongside a host-networked agent
 # whose monitor source is "sflow", on Linux hosts only.
 #

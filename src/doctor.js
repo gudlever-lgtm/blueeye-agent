@@ -95,7 +95,7 @@ async function runDoctor({
   // 1) Server URL configured + parseable.
   let url = null;
   if (!serverUrl) {
-    checks.push(fail('config', 'No server URL configured.', 'Set BLUEEYE_SERVER_URL (or serverUrl in the config file) to the BlueEye server address, e.g. https://blueeye.example.dk.'));
+    checks.push(fail('config', 'No server URL configured.', 'Set BLUEEYE_SERVER_URL (or serverUrl in the config file) to the BlueEyes server address, e.g. https://blueeye.example.dk.'));
   } else {
     try { url = new URL(serverUrl); checks.push(pass('config', `Server URL: ${serverUrl}`)); }
     catch { checks.push(fail('config', `Server URL is not a valid URL: ${serverUrl}`, 'Fix BLUEEYE_SERVER_URL — it should look like http://host:3000 or https://host.example.')); }
@@ -159,7 +159,7 @@ async function runDoctor({
           ? `The server is forcing HTTPS. Point the agent at the https:// URL: set BLUEEYE_PUBLIC_URL=https://${host} on the server and reinstall, or re-enroll with --server https://${host}. (Over an http:// URL the agent uses ws://, and the WebSocket handshake won't follow the redirect — that's the "handshake failed: HTTP ${res.status}" in the log, followed by a 401 because the redirect drops the auth header.)`
           : `Point BLUEEYE_SERVER_URL at the redirect target (${target}) and re-enroll — the WebSocket handshake does not follow redirects.`));
     }
-    else checks.push(fail('http', `Server responded HTTP ${res.status} to GET /enroll/config.`, 'The host is reachable but did not answer as a BlueEye server — verify BLUEEYE_SERVER_URL points at the server itself (not a proxy or error page).'));
+    else checks.push(fail('http', `Server responded HTTP ${res.status} to GET /enroll/config.`, 'The host is reachable but did not answer as a BlueEyes server — verify BLUEEYE_SERVER_URL points at the server itself (not a proxy or error page).'));
   } catch (e) {
     const m = String((e && (e.message || e.code)) || e);
     if (/certificate|self.signed|\btls\b|\bssl\b|altname|depth|pin/i.test(m)) {

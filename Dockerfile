@@ -1,4 +1,4 @@
-# BlueEye agent — runs on customer machines, connects to blueeye-server.
+# BlueEyes agent — runs on customer machines, connects to blueeye-server.
 FROM node:22-alpine
 
 WORKDIR /app

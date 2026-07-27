@@ -1,4 +1,4 @@
-// Command blueeye-agent is the Go port of the BlueEye monitoring agent. This
+// Command blueeye-agent is the Go port of the BlueEyes monitoring agent. This
 // milestone wires config, token storage, the REST/WebSocket clients and the
 // definition-driven collector engine. Collectors are DATA: the server pushes
 // collector definitions over the authenticated WebSocket channel; the engine
@@ -70,7 +70,7 @@ func main() {
 	}
 	cfg.Shadow = *shadow
 	logger := logx.New(logx.ParseLevel(cfg.LogLevel))
-	logger.Infof("BlueEye Go agent %s starting (%s/%s).", version, nodePlatform(), nodeArch())
+	logger.Infof("BlueEyes Go agent %s starting (%s/%s).", version, nodePlatform(), nodeArch())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

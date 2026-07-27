@@ -1,8 +1,8 @@
 {
   "name": "blueeye-agent",
-  "version": "0.19.3",
+  "version": "0.20.1",
   "private": true,
-  "description": "BlueEye agent — runs on customer machines and connects to blueeye-server.",
+  "description": "BlueEyes Network Resilience System agent — runs on customer machines and connects to blueeye-server.",
   "license": "MIT",
   "engines": {
     "node": ">=18"

@@ -1,6 +1,7 @@
 # blueeye-agent
 
-The BlueEye agent runs on customer machines and connects to **blueeye-server**.
+The **BlueEyes Network Resilience System** agent runs on customer machines and
+connects to **blueeye-server**.
 It enrolls once with a one-time code, stores an **opaque token** locally,
 keeps a **WebSocket** open to the server (status + commands), and submits
 **test results** via REST.
@@ -119,7 +120,7 @@ managed so the dashboard **Update** button works:
 ```ini
 # /etc/systemd/system/blueeye-agent.service
 [Unit]
-Description=BlueEye monitoring agent
+Description=BlueEyes monitoring agent
 After=network-online.target
 Wants=network-online.target
 
@@ -235,7 +236,7 @@ It **warns and asks for confirmation first** (skip with `--yes`) and needs `sudo
 Env overrides: `SERVICE_NAME`, `BLUEEYE_INSTALL_DIR`, `CONTAINER`, `IMAGE`,
 `TOKEN_VOLUME`.
 
-> This removes the agent **locally only**. To also remove it from the BlueEye
+> This removes the agent **locally only**. To also remove it from the BlueEyes
 > server's list, open the dashboard → **Agents → Delete**.
 
 (If you installed from a checkout with the Docker `install.sh`, you can run

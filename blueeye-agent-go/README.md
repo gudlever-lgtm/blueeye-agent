@@ -1,6 +1,6 @@
 # blueeye-agent-go
 
-A Go port of the BlueEye monitoring agent, specified by
+A Go port of the BlueEyes monitoring agent, specified by
 [`../GO-REWRITE-AUDIT.md`](../GO-REWRITE-AUDIT.md). Goal: a single static binary
 whose wire behaviour the Node **blueeye-server** cannot distinguish from the
 Node agent — identical REST paths, WebSocket frames, headers and JSON shapes.
