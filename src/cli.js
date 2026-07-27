@@ -24,7 +24,7 @@ function parseArgs(argv) {
   return { cmd, opts };
 }
 
-const USAGE = `blueeye-agent — BlueEye monitoring agent
+const USAGE = `blueeye-agent — BlueEyes monitoring agent
 
 Usage:
   blueeye-agent                      run the agent (uses the stored token)

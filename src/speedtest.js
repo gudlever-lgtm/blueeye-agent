@@ -1,6 +1,6 @@
 'use strict';
 
-// Active throughput ("speed test") against the BlueEye server: download then
+// Active throughput ("speed test") against the BlueEyes server: download then
 // upload a sized blob and compute the achieved rate in Mbps. Self-contained —
 // it talks only to the server the agent already trusts (no external service),
 // so it works on air-gapped networks. Metadata only: byte counts and timings.

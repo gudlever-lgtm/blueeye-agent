@@ -60,7 +60,7 @@ function renderHsflowdConf(opts = {}) {
   const o = hsflowdOptions(opts);
   return [
     `${MANAGED_MARKER} — do not edit by hand; changes are overwritten.`,
-    '# Host sFlow exporter: samples this host and exports to the local BlueEye collector.',
+    '# Host sFlow exporter: samples this host and exports to the local BlueEyes collector.',
     'sflow {',
     `  collector { ip = ${o.collectorIp}  udpport = ${o.collectorPort} }`,
     `  sampling = ${o.samplingRate}`,

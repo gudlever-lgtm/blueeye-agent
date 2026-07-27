@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BlueEye agent — Docker installer.
+# BlueEyes agent — Docker installer.
 # Clones/updates the repo, builds the image, and runs the agent as a
 # restart-on-boot Docker container. Safe to re-run (it recreates the container;
 # the agent token lives on a named volume so re-runs reuse it).
@@ -42,7 +42,7 @@ if [ -z "${PLATFORM:-}" ]; then
   case "$(uname -m)" in
     x86_64|amd64)        PLATFORM="linux/amd64" ;;
     aarch64|arm64)       PLATFORM="linux/arm64" ;;
-    *) echo "ERROR: unsupported architecture '$(uname -m)'. The BlueEye agent requires a 64-bit host (amd64 or arm64). Set PLATFORM to override." >&2; exit 1 ;;
+    *) echo "ERROR: unsupported architecture '$(uname -m)'. The BlueEyes agent requires a 64-bit host (amd64 or arm64). Set PLATFORM to override." >&2; exit 1 ;;
   esac
 fi
 
@@ -85,7 +85,7 @@ echo "Starting container $CONTAINER (network: $NETWORK_MODE, platform: $PLATFORM
 docker run "${ARGS[@]}" "$IMAGE"
 
 echo
-echo "BlueEye agent is running. Recent logs:"
+echo "BlueEyes agent is running. Recent logs:"
 docker logs --tail 20 "$CONTAINER" 2>&1 || true
 
 # 4) Optional: the hsflowd sidecar — a host sFlow exporter that samples this

@@ -1,5 +1,5 @@
 [Unit]
-Description=BlueEye monitoring agent
+Description=BlueEyes monitoring agent
 Documentation=https://github.com/gudlever-lgtm/blueeye-agent
 After=network-online.target
 Wants=network-online.target

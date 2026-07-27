@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BlueEye agent — systemd (tar.gz) installer. NOT Docker. This is the canonical
+# BlueEyes agent — systemd (tar.gz) installer. NOT Docker. This is the canonical
 # bare-Linux install: it lays out /opt/blueeye-agent/releases/<version> with a
 # `current` symlink and a systemd service, so the server can later push SIGNED
 # releases that swap atomically (with rollback). The token + action log live

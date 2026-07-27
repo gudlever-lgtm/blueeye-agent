@@ -67,7 +67,7 @@ async function main() {
   if (cmd === 'doctor' || cmd === 'check' || cmd === 'test-connection') {
     const { runDoctor, formatReport } = require('./doctor');
     const config = loadConfig();
-    logger.info('Running BlueEye agent connection self-test...');
+    logger.info('Running BlueEyes agent connection self-test...');
     const report = await runDoctor({ config });
     process.stdout.write(`${formatReport(report)}\n`);
     await exit(report.connected ? 0 : 1);
@@ -84,7 +84,7 @@ async function main() {
   const systemInfo = collectSystemInfo();
 
   logger.info(
-    `BlueEye agent starting on ${systemInfo.hostname} (${systemInfo.platform}/${systemInfo.arch}).`
+    `BlueEyes agent starting on ${systemInfo.hostname} (${systemInfo.platform}/${systemInfo.arch}).`
   );
 
   // Self-heal an http:// URL against an HTTPS-forcing server: if the server

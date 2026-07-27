@@ -15,7 +15,7 @@ set -euo pipefail
 : "${SFLOW_DEVICE:=eth0}"
 
 cat > /etc/hsflowd.conf <<EOF
-# Managed by the BlueEye hsflowd sidecar — generated at container start.
+# Managed by the BlueEyes hsflowd sidecar — generated at container start.
 sflow {
   collector { ip = ${COLLECTOR_IP}  udpport = ${COLLECTOR_PORT} }
   sampling = ${SAMPLING_RATE}
