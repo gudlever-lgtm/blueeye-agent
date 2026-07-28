@@ -33,5 +33,41 @@ Environment=BLUEEYE_ACTION_LOG=/var/log/blueeye-agent/actions.log
 Environment=BLUEEYE_RELEASES_DIR=/opt/blueeye-agent/releases
 Environment=BLUEEYE_CURRENT_LINK=/opt/blueeye-agent/current
 
+# Sandboxing. The service runs as root (see above), so these bound what a bug —
+# or a server that pushes something it shouldn't — can reach from inside the
+# agent process. Everything here is compatible with the three privileged things
+# the agent legitimately does: self-update (tar + npm under /opt, then
+# `systemctl restart`), self-delete (uninstall.sh removing /opt + /var/lib +
+# /var/log), and install-tool (the host package manager).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# AF_NETLINK is required: `ss` (connection table) and `ethtool` (NIC inventory)
+# both talk netlink. AF_UNIX covers the D-Bus call behind `systemctl`.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# State the agent writes (token, config, action log) stays owner-only.
+UMask=0077
+# A core dump would contain the agent token in cleartext.
+LimitCORE=0
+#
+# Deliberately NOT set, and why — do not "complete" this list without checking:
+#   ProtectSystem=      install-tool writes /usr (package manager) and the
+#                       hsflowd manager writes /etc/hsflowd.conf.
+#   ProcSubset=pid      the proc traffic source reads /proc/net/dev and
+#                       /proc/net/arp, which ProcSubset=pid hides.
+#   CapabilityBoundingSet / SystemCallFilter=@system-service
+#                       a package manager needs broad capabilities and syscalls;
+#                       pinning them here breaks install-tool on some distros.
+#   PrivateDevices=     dpkg maintainer scripts on some distros create device
+#                       nodes.
+# If a package install ever fails under this unit, ProtectKernelTunables= is the
+# first line to drop (a maintainer script running `sysctl -w`).
+
 [Install]
 WantedBy=multi-user.target

@@ -1,5 +1,7 @@
 'use strict';
 
+const { compile, safeExec } = require('../probes/safeRegex');
+
 // Extracts a value from an HTTP response for use by later steps. Three kinds:
 //   regex  — capture group 1 (or the whole match) of `pattern` against the body
 //   cookie — the value of the Set-Cookie named `pattern`
@@ -12,11 +14,12 @@ function extract(spec, { body = '', headers = {} } = {}) {
   if (!pattern) return null;
 
   if (type === 'regex') {
-    try {
-      const m = new RegExp(pattern).exec(String(body || ''));
-      if (!m) return null;
-      return m[1] !== undefined ? m[1] : m[0];
-    } catch { return null; }
+    // The pattern arrives with the server-pushed transaction config, so the match
+    // runs under safeRegex's time + input bounds — a catastrophic pattern must
+    // not wedge the agent's event loop.
+    const m = safeExec(compile(pattern), body);
+    if (!m) return null;
+    return m[1] !== undefined ? m[1] : m[0];
   }
 
   if (type === 'cookie') {

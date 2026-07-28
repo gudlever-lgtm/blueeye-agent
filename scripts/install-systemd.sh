@@ -79,18 +79,39 @@ sed \
 mkdir -p "${UNIT}.d"
 { echo "[Service]"; echo "Environment=BLUEEYE_SERVICE_NAME=${SERVICE_NAME}"; } > "${UNIT}.d/00-service-name.conf"
 
-# Release trust anchor. Prefer an explicitly provided key; otherwise fetch it from
-# the server (public, not secret) so SIGNED self-updates verify with no manual
-# provisioning. Base64-encoded in the drop-in so a multi-line PEM stays on a single
+# Release trust anchor — the Ed25519 PUBLIC key that SIGNED self-updates verify
+# against. Resolution order is a security order, not a convenience one:
+#   1. BLUEEYE_RELEASE_PUBLIC_KEY, provisioned out of band. Always wins.
+#   2. a key already pinned on this host — a re-run must never silently re-anchor
+#      an installed agent to a different key, which would let a server that is
+#      compromised LATER replace the anchor meant to detect it.
+#   3. the server. Convenient, but trust-on-first-use: the host that ships the
+#      code also hands out the key authenticating it, so it only protects against
+#      a later compromise. Warned about, so the trade-off is visible.
+# Base64-encoded in the drop-in so a multi-line PEM stays on a single
 # Environment= line (the agent decodes base64-of-PEM).
+KEY_CONF="${UNIT}.d/10-release-key.conf"
 RELEASE_KEY="${BLUEEYE_RELEASE_PUBLIC_KEY:-}"
-[ -n "$RELEASE_KEY" ] || RELEASE_KEY="$(curl -fsSL "$SERVER_URL/enroll/agent-release-key" 2>/dev/null || true)"
-if [ -n "$RELEASE_KEY" ] && command -v base64 >/dev/null 2>&1; then
+if [ -n "$RELEASE_KEY" ]; then
+  echo "Release key: using the provisioned BLUEEYE_RELEASE_PUBLIC_KEY."
+elif [ -s "$KEY_CONF" ]; then
+  echo "Release key: already pinned on this host — keeping it."
+  RELEASE_KEY=""
+  KEEP_PINNED_KEY=1
+else
+  RELEASE_KEY="$(curl -fsSL "$SERVER_URL/enroll/agent-release-key" 2>/dev/null || true)"
+  if [ -n "$RELEASE_KEY" ]; then
+    echo "Release key: taken from the server (trust-on-first-use). To anchor it independently, re-run with BLUEEYE_RELEASE_PUBLIC_KEY set from an out-of-band copy."
+  fi
+fi
+if [ "${KEEP_PINNED_KEY:-0}" = "1" ]; then
+  : # nothing to write; the existing drop-in stays as it is
+elif [ -n "$RELEASE_KEY" ] && command -v base64 >/dev/null 2>&1; then
   case "$RELEASE_KEY" in
     *"BEGIN PUBLIC KEY"*) RELEASE_KEY="$(printf '%s' "$RELEASE_KEY" | base64 | tr -d '\n')" ;;
   esac
   mkdir -p "${UNIT}.d"
-  { echo "[Service]"; echo "Environment=BLUEEYE_RELEASE_PUBLIC_KEY=${RELEASE_KEY}"; } > "${UNIT}.d/10-release-key.conf"
+  { echo "[Service]"; echo "Environment=BLUEEYE_RELEASE_PUBLIC_KEY=${RELEASE_KEY}"; } > "$KEY_CONF"
   echo "Signed self-updates enabled (release key pinned)."
 else
   echo "NOTE: no release public key available — signed self-updates will be refused until BLUEEYE_RELEASE_PUBLIC_KEY is set (or AGENT_RELEASE_PUBLIC_KEY is configured on the server)." >&2
