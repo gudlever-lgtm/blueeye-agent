@@ -24,6 +24,7 @@ const { createHsflowdManager } = require('./sflow/hsflowd');
 const { detectCapabilities } = require('./capabilities');
 const { collectNicInfo } = require('./nicInfo');
 const { collectConnections } = require('./connTable');
+const { collectArpTable } = require('./arpTable');
 const { collectLocalIps: collectLocalIpsDefault } = require('./localIps');
 const { makePinnedFetch } = require('./httpsClient');
 const path = require('path');
@@ -85,6 +86,7 @@ function createAgentRuntime({
   collectNic = collectNicInfo,
   collectLocalIps = collectLocalIpsDefault,
   collectConns = collectConnections,
+  collectArp = collectArpTable,
   discoveryScanner = createScanner(),
   collectCidrs = collectLocalCidrs,
   selfUpdater = null,
@@ -296,10 +298,18 @@ function createAgentRuntime({
       if (Array.isArray(connections) && connections.length) payload = { ...payload, connections };
     } catch { /* connection table is best-effort */ }
     try {
+      // ARP/neighbour table → the server's IP<->MAC identity source, so a
+      // technician can search for the address they were told instead of a
+      // hostname they have to look up first. Metadata only.
+      const arp = await collectArp();
+      if (Array.isArray(arp) && arp.length) payload = { ...payload, arp };
+    } catch { /* neighbour table is best-effort */ }
+    try {
       await api.postCapabilities(payload);
       const nicNote = payload.nic ? ` + ${payload.nic.length} NIC(s)` : '';
       const connNote = payload.connections ? ` + ${payload.connections.length} conn edge(s)` : '';
-      logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}${nicNote}${connNote}`);
+      const arpNote = payload.arp ? ` + ${payload.arp.length} ARP entr(ies)` : '';
+      logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}${nicNote}${connNote}${arpNote}`);
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not report capabilities (${err.message}).`);
