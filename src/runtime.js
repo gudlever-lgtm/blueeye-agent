@@ -10,6 +10,7 @@ const { createEvidenceCollector } = require('./evidenceCollector');
 const { verifyManifest } = require('./release/verifyManifest');
 const fs = require('fs');
 const { createSelfUpdater } = require('./selfUpdate');
+const { verifyCommand, requireSignedCommands } = require('./commandAuth');
 const { createSelfDeleter } = require('./selfDelete');
 const { createToolInstaller } = require('./toolInstaller');
 const { createActionLog } = require('./actionLog');
@@ -93,6 +94,10 @@ function createAgentRuntime({
   hsflowdManager = null,
   // The release trust anchor; injectable for tests. Defaults to the embedded key.
   releasePublicKey = resolveReleasePublicKey(),
+  // Refuse a privileged command (update/delete/install-tool) that carries no
+  // server signature. Off by default so an older server keeps working; on, the
+  // WebSocket session alone is no longer enough to reconfigure the host.
+  strictCommands = requireSignedCommands(),
 }) {
   const emitter = new EventEmitter();
   const updater = selfUpdater || createSelfUpdater({ logger });
@@ -525,11 +530,33 @@ function createAgentRuntime({
     emitter.emit('pinged', command);
   }
 
+  // Gate for the PRIVILEGED commands (update / delete / install-tool) — the three
+  // that change the host rather than measure it. A command carrying a server
+  // signature must verify against the pinned release key; in strict mode an
+  // unsigned one is refused outright. Refusals are reported on the same channels
+  // the handlers use (ack + command-result + the audit row), so the operator sees
+  // a declined action rather than silence. Returns false when the command must
+  // not run. `names.log` is the local action-log prefix, `names.audit` the
+  // server's action name (which is 'upgrade' where the wire says 'update').
+  function authorizeCommand(command, names) {
+    const verdict = verifyCommand(command, { publicKey: releasePublicKey, agentId, strict: strictCommands });
+    if (verdict.ok) return true;
+    const auditId = command && command.auditId;
+    actions.log(`${names.log}.refused`, { reason: verdict.reason });
+    logger.error(`Refusing ${names.log} command: ${verdict.reason}`);
+    client.send({ type: 'ack', id: command && command.id, accepted: false, reason: verdict.reason });
+    client.send({ type: 'command-result', id: command && command.id, ok: false, error: verdict.reason });
+    if (auditId != null) client.send({ type: 'action-result', auditId, action: names.audit, ok: false, detail: verdict.reason });
+    emitter.emit('command-refused', { action: names.log, reason: verdict.reason });
+    return false;
+  }
+
   // Handles a server "update" command: acknowledge immediately (so the dashboard
   // learns whether we can self-update), then — only when systemd-managed —
   // rebuild from the server's verified source bundle and restart. Docker and
   // unmanaged agents decline; their host rebuilds them.
   async function handleUpdate(command) {
+    if (!authorizeCommand(command, { log: 'update', audit: 'upgrade' })) return;
     const managed = capabilities.managed;
     const auditId = command && command.auditId;
     if (managed !== 'systemd') {
@@ -578,6 +605,7 @@ function createAgentRuntime({
   // afterwards it has neither token nor process. Docker agents decline (the host
   // removes the container).
   async function handleDelete(command) {
+    if (!authorizeCommand(command, { log: 'delete', audit: 'delete' })) return;
     const managed = capabilities.managed;
     const auditId = command && command.auditId;
     if (managed === 'docker') {
@@ -626,6 +654,7 @@ function createAgentRuntime({
   // privilege the agent already runs with; a genuine "needs root" surfaces as a
   // distinct failure rather than silently doing nothing.
   async function handleInstallTool(command) {
+    if (!authorizeCommand(command, { log: 'install-tool', audit: 'install-tool' })) return;
     const managed = capabilities.managed;
     const auditId = command && command.auditId;
     const tool = (command && command.tool) || '';

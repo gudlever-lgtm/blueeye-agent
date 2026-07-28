@@ -3,6 +3,7 @@
 const { execFile } = require('child_process');
 const { clampInt, round, summarize, fail } = require('./stats');
 const { normalizeUrl } = require('./http');
+const { compile, safeExec } = require('./safeRegex');
 
 // Marker appended via curl's -w so we can split the transfer metrics off the end
 // of the captured output without colliding with header/body text.
@@ -189,7 +190,10 @@ function parseExpectations(spec) {
 // substring. A malformed regex degrades to a literal so a bad spec can't throw.
 function toMatcher(str) {
   const re = /^\/(.+)\/([a-z]*)$/i.exec(str);
-  if (re) { try { return new RegExp(re[1], re[2]); } catch { /* fall through */ } }
+  if (re) {
+    const rx = compile(re[1], re[2]);
+    if (rx) return rx;
+  }
   return { literal: str };
 }
 
@@ -208,9 +212,11 @@ function parseHeaderExpect(h) {
   return { name: name.toLowerCase(), value };
 }
 
+// The pattern is server-supplied, so a regex match runs under safeRegex's time +
+// input bounds (a catastrophic pattern must not wedge the agent's event loop).
 function matchBody(body, matcher) {
   const text = String(body || '');
-  if (matcher instanceof RegExp) return matcher.test(text);
+  if (matcher instanceof RegExp) return safeExec(matcher, text) !== null;
   return text.includes(matcher.literal);
 }
 

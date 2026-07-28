@@ -151,10 +151,24 @@ What the agent calls on **blueeye-server** (mirrored by the fake server):
 | `GET /agents/me/config` | [`apiClient.js`](src/apiClient.js) | returns `{ monitorConfig }` (which source to use). |
 | `POST /agents/me/capabilities` | [`apiClient.js`](src/apiClient.js) | reports `{ sources, agentVersion, managed, nic, ips, connections }` — sources/version/runtime ([`capabilities.js`](src/capabilities.js)), the per-interface NIC driver/firmware inventory ([`nicInfo.js`](src/nicInfo.js), `ethtool -i` + sysfs; for fleet firmware-drift detection), own IPs ([`localIps.js`](src/localIps.js)), and the established-TCP **connection table** folded into directed service-dependency edges ([`connTable.js`](src/connTable.js), `ss`/`netstat`/Get-NetTCPConnection — metadata only) so a `proc`/`snmp` host with no flow exporter still feeds the server's service dependency graph. |
 
+### Command authenticity ([`commandAuth.js`](src/commandAuth.js))
+
+A command is normally trusted because it arrived on the authenticated WebSocket.
+For the three **privileged** ones — `update`, `delete`, `install-tool` — that puts
+the whole host on the server never being wrong, so they may carry a
+`commandSignature`: an Ed25519 signature (over `agentId` + `issuedAt` + every
+other field except the transport `id`) made with the same release key the agent
+already pins. Verification is fail-closed — a signature that does not check out,
+names another agent, or is older than ±5 min is refused without running the
+action. `BLUEEYE_REQUIRE_SIGNED_COMMANDS=1` additionally refuses UNSIGNED
+privileged commands. Note `update.signature` is a different thing: it signs the
+release manifest (the payload), not the instruction.
+
 Server → agent commands ([`command.js`](src/command.js)):
 - **run-test** (`run[\s_-]?test`) → measure traffic + system, `POST /agents/results`.
 - **run-probe** (`run[\s_-]?probe` + a `probe` object) → run it, `POST /agents/probe-results`.
-- **install-tool** (`install[\s_-]?tool` + a `tool` string, carries `auditId`) → install a
+- **install-tool** (`install[\s_-]?tool` + a `tool` string, carries `auditId`; PRIVILEGED — see
+  Command authenticity above) → install a
   missing diagnostic tool (traceroute/mtr/tcptraceroute) from the host package manager and
   report back via `action-result`. The tool is checked against the agent's OWN allowlist in
   [`toolInstaller.js`](src/toolInstaller.js) (apt/dnf/yum/zypper/apk/pacman) — the agent never
@@ -189,6 +203,8 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | `BLUEEYE_REPORT_INTERVAL_MS` | `60000` | continuous-report cadence (`0` disables) |
 | `BLUEEYE_REPORT_SAMPLE_MS` | `1000` | sampling window per measurement |
 | `BLUEEYE_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` ([`logger.js`](src/logger.js)) |
+| `BLUEEYE_REQUIRE_SIGNED_COMMANDS` | off | refuse an unsigned `update`/`delete`/`install-tool` ([`commandAuth.js`](src/commandAuth.js)) |
+| `BLUEEYE_REQUIRE_SIGNED_UPDATES` | off | refuse an unsigned release ([`selfUpdate.js`](src/selfUpdate.js)) |
 
 ## Error & fatal model
 
@@ -227,11 +243,11 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | Scheme self-heal | [`serverUrl.js`](src/serverUrl.js) — `resolveEffectiveServerUrl`: if an http:// server redirects to https on the same host, adopt it at boot so WS uses wss:// and REST keeps its auth header (index.js, before the runtime) |
 | Identity / config | [`config.js`](src/config.js), [`system.js`](src/system.js), [`tokenStore.js`](src/tokenStore.js), [`enroll.js`](src/enroll.js), [`capabilities.js`](src/capabilities.js), [`nicInfo.js`](src/nicInfo.js) |
 | Transport | [`agentClient.js`](src/agentClient.js), [`apiClient.js`](src/apiClient.js), [`backoff.js`](src/backoff.js) |
-| Commands | [`command.js`](src/command.js) |
+| Commands | [`command.js`](src/command.js), [`commandAuth.js`](src/commandAuth.js) |
 | Measurement orchestration | [`testRunner.js`](src/testRunner.js), [`monitor.js`](src/monitor.js), [`systemMetrics.js`](src/systemMetrics.js) |
 | Traffic sources | [`trafficMonitor.js`](src/trafficMonitor.js), [`trafficMonitorWin.js`](src/trafficMonitorWin.js), [`snmpMonitor.js`](src/snmpMonitor.js), [`netflow/`](src/netflow), [`sflow/`](src/sflow) |
 | Connection table | [`connTable.js`](src/connTable.js) — established-TCP edges from `ss`/`netstat`/Get-NetTCPConnection (pure per-platform parsers + orientation + aggregation; injectable exec), reported in `capabilities.connections` |
-| Active probes | [`probes/`](src/probes) |
+| Active probes | [`probes/`](src/probes); [`probes/curlArgs.js`](src/probes/curlArgs.js) keeps a server-supplied header/body from becoming a curl `@file` read, [`probes/safeRegex.js`](src/probes/safeRegex.js) bounds a server-supplied pattern in time + input so it can't wedge the event loop |
 | Logging | [`logger.js`](src/logger.js) |
 
 ## Conventions

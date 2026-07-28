@@ -3,6 +3,8 @@
 const { execFile } = require('child_process');
 const { round, clampInt, fail } = require('./stats');
 const { normalizeUrl } = require('./http');
+const { safeHeader, dataArgs } = require('./curlArgs');
+const { compile, safeExec } = require('./safeRegex');
 
 const SENTINEL = '__BLUEEYE_TX__';
 const MAX_BUFFER = 8 * 1024 * 1024;
@@ -89,8 +91,19 @@ function subst(str, vars) {
 function runStep(exec, href, method, header, data, timeoutMs, now) {
   return new Promise((resolve) => {
     const args = ['-sS', '-i', '-L', '--max-redirs', '5', '--max-time', String(Math.ceil(timeoutMs / 1000)), '-X', method];
-    if (header) args.push('-H', String(header));
-    if (data != null && data !== '') args.push('--data', String(data));
+    if (header) {
+      // Agent-side shape check: curl would read `-H @file` from the local disk,
+      // so a header that isn't a real `Name: value` field never reaches it.
+      const safe = safeHeader(header);
+      if (!safe) {
+        resolve({ status: null, bytes: 0, timeMs: null, headers: {}, body: '', error: 'refused: malformed request header' });
+        return;
+      }
+      args.push('-H', safe);
+    }
+    // --data-raw, never --data: the latter would read the body from a local file
+    // when the server sends a value starting with '@'.
+    if (data != null && data !== '') args.push(...dataArgs(data));
     args.push('-w', `\n${SENTINEL} %{http_code} %{size_download} %{time_total}`, '--url', href);
     exec('curl', args, { timeout: timeoutMs + 2000, maxBuffer: MAX_BUFFER }, (err, stdout, stderr) => {
       const parsed = parseOut(String(stdout || ''));
@@ -162,10 +175,15 @@ function evalStep(out, step) {
   return { ok: true };
 }
 
+// The pattern comes from the server, so it is matched under safeRegex's time +
+// input bounds; a malformed one still degrades to a literal comparison.
 function matchBody(body, expect) {
   const text = String(body || '');
   const re = /^\/(.+)\/([a-z]*)$/i.exec(String(expect));
-  if (re) { try { return new RegExp(re[1], re[2]).test(text); } catch { /* literal */ } }
+  if (re) {
+    const rx = compile(re[1], re[2]);
+    if (rx) return safeExec(rx, text) !== null;
+  }
   return text.includes(String(expect));
 }
 
@@ -173,11 +191,10 @@ function matchBody(body, expect) {
 // body (default) or its headers. Returns null when it doesn't match / is invalid.
 function extractVar(out, ex) {
   const src = ex.from === 'header' ? Object.entries(out.headers).map(([k, v]) => `${k}: ${v}`).join('\n') : out.body;
-  try {
-    const m = new RegExp(String(ex.pattern)).exec(String(src || ''));
-    if (!m) return null;
-    return m[1] !== undefined ? m[1] : m[0];
-  } catch { return null; }
+  const rx = compile(String(ex.pattern));
+  const m = safeExec(rx, src);
+  if (!m) return null;
+  return m[1] !== undefined ? m[1] : m[0];
 }
 
 module.exports = { transactionProbe, subst, extractVar, evalStep };
