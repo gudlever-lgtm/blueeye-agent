@@ -18,7 +18,7 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 | Live channel | [`src/agentClient.js`](src/agentClient.js) — WebSocket to `/ws/agent` |
 | REST | [`src/apiClient.js`](src/apiClient.js) — Bearer-authenticated calls |
 | Traffic sources | proc · snmp · netflow · sflow (server picks per agent) |
-| Active probes | ping · tcp · dns · traceroute · http |
+| Active probes | ping · tcp · dns · traceroute · tcptraceroute · http |
 | Transaction tests | [`src/transactions/`](src/transactions/) — server pushes `transaction_config` over WS; the manager schedules each http/tcp/dns/icmp test (`interval_sec` ±10% jitter), runs an executor (Node core `http`/`https`/`net`/`dns` + system `ping`), classifies the failure phase, buffers results (max 1000, oldest dropped) and flushes `transaction_result` batches on reconnect. Config persists to a local JSON file with secrets AES-256-GCM-encrypted (key derived from the token) |
 | Tests | `node --test` over [`test/`](test) against [`test-support/fakeServer.js`](test-support/fakeServer.js) |
 
@@ -127,6 +127,7 @@ a runner error resolves to an `ok:false` result stamped with `ts`.
 | `tcp` | [`probes/tcp.js`](src/probes/tcp.js) | times N connect-and-close attempts. |
 | `dns` | [`probes/dns.js`](src/probes/dns.js) | times N resolver lookups. |
 | `traceroute` | [`probes/traceroute.js`](src/probes/traceroute.js) | system `traceroute`/`tracert`, MTR-style multi-probe (`-q queries`); per-hop `{ ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs }` for the server's path map. |
+| `tcptraceroute` | [`probes/tcptraceroute.js`](src/probes/tcptraceroute.js) | the SAME path, traced with TCP SYNs to `host:port` — the one that still works where ICMP/UDP is filtered. Tries `tcptraceroute`, falls back to `traceroute -T -p <port>` (already installed for the ICMP probe), and when neither exists names `tcptraceroute` so the server's auto-install can fix it; a raw-socket permission failure gets its own reason. Reuses `parseTraceroute`; `target` is `host:port` so a TCP trace stays a separate series from an ICMP one. |
 | `http` | [`probes/http.js`](src/probes/http.js) | `fetch`es a URL (metadata only); reports HTTP `status` + (https) TLS `certExpiryDays`. |
 | `curl` | [`probes/curl.js`](src/probes/curl.js) | system `curl` content check — verifies received traffic beyond mere connectivity: HTTP `status`, response body (substring or `/regex/`), `bytes`, and a response header. Fetches the body locally to check it but reports **metadata only** (pass/fail, `bytes`, `contentType`, `status`) — never the body. |
 | `pageload` | [`probes/pageload.js`](src/probes/pageload.js) | browser-free page-load test — `curl`s a page, parses its sub-resources (script/css/img), times a fetch of each → per-element waterfall (`elements: [{url,kind,status,bytes,ms}]`) + totals (`rttMs` = total load time, `bytes` = page weight, `status` = doc status). Bodies discarded/parsed locally; metadata only. |

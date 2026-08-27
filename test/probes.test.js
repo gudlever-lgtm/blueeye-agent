@@ -8,6 +8,7 @@ const { tcpProbe } = require('../src/probes/tcp');
 const { dnsProbe } = require('../src/probes/dns');
 const { parsePing, pingProbe } = require('../src/probes/ping');
 const { traceroute, parseTraceroute } = require('../src/probes/traceroute');
+const { tcptraceroute } = require('../src/probes/tcptraceroute');
 const { httpProbe, normalizeUrl } = require('../src/probes/http');
 const { curlProbe } = require('../src/probes/curl');
 const { pageloadProbe, extractResources } = require('../src/probes/pageload');
@@ -442,6 +443,100 @@ test('transactionProbe fails cleanly with no steps', async () => {
   const res = await transactionProbe({ steps: [] }, { exec: fakeTxCurl({}), now: () => 0 });
   assert.equal(res.ok, false);
   assert.match(res.detail || res.error, /no steps/);
+});
+
+// --- tcptraceroute -----------------------------------------------------------
+
+// Builds a fake execFile that answers per binary name. A value of ENOENT stands
+// for "not installed"; anything else is { stdout?, stderr?, err? }.
+function fakeTrace(byBin) {
+  const calls = [];
+  const exec = (bin, args, _opts, cb) => {
+    calls.push({ bin, args });
+    const r = byBin[bin];
+    if (!r) return cb(Object.assign(new Error(`spawn ${bin} ENOENT`), { code: 'ENOENT' }), '', '');
+    return cb(r.err || null, r.stdout || '', r.stderr || '');
+  };
+  return { exec, calls };
+}
+
+const TCP_HOPS = [
+  'Selected device eth0, address 192.168.1.10, port 41284 for outgoing packets',
+  'Tracing the path to example.com (93.184.216.34) on TCP port 443 (https), 20 hops max',
+  ' 1  192.168.1.1  0.5 ms  0.7 ms  0.6 ms',
+  ' 2  * * *',
+  ' 3  93.184.216.34 [open]  12.0 ms  13.0 ms  14.0 ms',
+].join('\n');
+
+test('tcptraceroute traces to host:port with SYNs and parses the hops', async () => {
+  const { exec, calls } = fakeTrace({ tcptraceroute: { stdout: TCP_HOPS } });
+  const res = await tcptraceroute({ host: 'example.com', port: 443 }, { exec });
+  assert.equal(res.type, 'tcptraceroute');
+  assert.equal(res.ok, true);
+  assert.equal(res.target, 'example.com:443', 'target carries the port so it stays a separate series');
+  assert.equal(res.port, 443);
+  assert.equal(res.hopCount, 3);
+  // The banner lines must not be read as hops, and [open] must not become an RTT.
+  assert.equal(res.hops[0].ip, '192.168.1.1');
+  assert.equal(res.hops[1].lossPct, 100);
+  assert.equal(res.hops[2].ip, '93.184.216.34');
+  assert.equal(res.hops[2].recv, 3);
+  assert.equal(res.hops[2].rttMs, 13);
+  // Port is a POSITIONAL argument for tcptraceroute, after the host.
+  const argv = calls[0].args;
+  assert.equal(argv[argv.indexOf('--') + 1], 'example.com');
+  assert.equal(argv[argv.indexOf('--') + 2], '443');
+});
+
+test('tcptraceroute falls back to `traceroute -T` when tcptraceroute is absent', async () => {
+  const { exec, calls } = fakeTrace({ traceroute: { stdout: ' 1  10.0.0.1  1.0 ms  1.0 ms  1.0 ms\n' } });
+  const res = await tcptraceroute({ host: 'example.com', port: 8443 }, { exec });
+  assert.equal(res.ok, true);
+  assert.equal(res.hopCount, 1);
+  assert.deepEqual(calls.map((c) => c.bin), ['tcptraceroute', 'traceroute']);
+  assert.ok(calls[1].args.includes('-T'), 'fallback traces with TCP SYNs');
+  assert.equal(calls[1].args[calls[1].args.indexOf('-p') + 1], '8443');
+});
+
+test('tcptraceroute names the installable tool when neither binary exists', async () => {
+  // Both missing -> the reason must name tcptraceroute, which is what the
+  // server's auto-install offers; naming the fallback would suggest a fix the
+  // install-tool allowlist cannot apply.
+  const { exec, calls } = fakeTrace({});
+  const res = await tcptraceroute({ host: 'example.com' }, { exec });
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'tcptraceroute not installed');
+  assert.equal(calls.length, 2, 'both candidates were tried');
+});
+
+test('tcptraceroute reports a raw-socket permission failure as its own reason', async () => {
+  const { exec } = fakeTrace({
+    tcptraceroute: { err: new Error('exit 1'), stderr: 'tcptraceroute: Operation not permitted' },
+  });
+  const res = await tcptraceroute({ host: 'example.com' }, { exec });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /needs root/);
+});
+
+test('tcptraceroute defaults to port 443 and rejects a bad port without spawning', async () => {
+  const { exec, calls } = fakeTrace({ tcptraceroute: { stdout: ' 1  10.0.0.1  1.0 ms\n' } });
+  const res = await tcptraceroute({ host: 'example.com' }, { exec });
+  assert.equal(res.port, 443);
+  assert.equal(calls[0].args[calls[0].args.length - 1], '443');
+
+  const bad = fakeTrace({});
+  const res2 = await tcptraceroute({ host: 'example.com', port: 70000 }, { exec: bad.exec });
+  assert.equal(res2.ok, false);
+  assert.equal(res2.error, 'invalid port');
+  assert.equal(bad.calls.length, 0, 'must not spawn for an invalid port');
+});
+
+test('tcptraceroute rejects an option-looking host without spawning', async () => {
+  const { exec, calls } = fakeTrace({});
+  const res = await tcptraceroute({ host: '-f', port: 443 }, { exec });
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'invalid host');
+  assert.equal(calls.length, 0);
 });
 
 test('runProbe dispatches by type and stamps a ts', async () => {
