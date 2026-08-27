@@ -217,7 +217,7 @@ Normalized probe result (`src/probes/*`; all types):
 ```jsonc
 {
   "ts": "<ISO>",                       // stamped by runProbe
-  "type": "ping"|"tcp"|"dns"|"traceroute"|"http"|"curl"|"pageload"|"transaction",
+  "type": "ping"|"tcp"|"dns"|"traceroute"|"tcptraceroute"|"http"|"curl"|"pageload"|"transaction",
   "target": "<host / URL>",
   "ok": true|false,
   "attempts": 4, "success": 4,         // NOT persisted by the server
@@ -234,6 +234,7 @@ Per-type extras:
 | `tcp` | — | |
 | `dns` | `detail` = first resolved address | |
 | `traceroute` | `hops: [{hop, ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs}]`, `hopCount`, `queries` | `hopCount`/`queries` not persisted; `hops` capped server-side at 64 |
+| `tcptraceroute` | the same `hops`/`hopCount`/`queries`, plus `port` | identical hop record — the path is traced with TCP SYNs instead of ICMP/UDP. `target` is `host:port`, which is what keeps a TCP trace and an ICMP trace to the same host as separate series. `port` is not persisted (it is already in `target`) |
 | `http` | `status`, `certExpiryDays` (https), `detail` (cert detail) | |
 | `curl` | `status`, `bytes`, `contentType`, `detail` (assertion summary) | metadata only, never the body |
 | `pageload` | `status`, `bytes` (page weight), `elements: [{url, kind, status, bytes, ms}]`, `detail` | `elements` capped server-side at 64 |
@@ -246,7 +247,11 @@ bytes, contentType, elements, detail, execError`; strings length-capped
 Everything else (`attempts`, `success`, `hopCount`, `queries`, `role`) is
 silently discarded. `error` is mapped to `execError` (and into `detail` when no
 `detail` was sent) — `execError` drives the server's `agent.probe-failed`
-auditing and the traceroute auto-install trigger.
+auditing and the traceroute auto-install trigger. A `tcptraceroute` reports
+`"tcptraceroute not installed"` only when BOTH it and the `traceroute -T`
+fallback are missing, so the name in the reason is always one the install-tool
+allowlist can act on; a raw-socket permission failure reads
+`"<bin> needs root (raw socket)"` instead and correctly triggers nothing.
 
 ### 1.7 Speed test — `GET /speedtest/download`, `POST /speedtest/upload`, `POST /speedtest/results`
 
@@ -351,7 +356,8 @@ the canonical names shown):
 | `install-tool` | `id`, `auditId?`, `tool` (required string) | install from agent's own allowlist (traceroute/mtr/tcptraceroute); docker declines | `ack {id, accepted, runtime, reason?}`, then `action-result` |
 
 Probe `spec` (built by the server's `validateProbeSpec`): `{ type, host,
-count?, port? (tcp), maxHops?/queries? (traceroute), maxElements? (pageload),
+count?, port? (tcp, tcptraceroute — the latter defaults to 443),
+maxHops?/queries? (traceroute, tcptraceroute), maxElements? (pageload),
 method?/expectStatus?/expectBody?/expectHeader?/minBytes?/maxBytes? (curl),
 steps?/name? (transaction) }`. The agent reads the target from
 `spec.host || spec.target` (http-family probes get the URL in `host`).
