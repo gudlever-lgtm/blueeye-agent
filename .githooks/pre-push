@@ -1,0 +1,12 @@
+#!/bin/sh
+# Pre-push gate: no branch build without the security / ui / validation tests
+# passing. Runs scripts/gate.sh (cached per tree, so a push straight after a
+# green run is instant). Bypass only in an emergency with BLUEEYE_SKIP_GATE=1.
+repo_dir="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -x "$repo_dir/scripts/gate.sh" ]; then
+  bash "$repo_dir/scripts/gate.sh" || {
+    echo "pre-push: gate failed — push refused" >&2
+    exit 1
+  }
+fi
+exit 0

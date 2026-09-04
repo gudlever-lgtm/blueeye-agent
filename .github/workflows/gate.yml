@@ -1,0 +1,23 @@
+# Pre-build gate — runs on every branch push and every pull request, so no
+# branch build exists without the security / ui / validation tests passing.
+# Same script as the local git pre-push hook and Claude Code's git-push hook.
+name: gate
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  gate:
+    name: security / ui / validation gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: bash scripts/gate.sh --force
