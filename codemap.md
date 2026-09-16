@@ -85,7 +85,7 @@ callers must `sampler.stop?.()` before replacing one.
 | `source` | Module | How it measures | Snapshot shape |
 | --- | --- | --- | --- |
 | `proc` (default) | [`trafficMonitor.js`](src/trafficMonitor.js) (Linux) / [`trafficMonitorWin.js`](src/trafficMonitorWin.js) (Windows) | Linux: reads `/proc/net/dev` twice, `intervalMs` apart. Windows: one persistent `powershell.exe` (spawned once, not per poll) ticks `Get-NetAdapterStatistics`/`Get-NetAdapter` and streams a JSON line per tick over stdout; both feed the same `buildSnapshot()` delta/rate computation | per-interface rx/tx bytes·packets·errors·drops + rates, `operStatus`/`speedMbps`, `totals` |
-| `snmp` | [`snmpMonitor.js`](src/snmpMonitor.js) | polls IF-MIB HC octet counters (+ health columns) twice over SNMP | same per-interface shape as proc (`source:'snmp'`) |
+| `snmp` | [`snmpMonitor.js`](src/snmpMonitor.js) | polls IF-MIB HC octet counters (+ health columns) twice over SNMP, plus `dot3StatsLateCollisions` from the EtherLike-MIB — the counter that names a duplex mismatch, and the one whose ABSENCE is reported as `null` rather than 0, because a device that cannot report it must not look like one with a clean link | same per-interface shape as proc (`source:'snmp'`) |
 | `netflow` | [`netflow/collector.js`](src/netflow/collector.js) | UDP :2055 collector, `drain()` per interval | flow summary: `byPort` / `byProtocol` / `topTalkers` / `totals` |
 | `sflow` | [`sflow/collector.js`](src/sflow/collector.js) | UDP :6343 collector, rate-scaled samples | same flow-summary shape (`sampled:true`) |
 
@@ -285,7 +285,7 @@ self-contained and need no MySQL.
 | Runtime: connect / 401 / reconnect / run-test | [`test/runtime.test.js`](test/runtime.test.js) |
 | Continuous reporting | [`test/reporting.test.js`](test/reporting.test.js) |
 | Capabilities + monitor config | [`test/capabilities.test.js`](test/capabilities.test.js), [`test/monitorConfig.test.js`](test/monitorConfig.test.js) |
-| Traffic / SNMP / system metrics | [`test/trafficMonitor.test.js`](test/trafficMonitor.test.js), [`test/trafficMonitorWin.test.js`](test/trafficMonitorWin.test.js), [`test/monitor.test.js`](test/monitor.test.js), [`test/snmpMonitor.test.js`](test/snmpMonitor.test.js), [`test/systemMetrics.test.js`](test/systemMetrics.test.js) |
+| Traffic / SNMP / system metrics | [`test/trafficMonitor.test.js`](test/trafficMonitor.test.js), [`test/trafficMonitorWin.test.js`](test/trafficMonitorWin.test.js), [`test/monitor.test.js`](test/monitor.test.js), [`test/snmpMonitor.test.js`](test/snmpMonitor.test.js), [`test/snmpLateCollisions.test.js`](test/snmpLateCollisions.test.js), [`test/systemMetrics.test.js`](test/systemMetrics.test.js) |
 | NetFlow / sFlow | [`test/netflow.test.js`](test/netflow.test.js), [`test/netflowTemplated.test.js`](test/netflowTemplated.test.js), [`test/sflow.test.js`](test/sflow.test.js) |
 | Probes | [`test/probes.test.js`](test/probes.test.js) |
 | Test runner envelope | [`test/testRunner.test.js`](test/testRunner.test.js) |
