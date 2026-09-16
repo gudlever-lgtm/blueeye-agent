@@ -19,6 +19,7 @@ const { runProbe, PROBE_TYPES } = require('../src/probes');
 
 const FIX = path.join(__dirname, 'fixtures', 'pathmtu');
 const fixture = (name) => fs.readFileSync(path.join(FIX, `${name}.txt`), 'utf8');
+const fixture_ = fixture;
 
 // --------------------------------------------------------------- simulator
 //
@@ -457,6 +458,47 @@ test('sizes are clamped: max_size above the jumbo ceiling, min_size above max_si
   const r3 = await run({ host: '10.20.30.40', per_hop: false, probes_per_size: -5, timeout_ms: 'nope' }, sim3);
   assert.equal(r3.ok, true);
   assert.equal(r3.path_mtu, 1500);
+});
+
+test('a ping that refuses to run is reported as a failure to measure, not as a silent path', async () => {
+  // This is the case that shipped broken: an agent with no permission to open
+  // an ICMP socket produced ok:true with a null path MTU — a blank row that
+  // looks identical to a target that does not answer. The operator has no way
+  // to tell "I could not measure" from "there is nothing there".
+  for (const [fixture, expected] of [
+    ['linux-tool-error', /Operation not permitted/],
+    ['linux-unknown-host', /Name or service not known/],
+    ['linux-bad-flag', /invalid argument/],
+  ]) {
+    const exec = (_bin, _args, _opts, cb) => cb(new Error('exit 2'), '', fixture_(fixture));
+    // eslint-disable-next-line no-await-in-loop
+    const r = await pathMtuProbe({ host: '1.1.1.1', per_hop: false }, {
+      exec, platform: 'linux', tracerouteFn: async () => ({ hops: [] }),
+    });
+    assert.equal(r.ok, false, fixture);
+    assert.match(r.error, /^ping failed: /, fixture);
+    assert.match(r.error, expected, fixture);
+    assert.equal(r.path_mtu, null, fixture);
+    assert.equal(r.blackhole_detected, false, `${fixture}: a tool that never ran found no blackhole`);
+  }
+});
+
+test('a refusing tool is not retried — probes_per_size cannot fix a permission error', async () => {
+  let calls = 0;
+  const exec = (_bin, _args, _opts, cb) => { calls += 1; cb(new Error('exit 2'), '', fixture_('linux-tool-error')); };
+  await pathMtuProbe({ host: '1.1.1.1', per_hop: false, probes_per_size: 5 }, {
+    exec, platform: 'linux', tracerouteFn: async () => ({ hops: [] }),
+  });
+  assert.equal(calls, 1, `retried ${calls} times`);
+});
+
+test('a genuine timeout is still a silent path, not a tool error', async () => {
+  // The guard above must not swallow the case it sits next to.
+  const sim = simulate({ hops: CLEAN, dropFirst: 99 });
+  const r = await run({ host: '10.20.30.40', per_hop: false }, sim);
+  assert.equal(r.ok, true, 'a target that does not answer is still a successful measurement attempt');
+  assert.equal(r.path_mtu, null);
+  assert.doesNotMatch(String(r.error || ''), /ping failed/);
 });
 
 test('a missing ping binary is reported as such, not as a blackhole', async () => {

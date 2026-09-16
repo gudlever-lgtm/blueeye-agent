@@ -65,6 +65,9 @@ const DEFAULT_BUDGET_MS = 120000;
 //   ttl_exceeded  — a router on the way answered; the packet got that far
 //   frag_needed   — too big, and something said so (may carry the real MTU)
 //   local_error   — too big for THIS host's own interface; never a path fault
+//   tool_error    — `ping` itself refused to run: no permission for an ICMP
+//                   socket, a flag this build does not take, a name that does
+//                   not resolve. NOT a statement about the path.
 //   timeout       — nothing came back
 //
 // `frag_needed` covers both protocols. IPv4 sends ICMP type 3 code 4,
@@ -77,6 +80,7 @@ const OUTCOME = {
   TTL_EXCEEDED: 'ttl_exceeded',
   FRAG_NEEDED: 'frag_needed',
   LOCAL_ERROR: 'local_error',
+  TOOL_ERROR: 'tool_error',
   TIMEOUT: 'timeout',
 };
 
@@ -127,6 +131,20 @@ function parsePingProbe(text) {
   }
   if (/bytes from /i.test(s) || /Reply from .*bytes\s*=/i.test(s)) {
     return { outcome: OUTCOME.REPLY, mtu: null, from: fromIn(s), rttMs: rttIn(s) };
+  }
+  // `ping` complaining about itself, AFTER every real verdict has had its turn
+  // (the local "message too long" above is also a `ping:` line, and it means
+  // something quite different). A successful run prints no such line and
+  // neither does a timeout, so this cannot swallow either.
+  //
+  // WHY THIS EXISTS. Without it every one of these fell through to TIMEOUT, and
+  // a timeout at min_size reads as `no_response` — so an agent with no
+  // permission to open an ICMP socket reported a blank path MTU and ok:true,
+  // indistinguishable from a target that simply does not answer. The probe
+  // claimed to have measured something it never attempted.
+  const complaint = s.match(/^\s*(ping6?|traceroute6?):\s*(.+)$/im);
+  if (complaint) {
+    return { outcome: OUTCOME.TOOL_ERROR, mtu: null, from: null, rttMs: null, reason: complaint[2].trim().slice(0, 120) };
   }
   return { outcome: OUTCOME.TIMEOUT, mtu: null, from: null, rttMs: null };
 }
@@ -229,7 +247,7 @@ async function pathMtuProbe(spec, {
   // frag-needed arrived DURING it. A flag would leak the end-to-end run's
   // frag-needed into the first hop's verdict and turn a plain `reduced` into a
   // reported blackhole — the one mistake this whole probe exists to avoid.
-  const state = { fragCount: 0, missing: null };
+  const state = { fragCount: 0, missing: null, toolError: null };
 
   // Runs one probe of one size, optionally TTL-limited. `probes_per_size`
   // separates an MTU limit from ordinary loss: a size passes if ANY attempt
@@ -246,6 +264,9 @@ async function pathMtuProbe(spec, {
       last = parsePingProbe(run.text);
       if (last.outcome === OUTCOME.FRAG_NEEDED) { state.fragCount += 1; break; }
       if (last.outcome === OUTCOME.LOCAL_ERROR) break;
+      // The tool refused. Retrying cannot change that, and continuing would
+      // turn a setup problem into a fabricated measurement.
+      if (last.outcome === OUTCOME.TOOL_ERROR) { state.toolError = state.toolError || last.reason; break; }
       if (last.outcome === OUTCOME.REPLY || last.outcome === OUTCOME.TTL_EXCEEDED) break;
     }
     const pass = last.outcome === OUTCOME.REPLY || last.outcome === OUTCOME.TTL_EXCEEDED;
@@ -323,6 +344,9 @@ async function pathMtuProbe(spec, {
   // one that must exist even when the budget runs out mid-path.
   const endToEnd = await measure(null, opts.maxSize);
   if (state.missing) return failure(host, `${state.missing} not installed`, { ip_version: opts.ipVersion });
+  // A tool that would not run is reported as a failure to MEASURE, never as a
+  // path with no answer. The operator gets ping's own words back.
+  if (state.toolError) return failure(host, `ping failed: ${state.toolError}`, { ip_version: opts.ipVersion });
 
   const hops = [];
   // When this host's own interface capped the run, that cap — not max_size — is
