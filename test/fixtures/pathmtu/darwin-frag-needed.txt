@@ -1,0 +1,7 @@
+PING 10.20.30.40 (10.20.30.40): 1472 data bytes
+36 bytes from 198.51.100.7: frag needed and DF set (MTU 1420)
+Vr HL TOS  Len   ID Flg  off TTL Pro  cks      Src      Dst
+ 4  5  00 05dc 1f2a   2 0000  40  01 1b3c 192.0.2.10  10.20.30.40
+
+--- 10.20.30.40 ping statistics ---
+1 packets transmitted, 0 packets received, 100.0% packet loss

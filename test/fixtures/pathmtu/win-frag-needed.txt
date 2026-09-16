@@ -1,0 +1,6 @@
+
+Pinging 10.20.30.40 with 1472 bytes of data:
+Packet needs to be fragmented but DF set.
+
+Ping statistics for 10.20.30.40:
+    Packets: Sent = 1, Received = 0, Lost = 1 (100% loss),
