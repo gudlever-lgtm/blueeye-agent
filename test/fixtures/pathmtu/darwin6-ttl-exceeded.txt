@@ -1,0 +1,8 @@
+PING6(1400=40+8+1352 bytes) 2001:db8::a --> 2001:db8::40
+1400 bytes from 2001:db8::1: hop limit exceeded in transit
+Vr TC  Flow Plen Nxt Hlim
+ 6 00 00000 0548  3a  01
+2001:db8::a->2001:db8::40
+
+--- 2001:db8::40 ping6 statistics ---
+1 packets transmitted, 0 packets received, 100.0% packet loss

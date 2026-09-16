@@ -2,42 +2,67 @@
 
 const { execFile } = require('child_process');
 const { round, safeHost } = require('./stats');
+const { findAddress, resolveFamily, tracerouteCommands } = require('./ipFamily');
 
 // Path probe via the system `traceroute` (Linux/macOS) / `tracert` (Windows).
 // MTR-style: sends several probes per hop (`-q queries`) so every hop carries not
 // just latency but *loss* and *jitter* — the per-hop metrics the server overlays
 // on its path-visualisation graph. Returns hops:
 //   [{ hop, ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs }]
+//
+// IPv6 is traced by the same code: which binary and flags to use lives in
+// [`ipFamily`](./ipFamily.js), and a literal IPv6 target selects it on its own,
+// so `traceroute({ host: '2001:db8::1' })` needs no extra parameter.
+//
 // `exec`/`platform` are injectable for tests.
-function traceroute(spec, { exec = execFile, platform = process.platform } = {}) {
+async function traceroute(spec, { exec = execFile, platform = process.platform } = {}) {
   const rawHost = String((spec && (spec.host || spec.target)) || '').trim();
   const host = safeHost(rawHost);
-  if (!host) return Promise.resolve({ type: 'traceroute', target: rawHost, ok: false, error: 'invalid host', hops: [] });
+  if (!host) return { type: 'traceroute', target: rawHost, ok: false, error: 'invalid host', hops: [] };
   const maxHops = Math.max(1, Math.min(40, Number.parseInt(spec.maxHops, 10) || 20));
   // Windows tracert always sends 3 probes/hop and has no "queries" flag; on
   // Linux/macOS the operator can pick how many (default 3, the MTR-ish sweet spot).
   const queries = platform === 'win32' ? 3 : Math.max(1, Math.min(10, Number.parseInt(spec.queries, 10) || 3));
-  const bin = platform === 'win32' ? 'tracert' : 'traceroute';
-  // `--` ends option parsing so the host can never be read as a flag (Unix);
-  // Windows `tracert` has no such marker but safeHost() already rejected any
-  // leading-`-` target above.
-  const args = platform === 'win32'
-    ? ['-d', '-h', String(maxHops), host]
-    : ['-n', '-m', String(maxHops), '-q', String(queries), '-w', '2', '--', host];
+  const family = resolveFamily(spec && (spec.ip_version ?? spec.ipVersion), host);
+  const candidates = tracerouteCommands({ platform, family, host, maxHops, queries });
+
+  const run = await runFirstAvailable(exec, candidates);
+  const hops = parseTraceroute(run.stdout, queries);
+  const base = { type: 'traceroute', target: host, ipVersion: family, queries };
+  // Surface *why* a run came back empty so the server/dashboard can explain it
+  // instead of drawing a blank path: a missing binary (ENOENT) is the common
+  // case on minimal hosts/containers; `killed` means it ran but timed out.
+  if (hops.length === 0 && run.err) {
+    const reason = run.missing ? `${run.bin} not installed`
+      : run.err.killed ? `${run.bin} timed out`
+      : String(run.err.message || 'failed').split('\n')[0].slice(0, 120);
+    return { ...base, ok: false, hopCount: 0, hops: [], error: reason };
+  }
+  return { ...base, ok: hops.length > 0, hopCount: hops.length, hops };
+}
+
+// Runs the candidates in order, stopping at the first that EXISTS. A missing
+// binary (ENOENT) falls through to the next; every other outcome — including a
+// non-zero exit, which traceroute returns routinely while still printing a
+// usable report — belongs to the binary that ran.
+//
+// When none is installed the reason names the FIRST candidate, the one the
+// server's auto-install offers.
+async function runFirstAvailable(exec, candidates) {
+  let last = null;
+  for (const c of candidates) {
+    // eslint-disable-next-line no-await-in-loop
+    const run = await runOnce(exec, c);
+    if (run.err && run.err.code === 'ENOENT') { last = run; continue; }
+    return run;
+  }
+  return { ...last, bin: candidates[0].bin, missing: true };
+}
+
+function runOnce(exec, { bin, args }) {
   return new Promise((resolve) => {
     exec(bin, args, { timeout: 60000 }, (err, stdout) => {
-      const hops = parseTraceroute(String(stdout || ''), queries);
-      // Surface *why* a run came back empty so the server/dashboard can explain it
-      // instead of drawing a blank path: a missing binary (ENOENT) is the common
-      // case on minimal hosts/containers; `killed` means it ran but timed out.
-      if (hops.length === 0 && err) {
-        const reason = err.code === 'ENOENT' ? `${bin} not installed`
-          : err.killed ? `${bin} timed out`
-          : String(err.message || 'failed').split('\n')[0].slice(0, 120);
-        resolve({ type: 'traceroute', target: host, ok: false, hopCount: 0, queries, hops: [], error: reason });
-        return;
-      }
-      resolve({ type: 'traceroute', target: host, ok: hops.length > 0, hopCount: hops.length, queries, hops });
+      resolve({ bin, err: err || null, missing: false, stdout: String(stdout || '') });
     });
   });
 }
@@ -65,16 +90,20 @@ function hopStats(hop, ip, samples, sent) {
 
 // Parses a traceroute/tracert report into per-hop stats. Each hop line carries up
 // to `queries` probes; a probe is either an RTT ("12.3 ms" / Windows "<1 ms") or
-// a timeout ("*"). The hop IP is the first address on the line, which works for
-// both layouts: Linux prints the IP before the times, Windows after them. With
-// `-n`/`-d` no DNS names appear, so the IP regex is unambiguous.
+// a timeout ("*"). The hop address is the first one on the line, which works for
+// both layouts: Linux prints it before the times, Windows after them.
+//
+// Address extraction is [`findAddress`](./ipFamily.js), which reads IPv4 and
+// IPv6 alike. It used to be an IPv4-only regex, and that one line was the reason
+// an IPv6 trace came back as a list of anonymous hops — every one of them
+// indistinguishable from a router that declines to answer.
 function parseTraceroute(text, queries = 3) {
   const hops = [];
   for (const line of String(text).split('\n')) {
     const m = line.match(/^\s*(\d+)\s+(.*)$/);
     if (!m) continue;
     const rest = m[2];
-    const ip = (rest.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/) || [])[1] || null;
+    const ip = findAddress(rest);
     const samples = [];
     const re = /(<\s*1|\d+(?:\.\d+)?)\s*ms/gi;
     let mm;

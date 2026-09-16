@@ -1,0 +1,6 @@
+PING 2001:db8::40(2001:db8::40) 1352 data bytes
+1360 bytes from 2001:db8::40: icmp_seq=1 ttl=57 time=12.3 ms
+
+--- 2001:db8::40 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 12.300/12.300/12.300/0.000 ms

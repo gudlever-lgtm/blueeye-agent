@@ -1,0 +1,8 @@
+PING6(1500=40+8+1452 bytes) 2001:db8::a --> 2001:db8::40
+1500 bytes from 2001:db8:beef::7: Packet too big mtu = 1400
+Vr TC  Flow Plen Nxt Hlim
+ 6 00 00000 05b4  3a  40
+2001:db8::a->2001:db8::40
+
+--- 2001:db8::40 ping6 statistics ---
+1 packets transmitted, 0 packets received, 100.0% packet loss

@@ -4,6 +4,9 @@ const { execFile } = require('child_process');
 const net = require('net');
 const { clampInt, round, safeHost } = require('./stats');
 const { traceroute } = require('./traceroute');
+const {
+  HEADER_OVERHEAD, MSS_OVERHEAD, MIN_PACKET_SIZE, resolveFamily, pingCommand, findAddress,
+} = require('./ipFamily');
 
 // Path-MTU probe: finds the largest packet that survives the path from this
 // agent to a target, per hop, and says WHY a smaller one is needed.
@@ -42,14 +45,12 @@ const { traceroute } = require('./traceroute');
 // every test here runs against canned output without spawning a process or
 // touching the network.
 
-// Header bytes between the IP packet size an operator configures (what an MTU
-// is) and the `-s` payload ping takes.
-const OVERHEAD = { 4: 28, 6: 48 }; // IPv4: 20 IP + 8 ICMP · IPv6: 40 IP + 8 ICMPv6
-// TCP MSS = MTU minus the IP and TCP headers.
-const MSS_OVERHEAD = { 4: 40, 6: 60 };
-// Below these an IP stack is not required to work at all, so there is nothing
-// useful to learn under them.
-const MIN_SIZE_DEFAULT = { 4: 576, 6: 1280 };
+// Header sizes, minimums and the per-OS argv all live in
+// [`ipFamily`](./ipFamily.js) — the one place that knows how IPv4 and IPv6
+// differ. IPv6 has no don't-fragment bit (routers may not fragment it at all),
+// so the "too big" answer arrives as ICMPv6 Packet Too Big instead of
+// "fragmentation needed and DF set"; everything this probe concludes from that
+// answer is identical either way.
 const MAX_SIZE_CEILING = 9216; // jumbo frames
 const DEFAULT_MAX_SIZE = 1500;
 const MAX_HOPS_PROBED = 32;
@@ -65,6 +66,12 @@ const DEFAULT_BUDGET_MS = 120000;
 //   frag_needed   — too big, and something said so (may carry the real MTU)
 //   local_error   — too big for THIS host's own interface; never a path fault
 //   timeout       — nothing came back
+//
+// `frag_needed` covers both protocols. IPv4 sends ICMP type 3 code 4,
+// "fragmentation needed and DF set"; IPv6 sends ICMPv6 type 2, "Packet Too Big".
+// They are the same event under two names — a router saying "this will not fit,
+// here is what will" — and both are filtered by the same careless firewall rule,
+// so the blackhole they leave behind is the same fault.
 const OUTCOME = {
   REPLY: 'reply',
   TTL_EXCEEDED: 'ttl_exceeded',
@@ -95,17 +102,27 @@ function parsePingProbe(text) {
   // A local refusal: the size exceeds this host's own interface MTU, so nothing
   // was ever put on the wire. Checked first — it is the only outcome that says
   // nothing at all about the path.
-  if (/local error:\s*message too long/i.test(s) || /sendto:\s*Message too long/i.test(s)
-    || /^ping:.*Message too long/im.test(s)) {
+  // Linux "ping: local error: message too long, mtu=1500" · macOS IPv4
+  // "ping: sendto: Message too long" · macOS IPv6 "ping6: sendmsg: Message too
+  // long" — three spellings of the same thing: the packet never left this host.
+  if (/local error:\s*message too long/i.test(s)
+    || /send(?:to|msg):\s*Message too long/i.test(s)
+    || /^ping6?:.*Message too long/im.test(s)) {
     return { outcome: OUTCOME.LOCAL_ERROR, mtu: mtuIn(s), from: null, rttMs: null };
   }
-  // "Frag needed and DF set (mtu = 1420)" · "frag needed and DF set (MTU 1420)"
-  // · Windows "Packet needs to be fragmented but DF set."
-  if (/frag(?:mentation)?\s+needed/i.test(s) || /needs to be fragmented but DF set/i.test(s)) {
+  // IPv4: "Frag needed and DF set (mtu = 1420)" · macOS "frag needed and DF set
+  // (MTU 1420)" · Windows "Packet needs to be fragmented but DF set."
+  // IPv6: "Packet too big: mtu=1400" (Linux) · "Packet too big mtu = 1400" (BSD).
+  if (/frag(?:mentation)?\s+needed/i.test(s)
+    || /needs to be fragmented but DF set/i.test(s)
+    || /packet too big/i.test(s)) {
     return { outcome: OUTCOME.FRAG_NEEDED, mtu: mtuIn(s), from: fromIn(s), rttMs: null };
   }
-  // "Time to live exceeded" · IPv6 "hop limit exceeded" · Windows "TTL expired in transit".
-  if (/time to live exceeded/i.test(s) || /hop limit exceeded/i.test(s) || /TTL expired in transit/i.test(s)) {
+  // IPv4: "Time to live exceeded" · Windows "TTL expired in transit".
+  // IPv6: Linux prints "Time exceeded: Hop limit", BSD "hop limit exceeded" —
+  // neither contains the other's wording, so both spellings are listed.
+  if (/time to live exceeded/i.test(s) || /time exceeded/i.test(s)
+    || /hop limit exceeded/i.test(s) || /TTL expired in transit/i.test(s)) {
     return { outcome: OUTCOME.TTL_EXCEEDED, mtu: null, from: fromIn(s), rttMs: null };
   }
   if (/bytes from /i.test(s) || /Reply from .*bytes\s*=/i.test(s)) {
@@ -123,13 +140,20 @@ function mtuIn(s) {
 }
 
 // Who answered. Linux "From 198.51.100.7 …", macOS "36 bytes from 198.51.100.7: …",
-// Windows "Reply from 192.0.2.1: …". Trailing punctuation is stripped.
+// Windows "Reply from 192.0.2.1: …", and the IPv6 forms of all three.
+//
+// The address is pulled out by `findAddress`, which validates with `net.isIP`
+// rather than matching a shape — but only from the LINE that names a responder.
+// Run over the whole output it would return the address in ping's own banner
+// ("PING 2001:db8::40 …"), i.e. the target, and confidently report the
+// destination as the router that dropped the packet.
 function fromIn(s) {
-  const m = s.match(/^\s*From\s+(\S+)/im)
-    || s.match(/bytes from ([^\s:,]+(?::[0-9a-f:]+)?)/i)
-    || s.match(/Reply from ([^\s:,]+)/i);
-  if (!m) return null;
-  return m[1].replace(/[:.,]+$/, '') || null;
+  for (const line of String(s).split('\n')) {
+    if (!/^\s*From\s/i.test(line) && !/bytes from /i.test(line) && !/Reply from /i.test(line)) continue;
+    const ip = findAddress(line);
+    if (ip) return ip;
+  }
+  return null;
 }
 
 // "time=12.3 ms" / "time=12ms" / Windows "time<1ms".
@@ -139,44 +163,14 @@ function rttIn(s) {
   return m[1] === '<' ? 0.5 : round(Number(m[2]));
 }
 
-// Builds the argv for one sized, DF-set ping. `ttl` limits how far the packet
-// travels (null = all the way to the target).
-//
-// The flags differ by more than spelling, which is why this is one table rather
-// than three sprinkled conditionals:
-//   Linux   -M do sets DF · -W is the per-reply wait in SECONDS · -t sets the TTL
-//   macOS   -D   sets DF · -t is the WHOLE-RUN timeout in seconds · -m sets the TTL
-//   Windows -f   sets DF · -w is the per-reply wait in MILLISECONDS · -i sets the TTL
-// macOS `-t` meaning a timeout while Linux `-t` means a TTL is exactly the kind
-// of collision that makes a copied command line silently measure the wrong thing.
-function pingArgs({ platform, ipVersion, payload, timeoutMs, ttl, host }) {
-  const secs = Math.max(1, Math.round(timeoutMs / 1000));
-  if (platform === 'win32') {
-    const args = [ipVersion === 6 ? '-6' : '-4', '-f', '-l', String(payload), '-n', '1', '-w', String(timeoutMs)];
-    if (ttl) args.push('-i', String(ttl));
-    // Windows `ping` has no `--` end-of-options marker; safeHost() has already
-    // rejected any leading-`-` target, which is what closes option injection here.
-    args.push(host);
-    return args;
-  }
-  if (platform === 'darwin') {
-    const args = ['-D', '-s', String(payload), '-c', '1', '-t', String(secs)];
-    if (ttl) args.push('-m', String(ttl));
-    args.push('--', host);
-    return args;
-  }
-  const args = [ipVersion === 6 ? '-6' : '-4', '-M', 'do', '-s', String(payload), '-c', '1', '-W', String(secs)];
-  if (ttl) args.push('-t', String(ttl));
-  args.push('--', host);
-  return args;
-}
-
 // Normalizes the operator's spec. Every bound is enforced here as well as on the
 // server, because the agent trusts nothing it is handed.
-function normalizeSpec(spec) {
+function normalizeSpec(spec, host) {
   const s = spec && typeof spec === 'object' ? spec : {};
-  const ipVersion = Number(s.ip_version ?? s.ipVersion) === 6 ? 6 : 4;
-  const floor = MIN_SIZE_DEFAULT[ipVersion];
+  // A literal IPv6 target selects IPv6 on its own, so an operator who types an
+  // address does not also have to remember a parameter.
+  const ipVersion = resolveFamily(s.ip_version ?? s.ipVersion, host);
+  const floor = MIN_PACKET_SIZE[ipVersion];
   const maxSize = clampInt(s.max_size ?? s.maxSize, DEFAULT_MAX_SIZE, floor, MAX_SIZE_CEILING);
   const minSize = clampInt(s.min_size ?? s.minSize, floor, floor, maxSize);
   return {
@@ -228,34 +222,27 @@ async function pathMtuProbe(spec, {
   const host = safeHost(rawHost);
   if (!host) return failure(rawHost, 'invalid host');
 
-  const opts = normalizeSpec(spec);
+  const opts = normalizeSpec(spec, host);
   const startedAt = now();
-  // macOS sets DF with `-D`, which is an IPv4-only option; the IPv6 equivalent
-  // lives in a separate `ping6` whose flags this module has not been verified
-  // against. Refusing is honest — guessing the flags would silently measure
-  // something else and report it as a path MTU.
-  if (platform === 'darwin' && opts.ipVersion === 6) {
-    return failure(host, 'IPv6 path MTU is not supported on macOS', { ip_version: 6 });
-  }
 
   // `fragCount` is a COUNTER, not a flag, so each measurement can ask whether a
   // frag-needed arrived DURING it. A flag would leak the end-to-end run's
   // frag-needed into the first hop's verdict and turn a plain `reduced` into a
   // reported blackhole — the one mistake this whole probe exists to avoid.
-  const state = { fragCount: 0, missing: false };
+  const state = { fragCount: 0, missing: null };
 
   // Runs one probe of one size, optionally TTL-limited. `probes_per_size`
   // separates an MTU limit from ordinary loss: a size passes if ANY attempt
   // gets through. Only a TIMEOUT is retried — frag-needed and a local error are
   // already definitive answers, and re-asking costs a second of nothing.
   async function probeSize(size, ttl) {
-    const payload = size - OVERHEAD[opts.ipVersion];
+    const payload = size - HEADER_OVERHEAD[opts.ipVersion];
     let last = { outcome: OUTCOME.TIMEOUT, mtu: null, from: null, rttMs: null };
     for (let i = 0; i < opts.probesPerSize; i += 1) {
-      const args = pingArgs({ platform, ipVersion: opts.ipVersion, payload, timeoutMs: opts.timeoutMs, ttl, host });
+      const cmd = pingCommand({ platform, family: opts.ipVersion, payload, timeoutMs: opts.timeoutMs, ttl, host });
       // eslint-disable-next-line no-await-in-loop
-      const run = await runPing(exec, args, opts.timeoutMs);
-      if (run.missing) { state.missing = true; return { pass: false, ...last, outcome: OUTCOME.TIMEOUT }; }
+      const run = await runPing(exec, cmd, opts.timeoutMs);
+      if (run.missing) { state.missing = cmd.bin; return { pass: false, ...last, outcome: OUTCOME.TIMEOUT }; }
       last = parsePingProbe(run.text);
       if (last.outcome === OUTCOME.FRAG_NEEDED) { state.fragCount += 1; break; }
       if (last.outcome === OUTCOME.LOCAL_ERROR) break;
@@ -325,22 +312,17 @@ async function pathMtuProbe(spec, {
   // --------------------------------------------------------------- the path
   let hopList = [];
   if (opts.perHop) {
-    if (opts.ipVersion === 6) {
-      // The shared traceroute parser reads IPv4 hop addresses only, so an IPv6
-      // trace would come back as a list of anonymous hops and every one of them
-      // would be reported `no_response`. An end-to-end measurement with no hop
-      // list is worth more than a hop list that is wrong.
-      hopList = [];
-    } else {
-      const tr = await tracerouteFn({ host, maxHops: MAX_HOPS_PROBED, queries: 1 }, { exec, platform });
-      hopList = (tr && Array.isArray(tr.hops) ? tr.hops : []).filter((h) => h && h.ip).slice(0, MAX_HOPS_PROBED);
-    }
+    const tr = await tracerouteFn(
+      { host, maxHops: MAX_HOPS_PROBED, queries: 1, ip_version: opts.ipVersion },
+      { exec, platform },
+    );
+    hopList = (tr && Array.isArray(tr.hops) ? tr.hops : []).filter((h) => h && h.ip).slice(0, MAX_HOPS_PROBED);
   }
 
   // End-to-end first: it is the number the operator actually asked for, and the
   // one that must exist even when the budget runs out mid-path.
   const endToEnd = await measure(null, opts.maxSize);
-  if (state.missing) return failure(host, 'ping not installed', { ip_version: opts.ipVersion });
+  if (state.missing) return failure(host, `${state.missing} not installed`, { ip_version: opts.ipVersion });
 
   const hops = [];
   // When this host's own interface capped the run, that cap — not max_size — is
@@ -430,10 +412,11 @@ async function pathMtuProbe(spec, {
 }
 
 // One ping run. stderr is joined in because macOS reports the local
-// "Message too long" refusal there, and that refusal is a verdict.
-function runPing(exec, args, timeoutMs) {
+// "Message too long" refusal there, and that refusal is a verdict. The binary
+// comes from the command builder — IPv6 on macOS is a different program.
+function runPing(exec, { bin, args }, timeoutMs) {
   return new Promise((resolve) => {
-    exec('ping', args, { timeout: timeoutMs + 2000 }, (err, stdout, stderr) => {
+    exec(bin, args, { timeout: timeoutMs + 2000 }, (err, stdout, stderr) => {
       resolve({
         missing: !!(err && err.code === 'ENOENT'),
         text: `${stdout || ''}\n${stderr || ''}`,
@@ -486,4 +469,4 @@ function parseSsMss(text, localPort) {
   return null;
 }
 
-module.exports = { pathMtuProbe, parsePingProbe, pingArgs, parseSsMss, OUTCOME, HOP_STATUS, MAX_SIZE_CEILING, MIN_SIZE_DEFAULT };
+module.exports = { pathMtuProbe, parsePingProbe, parseSsMss, OUTCOME, HOP_STATUS, MAX_SIZE_CEILING };
