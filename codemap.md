@@ -123,7 +123,7 @@ a runner error resolves to an `ok:false` result stamped with `ts`.
 
 | Type | Module | Method |
 | --- | --- | --- |
-| `ping` | [`probes/ping.js`](src/probes/ping.js) | system `ping`, parses loss% + min/avg/max/mdev (Linux/macOS/Windows). |
+| `ping` | [`probes/ping.js`](src/probes/ping.js) | system `ping`, parses loss% + min/avg/max/mdev (Linux/macOS/Windows). `sizes: [64, 1472]` + `df: true` sweeps several payload sizes with don't-fragment set — the probe that tells an MTU blackhole from a lossy link — reporting each size in `sizes[]` and the router's `mtuHint` when an ICMP frag-needed comes back. The TOP-LEVEL metrics always describe the SMALLEST size, so a blocked 1472-byte packet never reads as an outage on the reachability screens. |
 | `tcp` | [`probes/tcp.js`](src/probes/tcp.js) | times N connect-and-close attempts. |
 | `dns` | [`probes/dns.js`](src/probes/dns.js) | times N resolver lookups. |
 | `traceroute` | [`probes/traceroute.js`](src/probes/traceroute.js) | system `traceroute`/`traceroute6`/`tracert`, MTR-style multi-probe (`-q queries`); IPv4 + IPv6 (an IPv6 literal selects the family on its own; both IPv6 binaries are tried, since distributions disagree on which exists); per-hop `{ ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs }` for the server's path map. |
