@@ -12,8 +12,9 @@ const fs = require('fs');
 const path = require('path');
 
 const {
-  pathMtuProbe, parsePingProbe, pingArgs, parseSsMss, OUTCOME, HOP_STATUS,
+  pathMtuProbe, parsePingProbe, parseSsMss, OUTCOME, HOP_STATUS,
 } = require('../src/probes/pathmtu');
+const { pingCommand } = require('../src/probes/ipFamily');
 const { runProbe, PROBE_TYPES } = require('../src/probes');
 
 const FIX = path.join(__dirname, 'fixtures', 'pathmtu');
@@ -29,6 +30,7 @@ function simulate({
   hops,
   fragNeeded = true,
   platform = 'linux',
+  family = 4,
   silentHops = [],
   dropFirst = 0,
   localMtu = null,
@@ -44,9 +46,11 @@ function simulate({
       const i = args.indexOf(flag);
       return i >= 0 && args[i + 1] !== undefined ? Number(args[i + 1]) : null;
     };
-    if (platform === 'win32') return { size: val('-l') + 28, ttl: val('-i') };
-    if (platform === 'darwin') return { size: val('-s') + 28, ttl: val('-m') };
-    return { size: val('-s') + 28, ttl: val('-t') };
+    const overhead = family === 6 ? 48 : 28;
+    if (platform === 'win32') return { size: val('-l') + overhead, ttl: val('-i') };
+    // macOS IPv6 runs ping6, whose hop-limit flag is -h; IPv4 ping uses -m.
+    if (platform === 'darwin') return { size: val('-s') + overhead, ttl: val(family === 6 ? '-h' : '-m') };
+    return { size: val('-s') + overhead, ttl: val('-t') };
   }
 
   // The smallest link MTU up to and including `ttl` hops (all of them when the
@@ -60,7 +64,12 @@ function simulate({
     return hops.find((h) => h.mtu < size) || null;
   }
 
-  const out = (name) => fixture(`${platform === 'win32' ? 'win' : platform === 'darwin' ? 'darwin' : 'linux'}-${name}`);
+  // IPv6 output is a different set of fixtures, because the ICMPv6 wording
+  // ("Packet too big", "Time exceeded: Hop limit") is what the parser has to
+  // read — testing IPv6 against IPv4 text would prove nothing about it.
+  // Windows has no IPv6 fixtures of its own; its wording does not change.
+  const osName = platform === 'win32' ? 'win' : platform === 'darwin' ? 'darwin' : 'linux';
+  const out = (name) => fixture(`${osName}${family === 6 && osName !== 'win' ? '6' : ''}-${name}`);
 
   function exec(bin, args, opts, cb) {
     calls.push({ bin, args });
@@ -89,8 +98,11 @@ function simulate({
     if (!fragNeeded || !lim) return cb(new Error('timeout'), out('timeout'), '');
     // A real router reports ITS next-hop MTU; the fixture carries 1420, so a
     // path whose limit is elsewhere must not be believed on that number alone.
-    const text = out('frag-needed').replace(/mtu\s*[=]?\s*1420/i, (m) => m.replace('1420', String(lim.mtu)))
-      .replace(/MTU 1420/, `MTU ${lim.mtu}`);
+    const text = out('frag-needed')
+      .replace(/mtu\s*=?\s*1420/i, (m) => m.replace('1420', String(lim.mtu)))
+      .replace(/MTU 1420/, `MTU ${lim.mtu}`)
+      .replace(/mtu\s*=\s*1400/i, (m) => m.replace('1400', String(lim.mtu)))
+      .replace(/mtu=1400/i, `mtu=${lim.mtu}`);
     return cb(new Error('frag'), text, '');
   }
 
@@ -108,6 +120,18 @@ const NARROWED = [
   { hop: 2, ip: '192.0.2.2', mtu: 1500 },
   { hop: 3, ip: '198.51.100.7', mtu: 1420 },
   { hop: 4, ip: '203.0.113.5', mtu: 1420 },
+];
+
+const CLEAN_V6 = [
+  { hop: 1, ip: '2001:db8::1', mtu: 1500 },
+  { hop: 2, ip: '2001:db8::2', mtu: 1500 },
+  { hop: 3, ip: '2001:db8::3', mtu: 1500 },
+];
+const NARROWED_V6 = [
+  { hop: 1, ip: '2001:db8::1', mtu: 1500 },
+  { hop: 2, ip: '2001:db8::2', mtu: 1500 },
+  { hop: 3, ip: '2001:db8:beef::7', mtu: 1400 },
+  { hop: 4, ip: '2001:db8::40', mtu: 1400 },
 ];
 
 const run = (spec, sim) => pathMtuProbe(spec, {
@@ -297,38 +321,93 @@ test('Windows sees a reduced path even though its ping never names the MTU', asy
 });
 
 // ------------------------------------------------------------- platform argv
-test('pingArgs sets DF, size, count, timeout and TTL with each OS spelling', () => {
-  const base = { ipVersion: 4, payload: 1472, timeoutMs: 1000, ttl: 5, host: 'h' };
-  const linux = pingArgs({ ...base, platform: 'linux' });
-  assert.deepEqual(linux, ['-4', '-M', 'do', '-s', '1472', '-c', '1', '-W', '1', '-t', '5', '--', 'h']);
+test('pingCommand sets DF, size, count, timeout and TTL with each OS spelling', () => {
+  const base = { family: 4, payload: 1472, timeoutMs: 1000, ttl: 5, host: 'h' };
+  assert.deepEqual(pingCommand({ ...base, platform: 'linux' }),
+    { bin: 'ping', args: ['-4', '-M', 'do', '-s', '1472', '-c', '1', '-W', '1', '-t', '5', '--', 'h'] });
 
   // macOS `-t` is the whole-run TIMEOUT and `-m` is the TTL — the opposite of
   // Linux, where `-t` is the TTL. Copying the Linux line here would silently
   // measure a different thing.
-  const mac = pingArgs({ ...base, platform: 'darwin' });
-  assert.deepEqual(mac, ['-D', '-s', '1472', '-c', '1', '-t', '1', '-m', '5', '--', 'h']);
+  assert.deepEqual(pingCommand({ ...base, platform: 'darwin' }),
+    { bin: 'ping', args: ['-D', '-s', '1472', '-c', '1', '-t', '1', '-m', '5', '--', 'h'] });
 
-  const win = pingArgs({ ...base, platform: 'win32' });
-  assert.deepEqual(win, ['-4', '-f', '-l', '1472', '-n', '1', '-w', '1000', '-i', '5', 'h']);
+  assert.deepEqual(pingCommand({ ...base, platform: 'win32' }),
+    { bin: 'ping', args: ['-4', '-f', '-l', '1472', '-n', '1', '-w', '1000', '-i', '5', 'h'] });
 
-  assert.ok(pingArgs({ ...base, platform: 'linux', ipVersion: 6 }).includes('-6'));
-  assert.ok(!pingArgs({ ...base, platform: 'linux', ttl: null }).includes('-t'));
+  assert.ok(!pingCommand({ ...base, platform: 'linux', ttl: null }).args.includes('-t'));
 });
 
-test('IPv6 path MTU is refused on macOS rather than measured with unverified flags', async () => {
-  const sim = simulate({ hops: CLEAN, platform: 'darwin' });
-  const r = await run({ host: '2001:db8::1', ip_version: 6 }, sim);
-  assert.equal(r.ok, false);
-  assert.match(r.error, /IPv6.*macOS/i);
-  assert.equal(sim.calls.length, 0, 'nothing was executed');
+// ------------------------------------------------------------------- IPv6
+test('IPv6 is measured per hop, on Linux and on macOS alike', async () => {
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    const sim = simulate({ hops: NARROWED_V6, fragNeeded: false, platform, family: 6 });
+    // eslint-disable-next-line no-await-in-loop
+    const r = await run({ host: '2001:db8::40' }, sim);
+    assert.equal(r.ip_version, 6, platform);
+    assert.equal(r.blackhole_detected, true, platform);
+    assert.equal(r.path_mtu, 1400, platform);
+    assert.equal(r.mtu_drop_at_hop, 3, platform);
+    assert.equal(r.hops.length, 4, `${platform}: the IPv6 hop list must not be empty`);
+    assert.equal(r.hops.find((h) => h.hop === 3).ip, '2001:db8:beef::7', platform);
+    assert.equal(r.recommended_mss, 1340, `${platform}: IPv6 subtracts 60`);
+  }
 });
 
-test('IPv6 measures end-to-end and reports no hops (the trace parser reads IPv4 only)', async () => {
-  const sim = simulate({ hops: [{ hop: 1, ip: '192.0.2.1', mtu: 1400 }] });
-  const r = await run({ host: '2001:db8::1', ip_version: 6, per_hop: true }, sim);
-  assert.deepEqual(r.hops, []);
-  assert.equal(r.path_mtu, 1400);
+test('an IPv6 literal target selects IPv6 without ip_version being set', async () => {
+  const sim = simulate({ hops: CLEAN_V6, platform: 'linux', family: 6 });
+  const r = await run({ host: '2001:db8::40', per_hop: false }, sim);
+  assert.equal(r.ip_version, 6);
   assert.ok(sim.calls.every((c) => c.args.includes('-6')));
+  // The floor moves with the family: 1280, not 576.
+  assert.ok(sim.calls.some((c) => Number(c.args[c.args.indexOf('-s') + 1]) === 1280 - 48));
+});
+
+test('IPv6 subtracts 48 bytes of header, not 28', async () => {
+  const sim = simulate({ hops: [{ hop: 1, ip: '2001:db8::1', mtu: 1500 }], platform: 'linux', family: 6 });
+  await run({ host: '2001:db8::40', per_hop: false, max_size: 1500 }, sim);
+  const sizes = sim.calls.map((c) => Number(c.args[c.args.indexOf('-s') + 1]));
+  assert.ok(sizes.includes(1500 - 48), `payloads were ${sizes.join(',')}`);
+  assert.ok(!sizes.includes(1500 - 28), 'an IPv4 header size leaked into an IPv6 run');
+});
+
+test('macOS IPv6 uses ping6 with its own flag letters, and reports it missing by name', async () => {
+  const cmd = pingCommand({ platform: 'darwin', family: 6, payload: 1352, timeoutMs: 1000, ttl: 5, host: 'h' });
+  assert.equal(cmd.bin, 'ping6', 'macOS IPv6 is a separate binary');
+  // No DF flag: IPv6 forbids in-transit fragmentation, so there is nothing to set.
+  assert.ok(!cmd.args.includes('-D'));
+  // -h is the hop limit and -W is MILLISECONDS on ping6.
+  assert.deepEqual(cmd.args, ['-s', '1352', '-c', '1', '-W', '1000', '-h', '5', '--', 'h']);
+
+  const enoent = (bin, _a, _o, cb) => { const e = new Error(`spawn ${bin} ENOENT`); e.code = 'ENOENT'; cb(e, '', ''); };
+  const r = await pathMtuProbe({ host: '2001:db8::40', per_hop: false }, {
+    exec: enoent, platform: 'darwin', tracerouteFn: async () => ({ hops: [] }),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'ping6 not installed', 'the reason must name the binary to install');
+});
+
+test('Windows IPv6 omits -f, which is an IPv4-only flag there', () => {
+  const v6 = pingCommand({ platform: 'win32', family: 6, payload: 1352, timeoutMs: 1000, ttl: null, host: 'h' });
+  assert.ok(!v6.args.includes('-f'));
+  assert.ok(v6.args.includes('-6'));
+  assert.ok(pingCommand({ platform: 'win32', family: 4, payload: 1472, timeoutMs: 1000, host: 'h' }).args.includes('-f'));
+});
+
+test('an IPv6 path with ICMPv6 Packet Too Big arriving is reduced, not a blackhole', async () => {
+  const sim = simulate({ hops: NARROWED_V6, fragNeeded: true, platform: 'linux', family: 6 });
+  const r = await run({ host: '2001:db8::40' }, sim);
+  assert.equal(r.blackhole_detected, false);
+  assert.equal(r.icmp_frag_needed_seen, true, 'ICMPv6 type 2 counts as the router having said so');
+  assert.equal(r.hops.find((h) => h.hop === 3).status, HOP_STATUS.REDUCED);
+});
+
+test('an IPv6 hop that answers nothing is no_response, exactly as on IPv4', async () => {
+  const sim = simulate({ hops: CLEAN_V6, silentHops: [2], platform: 'linux', family: 6 });
+  const r = await run({ host: '2001:db8::40' }, sim);
+  assert.equal(r.hops.find((h) => h.hop === 2).status, HOP_STATUS.NO_RESPONSE);
+  assert.equal(r.blackhole_detected, false);
+  assert.equal(r.path_mtu, 1500);
 });
 
 // ------------------------------------------------------------- input safety

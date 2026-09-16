@@ -1,0 +1,5 @@
+PING6(9000=40+8+8952 bytes) 2001:db8::a --> 2001:db8::40
+ping6: sendmsg: Message too long
+
+--- 2001:db8::40 ping6 statistics ---
+1 packets transmitted, 0 packets received, 100.0% packet loss
