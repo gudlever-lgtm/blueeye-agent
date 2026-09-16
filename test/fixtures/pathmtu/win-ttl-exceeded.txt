@@ -1,0 +1,6 @@
+
+Pinging 10.20.30.40 with 1392 bytes of data:
+Reply from 192.0.2.1: TTL expired in transit.
+
+Ping statistics for 10.20.30.40:
+    Packets: Sent = 1, Received = 0, Lost = 1 (100% loss),

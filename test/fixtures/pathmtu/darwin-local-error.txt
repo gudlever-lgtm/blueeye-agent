@@ -1,0 +1,5 @@
+PING 10.20.30.40 (10.20.30.40): 8972 data bytes
+ping: sendto: Message too long
+
+--- 10.20.30.40 ping statistics ---
+1 packets transmitted, 0 packets received, 100.0% packet loss

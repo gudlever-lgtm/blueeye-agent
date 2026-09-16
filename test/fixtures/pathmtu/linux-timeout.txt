@@ -1,0 +1,4 @@
+PING 10.20.30.40 (10.20.30.40) 1472(1500) bytes of data.
+
+--- 10.20.30.40 ping statistics ---
+1 packets transmitted, 0 received, 100% packet loss, time 0ms

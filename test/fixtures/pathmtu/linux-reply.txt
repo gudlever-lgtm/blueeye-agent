@@ -1,0 +1,6 @@
+PING 10.20.30.40 (10.20.30.40) 1392(1420) bytes of data.
+1400 bytes from 10.20.30.40: icmp_seq=1 ttl=57 time=12.3 ms
+
+--- 10.20.30.40 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 12.300/12.300/12.300/0.000 ms

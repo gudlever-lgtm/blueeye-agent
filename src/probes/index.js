@@ -9,7 +9,7 @@ const { httpProbe } = require('./http');
 const { curlProbe } = require('./curl');
 const { pageloadProbe } = require('./pageload');
 const { transactionProbe } = require('./transaction');
-const { pathMtuProbe } = require('./pathMtu');
+const { pathMtuProbe } = require('./pathmtu');
 
 const RUNNERS = { tcp: tcpProbe, dns: dnsProbe, ping: pingProbe, traceroute, tcptraceroute, http: httpProbe, curl: curlProbe, pageload: pageloadProbe, transaction: transactionProbe, path_mtu: pathMtuProbe };
 

@@ -1,0 +1,5 @@
+PING 10.20.30.40 (10.20.30.40) 1472(1500) bytes of data.
+From 198.51.100.7 icmp_seq=1 Frag needed and DF set (mtu = 1420)
+
+--- 10.20.30.40 ping statistics ---
+0 packets transmitted, 0 received, +1 errors

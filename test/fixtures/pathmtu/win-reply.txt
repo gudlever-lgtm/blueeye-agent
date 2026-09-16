@@ -1,0 +1,8 @@
+
+Pinging 10.20.30.40 with 1392 bytes of data:
+Reply from 10.20.30.40: bytes=1392 time=12ms TTL=57
+
+Ping statistics for 10.20.30.40:
+    Packets: Sent = 1, Received = 1, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 12ms, Maximum = 12ms, Average = 12ms

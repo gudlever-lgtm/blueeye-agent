@@ -5,7 +5,7 @@
 // Runs before every branch build (scripts/gate.sh). Pins the agent's
 // fail-closed security contract: signed-command verification and replay
 // bounds, token-file permissions, TLS certificate pinning, the same-host-only
-// http→https self-heal, curl argument hardening, bounded server-supplied
+// http→https self-heal, curl and path-MTU argument hardening, bounded server-supplied
 // regexes, the tool-install and evidence allowlists, signed self-update, and
 // a scan for committed secrets. One end-to-end case proves the runtime
 // actually refuses an unsigned privileged command over the real WebSocket.
@@ -25,6 +25,7 @@ const { checkPin } = require('../../src/httpsClient');
 const { normalizeFingerprint } = require('../../src/fingerprint');
 const { resolveEffectiveServerUrl } = require('../../src/serverUrl');
 const { safeHeader, dataArgs } = require('../../src/probes/curlArgs');
+const { pathMtuProbe } = require('../../src/probes/pathmtu');
 const { compile, safeTest, safeExec } = require('../../src/probes/safeRegex');
 const { createToolInstaller, ALLOWED_TOOLS } = require('../../src/toolInstaller');
 const { createEvidenceCollector, isAllowed, READ_ONLY_ITEMS } = require('../../src/evidenceCollector');
@@ -125,6 +126,33 @@ test('curlArgs: header values cannot read files or inject headers; bodies are al
   assert.ok(args.includes('--data-raw'), 'must use --data-raw');
   assert.ok(!args.includes('--data') || args.indexOf('--data') === -1, 'plain --data would read a file');
   assert.ok(!args.includes('-d'));
+});
+
+test('path_mtu: a hostile target never reaches a process, and the argv is option-safe', async () => {
+  // Every probe that hands a server-supplied target to a system tool has to
+  // close the same hole: a target that the tool reads as a FLAG. execFile means
+  // there is no shell, so this is the residual risk, and it is swept here rather
+  // than trusted to the probe's own suite.
+  const calls = [];
+  const exec = (bin, args, opts, cb) => { calls.push({ bin, args }); cb(new Error('x'), '', ''); };
+  const tracerouteFn = async () => ({ hops: [] });
+  for (const host of ['-f', '--flood', ';id', '1.1.1.1 -f', '$(id)', '`id`', 'a|b', '', 'x'.repeat(256)]) {
+    // eslint-disable-next-line no-await-in-loop
+    const r = await pathMtuProbe({ host }, { exec, platform: 'linux', tracerouteFn });
+    assert.equal(r.ok, false, `accepted ${JSON.stringify(host)}`);
+    assert.equal(r.error, 'invalid host');
+  }
+  assert.equal(calls.length, 0, 'a refused target still spawned something');
+
+  // An accepted target is last in argv, immediately after the end-of-options
+  // marker, on every Unix path.
+  await pathMtuProbe({ host: '10.20.30.40', per_hop: false }, { exec, platform: 'linux', tracerouteFn });
+  assert.ok(calls.length > 0);
+  for (const c of calls) {
+    assert.equal(c.bin, 'ping');
+    assert.equal(c.args[c.args.length - 2], '--');
+    assert.equal(c.args[c.args.length - 1], '10.20.30.40');
+  }
 });
 
 test('safeRegex: catastrophic and malformed server-supplied patterns are bounded', () => {
