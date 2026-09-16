@@ -20,6 +20,17 @@ const OID = {
   ifInErrors: '1.3.6.1.2.1.2.2.1.14',
   ifOutDiscards: '1.3.6.1.2.1.2.2.1.19',
   ifOutErrors: '1.3.6.1.2.1.2.2.1.20',
+  // EtherLike-MIB (RFC 3635), indexed by the SAME ifIndex as the IF-MIB above,
+  // so it joins straight onto the rest of the row.
+  //
+  // A LATE collision is one detected after the first 64 bytes have gone out —
+  // far too late to be ordinary CSMA/CD contention. On a modern switched link it
+  // means one end is running half duplex while the other runs full: the
+  // full-duplex end transmits whenever it likes, and the half-duplex end sees
+  // that as a collision. Nothing is wrong until traffic flows both ways at once,
+  // and then everything is. It is the one counter that names that fault, and it
+  // is only ever counted on the half-duplex end.
+  dot3StatsLateCollisions: '1.3.6.1.2.1.10.7.2.1.8',
 };
 
 const OPER_STATUS = { 1: 'up', 2: 'down', 3: 'testing', 5: 'dormant', 6: 'notPresent', 7: 'lowerLayerDown' };
@@ -85,7 +96,7 @@ async function defaultReadCounters(snmp) {
     // health columns are best-effort: a device that doesn't implement one — or a
     // single timed-out walk — must NOT discard the whole sample.
     const safe = (oid) => walkColumn(session, oid).catch(() => ({}));
-    const [names, rx, tx, inErr, outErr, inDisc, outDisc, oper, speed] = await Promise.all([
+    const [names, rx, tx, inErr, outErr, inDisc, outDisc, oper, speed, lateColl] = await Promise.all([
       walkColumn(session, OID.ifName),
       walkColumn(session, OID.ifHCInOctets),
       walkColumn(session, OID.ifHCOutOctets),
@@ -95,6 +106,7 @@ async function defaultReadCounters(snmp) {
       safe(OID.ifOutDiscards),
       safe(OID.ifOperStatus),
       safe(OID.ifHighSpeed),
+      safe(OID.dot3StatsLateCollisions),
     ]);
     const result = {};
     for (const idx of Object.keys(rx)) {
@@ -109,6 +121,14 @@ async function defaultReadCounters(snmp) {
         txDrop: toNumber(outDisc[idx]),
         operStatus: OPER_STATUS[toNumber(oper[idx])] || null,
         speedMbps: sp > 0 ? sp : null,
+        // NULL when the device did not return the column, 0 when it did and the
+        // count is zero. The difference is the whole value of this counter:
+        // EtherLike-MIB is optional and plenty of devices omit it, and
+        // `toNumber(undefined)` is 0 — so collapsing the two would make a switch
+        // that cannot report late collisions look exactly like a switch with a
+        // clean link, and "zero late collisions" is what RULES OUT a duplex
+        // mismatch. Absent is not zero.
+        lateCollisions: Object.prototype.hasOwnProperty.call(lateColl, idx) ? toNumber(lateColl[idx]) : null,
       };
     }
     return result;
@@ -140,6 +160,12 @@ async function sampleSnmp({
   const interfaces = [];
   const totals = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, rxErrors: 0, txErrors: 0, rxDrop: 0, txDrop: 0 };
   const delta = (a, b, k) => Math.max((a[k] || 0) - (b[k] || 0), 0);
+  // The same subtraction for a counter that may be ABSENT. Either sample missing
+  // it means this interval measured nothing, which is not the same as measuring
+  // none — see the note on lateCollisions in defaultReadCounters.
+  const nullableDelta = (a, b, k) => (
+    typeof a[k] === 'number' && typeof b[k] === 'number' ? Math.max(a[k] - b[k], 0) : null
+  );
 
   for (const idx of Object.keys(second)) {
     if (!first[idx]) continue;
@@ -166,6 +192,7 @@ async function sampleSnmp({
       txDrop,
       operStatus: second[idx].operStatus ?? null,
       speedMbps: second[idx].speedMbps ?? null,
+      lateCollisions: nullableDelta(second[idx], first[idx], 'lateCollisions'),
     });
   }
 
