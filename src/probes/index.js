@@ -10,8 +10,18 @@ const { curlProbe } = require('./curl');
 const { pageloadProbe } = require('./pageload');
 const { transactionProbe } = require('./transaction');
 const { pathMtuProbe } = require('./pathmtu');
+const { tlsProbe } = require('./tls');
+const { rdnsProbe } = require('./rdns');
 
-const RUNNERS = { tcp: tcpProbe, dns: dnsProbe, ping: pingProbe, traceroute, tcptraceroute, http: httpProbe, curl: curlProbe, pageload: pageloadProbe, transaction: transactionProbe, path_mtu: pathMtuProbe };
+const RUNNERS = {
+  tcp: tcpProbe, dns: dnsProbe, ping: pingProbe, traceroute, tcptraceroute,
+  http: httpProbe, curl: curlProbe, pageload: pageloadProbe, transaction: transactionProbe,
+  path_mtu: pathMtuProbe,
+  // Neither of these shells out or needs a raw socket — they are Node's own dns
+  // and tls, so they run anywhere the agent runs, including Windows and a
+  // container with no extra tools installed.
+  tls: tlsProbe, rdns: rdnsProbe,
+};
 
 // Runs one probe by spec.type and returns a normalized result stamped with `ts`.
 // Never throws: an unknown type or a runner error resolves to an ok:false result
