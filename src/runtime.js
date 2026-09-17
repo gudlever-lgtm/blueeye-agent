@@ -598,7 +598,21 @@ function createAgentRuntime({
       // Report completion BEFORE restarting — once systemd swaps us we can't speak.
       if (auditId != null) client.send({ type: 'action-result', auditId, action: 'upgrade', ok: true, version: targetVersion });
       emitter.emit('update-applied');
-      updater.restart(); // systemd stops us (SIGTERM -> graceful exit) then starts the new code
+      // systemd stops us (SIGTERM -> graceful exit) then starts the new code.
+      // If it does NOT, we are still the old process running the old code: the
+      // new version is on disk, this agent keeps reporting the old one, and the
+      // dashboard would show an update that "worked" for ever. We are still alive
+      // to say so, so correct the outcome we just reported.
+      const restarted = updater.restart();
+      if (restarted && restarted.ok === false) {
+        const unit = process.env.BLUEEYE_SERVICE_NAME || 'blueeye-agent';
+        const detail = `installed v${targetVersion || '?'} but the service restart failed (${restarted.detail}) — run: systemctl restart ${unit}`;
+        actions.log('update.restart-failed', { version: targetVersion, error: restarted.detail });
+        logger.error(`Self-update: ${detail}`);
+        client.send({ type: 'command-result', id: command && command.id, ok: false, error: detail });
+        if (auditId != null) client.send({ type: 'action-result', auditId, action: 'upgrade', ok: false, detail });
+        emitter.emit('update-error', new Error(detail));
+      }
     } catch (err) {
       actions.log('update.failed', { version: targetVersion, error: err.message });
       logger.error(`Self-update failed: ${err.message}`);

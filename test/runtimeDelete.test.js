@@ -95,6 +95,34 @@ test('a docker-managed agent declines delete (the host removes it)', async () =>
   }
 });
 
+test('an update whose service restart fails is reported as FAILED, not applied', async () => {
+  // The code is installed but the process is still the old one, so the agent
+  // keeps reporting the old version. Reported as success, that is an update that
+  // "worked" for ever while nothing changes — so the agent corrects itself.
+  const server = await startFakeServer({ validTokens: ['valid'], monitorConfig: { source: 'proc' } });
+  const selfUpdater = {
+    update: async () => ({ ok: true, sha: 'x' }),
+    restart: () => ({ ok: false, detail: 'Failed to restart blueeye-agent.service: Access denied' }),
+  };
+  const runtime = createAgentRuntime({
+    config: makeConfig(server), token: 'valid', agentId: 1, logger: silentLogger,
+    hsflowdManager: noopHsflowd, selfUpdater, capabilities: systemd,
+  });
+  try {
+    const failure = server.waitForWsMessage((m) => m.type === 'action-result' && m.action === 'upgrade' && m.ok === false);
+    runtime.start();
+    await withTimeout(onceEvent(runtime, 'config'), 4000, 'no config');
+    server.sendCommandToAll({ name: 'update', id: 'u9', auditId: 91, version: '0.3.0', sha256: 'abc' });
+    const msg = await withTimeout(failure, 4000, 'no failed upgrade action-result');
+    assert.equal(msg.auditId, 91);
+    assert.match(msg.detail, /restart failed/);
+    assert.match(msg.detail, /systemctl restart blueeye-agent/);
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});
+
 test('a signed update reports completed (with the audit id + version) before restarting', async () => {
   const server = await startFakeServer({ validTokens: ['valid'], monitorConfig: { source: 'proc' } });
   let restarted = 0;

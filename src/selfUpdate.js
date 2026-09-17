@@ -269,9 +269,22 @@ function createSelfUpdater({
   // Asks systemd to restart this unit. --no-block enqueues the job in PID 1, so it
   // completes even though this process is terminated during the stop phase
   // (systemd then starts a fresh instance running the just-installed code).
+  //
+  // Returns { ok, detail } rather than the raw spawn result, because the caller
+  // has to act on a failure: the new code is on disk but the process running is
+  // still the old one, so the agent keeps reporting the OLD version for ever. It
+  // used to be reported as a successful update, which is how "the update says it
+  // worked and the version never changes" happened with nothing in any log.
   function restart() {
     logger.info(`[update] requesting restart of ${serviceName}`);
-    return exec('systemctl', ['--no-block', 'restart', serviceName], { encoding: 'utf8' });
+    const r = exec('systemctl', ['--no-block', 'restart', serviceName], { encoding: 'utf8' });
+    if (!r || r.error || r.status !== 0) {
+      const detail = r && r.error ? r.error.message
+        : (r && r.stderr ? String(r.stderr).trim() : `exit ${r ? r.status : '?'}`);
+      logger.error(`[update] restart of ${serviceName} FAILED: ${detail}`);
+      return { ok: false, detail, result: r };
+    }
+    return { ok: true, detail: null, result: r };
   }
 
   return { update, restart, rollback, installRelease };

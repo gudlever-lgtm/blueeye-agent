@@ -162,3 +162,30 @@ test('restart() asks systemd to restart the unit without blocking', () => {
   const sc = calls.find((c) => c.cmd === 'systemctl');
   assert.deepEqual(sc.args, ['--no-block', 'restart', 'blueeye-agent']);
 });
+
+test('restart() reports success and failure instead of swallowing the exit code', () => {
+  const ok = createSelfUpdater({ serviceName: 'blueeye-agent', exec: () => ({ status: 0 }), fsImpl: makeFakeFs(), logger: quiet });
+  assert.deepEqual({ ok: ok.restart().ok }, { ok: true });
+
+  // A restart that does not happen leaves the OLD process running the OLD code:
+  // the caller has to know, or it reports an update that never took effect.
+  const bad = createSelfUpdater({
+    serviceName: 'blueeye-agent',
+    exec: () => ({ status: 1, stderr: 'Failed to restart blueeye-agent.service: Access denied\n' }),
+    fsImpl: makeFakeFs(),
+    logger: quiet,
+  });
+  const r = bad.restart();
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /Access denied/);
+
+  // spawnSync reports "could not run it at all" as .error, not a status.
+  const missing = createSelfUpdater({
+    serviceName: 'blueeye-agent',
+    exec: () => ({ error: new Error('spawnSync systemctl ENOENT') }),
+    fsImpl: makeFakeFs(),
+    logger: quiet,
+  });
+  assert.equal(missing.restart().ok, false);
+  assert.match(missing.restart().detail, /ENOENT/);
+});
