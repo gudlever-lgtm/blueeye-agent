@@ -110,6 +110,7 @@ test('command recognisers: canonical + spelling variants are recognised; wrong v
     ['isInstallToolCommand', [{ name: 'install-tool', tool: 'traceroute' }], ['install-tool', { name: 'install-tool' }, { name: 'install-tool', tool: '' }, { name: 'install-tool', tool: 42 }]],
     ['isEvidenceCommand', ['evidence', 'evidence-snapshot', { name: 'evidence_snapshot' }], ['evident', 'snapshot']],
     ['isRunDiscoveryCommand', [{ name: 'run-discovery', discovery: {} }, { name: 'sweep', discovery: { cidrs: [] } }], ['run-discovery', { name: 'run-discovery' }, { name: 'run-discovery', discovery: 'all' }]],
+    ['isRekeyCommand', [{ name: 'rekey', publicKey: 'pem' }, { name: 're-key', publicKey: 'pem' }, { name: 'rotate-key', publicKey: 'pem' }, { name: 're-pin', publicKey: 'pem' }], ['rekey', { name: 'rekey' }, { name: 'rekey', publicKey: '' }, { name: 'rekey', publicKey: 42 }, { name: 'key' }]],
   ];
   for (const [fn, yes, no] of cases) {
     assert.equal(typeof command[fn], 'function', fn);
@@ -123,9 +124,9 @@ test('command recognisers: canonical + spelling variants are recognised; wrong v
 });
 
 test('no verb is recognised by two different recognisers', () => {
-  const verbs = ['run-test', 'run-probe', 'ping', 'update', 'speedtest', 'diagnose', 'delete', 'install-tool', 'evidence', 'run-discovery'];
+  const verbs = ['run-test', 'run-probe', 'ping', 'update', 'speedtest', 'diagnose', 'delete', 'install-tool', 'evidence', 'run-discovery', 'rekey'];
   for (const v of verbs) {
-    const full = { name: v, probe: { type: 'ping' }, tool: 't', discovery: {} };
+    const full = { name: v, probe: { type: 'ping' }, tool: 't', discovery: {}, publicKey: 'pem' };
     const hits = Object.entries(command).filter(([, fn]) => fn(full)).map(([n]) => n);
     assert.equal(hits.length, 1, `${v} matched ${hits.join(', ')}`);
   }

@@ -22,10 +22,20 @@ function isReleaseKeyConfigured(publicKey) {
   return looksLikePem(publicKey) && !publicKey.includes('REPLACE_WITH_BLUEEYE_AGENT_RELEASE_PUBLIC_KEY');
 }
 
-// Resolves the release public key: BLUEEYE_RELEASE_PUBLIC_KEY (PEM or base64)
-// wins, otherwise the embedded constant. Returns '' when only the placeholder is
-// present, so callers can fail closed on a falsy key.
-function resolveReleasePublicKey(env = process.env) {
+// Resolves the release public key, most recent authority first:
+//   1. the key PINNED ON THIS HOST by an accepted `rekey` command
+//      (<state dir>/release-key.pem — see src/release/keyStore.js). The server
+//      manages an installed agent; when its signing key changes it re-keys the
+//      agent over the command channel, and that decision must survive a restart
+//      even though the unit's environment still carries the old key.
+//   2. BLUEEYE_RELEASE_PUBLIC_KEY (PEM or base64) — what the installer baked in.
+//   3. the embedded constant.
+// Returns '' when only the placeholder is present, so callers fail closed.
+function resolveReleasePublicKey(env = process.env, { pinnedPath = '', readPinned = null } = {}) {
+  if (pinnedPath && typeof readPinned === 'function') {
+    const pinned = readPinned(pinnedPath);
+    if (isReleaseKeyConfigured(pinned)) return pinned;
+  }
   const raw = env.BLUEEYE_RELEASE_PUBLIC_KEY;
   let key = EMBEDDED_RELEASE_PUBLIC_KEY;
   if (raw && raw.trim()) {

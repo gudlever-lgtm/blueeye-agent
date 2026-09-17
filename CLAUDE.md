@@ -25,7 +25,8 @@ See **[codemap.md](codemap.md)** for the module map.
 ## Server‑driven commands (over `/ws/agent`)
 
 `src/runtime.js` handles commands the server pushes: `run-test`, `run-probe`, `ping`
-(liveness ack), `update` (self‑update, systemd only), and `speedtest`. Adding one =
+(liveness ack), `update` (self‑update, systemd only), `rekey` (replace the pinned
+release key — the host has no shell, so key handling is server‑driven), and `speedtest`. Adding one =
 a recognizer in `src/command.js` + a handler in `src/runtime.js` + a `fakeServer`
 endpoint (if it calls back) + tests.
 

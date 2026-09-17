@@ -10,6 +10,7 @@ const DELETE = /^(delete|self[\s_-]?delete|uninstall)$/i;
 const INSTALL_TOOL = /^install[\s_-]?tool$/i;
 const EVIDENCE = /^evidence(?:[\s_-]?snapshot)?$/i;
 const RUN_DISCOVERY = /^(run[\s_-]?discovery|discovery[\s_-]?sweep|sweep)$/i;
+const REKEY = /^(rekey|re[\s_-]?key|rotate[\s_-]?key|repin|re[\s_-]?pin)$/i;
 
 function verbOf(command) {
   if (typeof command === 'string') return command.trim();
@@ -89,4 +90,15 @@ function isRunDiscoveryCommand(command) {
   return RUN_DISCOVERY.test(verbOf(command)) && !!command && typeof command.discovery === 'object' && command.discovery !== null;
 }
 
-module.exports = { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand };
+// Recognises a rekey command: { name: 'rekey', id, auditId, publicKey } — replace
+// the release trust anchor this host pins for signed self-updates. PRIVILEGED
+// (see Command authenticity): when the server can still sign, the command
+// carries a commandSignature made with the key being REPLACED, which is a proper
+// rotation; when it cannot, this is how a fleet whose server lost its signing
+// key is recovered — from the server, because an installed agent has no shell.
+// A command with no `publicKey` is not this command.
+function isRekeyCommand(command) {
+  return REKEY.test(verbOf(command)) && !!command && typeof command.publicKey === 'string' && command.publicKey.trim() !== '';
+}
+
+module.exports = { isRekeyCommand, isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand };

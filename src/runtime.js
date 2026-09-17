@@ -3,7 +3,7 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand, isRekeyCommand } = require('./command');
 const { createScanner, DiscoveryScopeError } = require('./discovery/scanner');
 const { collectLocalCidrs } = require('./localIps');
 const { createEvidenceCollector } = require('./evidenceCollector');
@@ -15,6 +15,7 @@ const { createSelfDeleter } = require('./selfDelete');
 const { createToolInstaller } = require('./toolInstaller');
 const { createActionLog } = require('./actionLog');
 const { resolveReleasePublicKey } = require('./release/publicKey');
+const keyStore = require('./release/keyStore');
 const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
 const { runProbe } = require('./probes');
@@ -94,14 +95,23 @@ function createAgentRuntime({
   toolInstaller = null,
   actionLog = null,
   hsflowdManager = null,
-  // The release trust anchor; injectable for tests. Defaults to the embedded key.
-  releasePublicKey = resolveReleasePublicKey(),
+  // Where a server-sent rekey stores this host's trust anchor (beside the token —
+  // the one directory the agent is guaranteed to be able to write). Injectable.
+  pinnedKeyPath = keyStore.pinnedKeyPath(config && config.tokenPath),
+  keys = keyStore,
+  // The release trust anchor; injectable for tests. A key pinned here by an
+  // accepted rekey wins over the one the installer baked into the environment.
+  releasePublicKey = resolveReleasePublicKey(process.env, { pinnedPath: pinnedKeyPath, readPinned: (f) => keys.readPinnedKey(f) }),
   // Refuse a privileged command (update/delete/install-tool) that carries no
   // server signature. Off by default so an older server keeps working; on, the
   // WebSocket session alone is no longer enough to reconfigure the host.
   strictCommands = requireSignedCommands(),
 }) {
   const emitter = new EventEmitter();
+  // The trust anchor in force RIGHT NOW. Mutable because a `rekey` command
+  // replaces it while the agent runs: the update that follows it must verify
+  // against the new key without waiting for a restart.
+  let pinnedKey = releasePublicKey;
   const updater = selfUpdater || createSelfUpdater({ logger });
   // The deleter must wipe the token the runtime actually uses: tokenPath can be
   // set via the config FILE (not just env), and selfDelete's own default only
@@ -549,7 +559,7 @@ function createAgentRuntime({
   // not run. `names.log` is the local action-log prefix, `names.audit` the
   // server's action name (which is 'upgrade' where the wire says 'update').
   function authorizeCommand(command, names) {
-    const verdict = verifyCommand(command, { publicKey: releasePublicKey, agentId, strict: strictCommands });
+    const verdict = verifyCommand(command, { publicKey: pinnedKey, agentId, strict: strictCommands });
     if (verdict.ok) return true;
     const auditId = command && command.auditId;
     actions.log(`${names.log}.refused`, { reason: verdict.reason });
@@ -590,7 +600,7 @@ function createAgentRuntime({
         expectedSha: command && command.sha256,
         expectedVersion: targetVersion,
         signature: command && command.signature,
-        publicKey: releasePublicKey,
+        publicKey: pinnedKey,
         fetchImpl: effectiveFetch,
       });
       actions.log('update.applied', { version: targetVersion });
@@ -619,6 +629,67 @@ function createAgentRuntime({
       client.send({ type: 'command-result', id: command && command.id, ok: false, error: err.message });
       if (auditId != null) client.send({ type: 'action-result', auditId, action: 'upgrade', ok: false, detail: err.message });
       emitter.emit('update-error', err);
+    }
+  }
+
+  // Handles a server "rekey" command: replace the release trust anchor this host
+  // pins for signed self-updates, and keep it across restarts.
+  //
+  // Why the server may do this at all. The anchor is what stops a compromised
+  // server pushing code this agent would run — but the agent took it from that
+  // same server at install time (trust-on-first-use), and the same channel
+  // already carries `delete`, which removes the agent outright. So accepting a
+  // rekey over the authenticated link is no weaker than what is already
+  // accepted there, and it is the only way to recover a fleet whose server lost
+  // its signing key: there is no shell on these hosts. When the server CAN still
+  // sign, the command carries a commandSignature made with the key being
+  // replaced — a proper rotation, verified by authorizeCommand below — and
+  // BLUEEYE_REQUIRE_SIGNED_COMMANDS=1 makes that mandatory.
+  //
+  // Not a restart: the new anchor is applied in memory, so the update that
+  // usually follows it verifies immediately, and monitoring never stops.
+  async function handleRekey(command) {
+    if (!authorizeCommand(command, { log: 'rekey', audit: 'rekey' })) return;
+    const auditId = command && command.auditId;
+    const parsed = keys.validatePublicKey(command && command.publicKey);
+    if (!parsed.ok) {
+      const reason = `refusing rekey: ${parsed.reason}`;
+      actions.log('rekey.refused', { reason: parsed.reason });
+      logger.error(reason);
+      client.send({ type: 'ack', id: command && command.id, accepted: false, reason });
+      client.send({ type: 'command-result', id: command && command.id, ok: false, error: reason });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'rekey', ok: false, detail: reason });
+      emitter.emit('rekey-error', new Error(reason));
+      return;
+    }
+    client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: capabilities.managed || 'unmanaged' });
+    if (pinnedKey && pinnedKey.trim() === parsed.pem.trim()) {
+      // Already the key we trust: report it and touch nothing.
+      actions.log('rekey.unchanged', { fingerprint: parsed.fingerprint });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'rekey', ok: true, detail: `unchanged (${parsed.fingerprint.slice(0, 12)}…)` });
+      emitter.emit('rekeyed', { fingerprint: parsed.fingerprint, changed: false });
+      return;
+    }
+    try {
+      keys.writePinnedKey(pinnedKeyPath, parsed.pem);
+      pinnedKey = parsed.pem;
+      // Best-effort: keep the unit's environment in step, so the key a person
+      // reads in the unit is the key the agent uses. A failure here is not a
+      // failed rekey — the stored file is what the agent reads at startup.
+      const unit = keys.syncSystemdDropIn(parsed.pem);
+      actions.log('rekey.applied', { fingerprint: parsed.fingerprint, unit: unit.ok ? unit.path : null, unitReason: unit.ok ? null : unit.reason });
+      logger.warn(`Release trust anchor replaced by the server (sha256 ${parsed.fingerprint.slice(0, 12)}…)${unit.ok ? '' : ` — systemd drop-in not updated: ${unit.reason}`}`);
+      if (auditId != null) {
+        client.send({ type: 'action-result', auditId, action: 'rekey', ok: true, detail: `pinned ${parsed.fingerprint.slice(0, 12)}…` });
+      }
+      client.send({ type: 'command-result', id: command && command.id, ok: true, fingerprint: parsed.fingerprint });
+      emitter.emit('rekeyed', { fingerprint: parsed.fingerprint, changed: true });
+    } catch (err) {
+      actions.log('rekey.failed', { error: err.message });
+      logger.error(`Rekey failed: ${err.message}`);
+      client.send({ type: 'command-result', id: command && command.id, ok: false, error: err.message });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'rekey', ok: false, detail: err.message });
+      emitter.emit('rekey-error', err);
     }
   }
 
@@ -758,12 +829,12 @@ function createAgentRuntime({
   async function handleEvidence(command) {
     // Defense in depth: if the command is signed AND we have the pinned key, it
     // MUST verify or we refuse the whole snapshot (fail closed).
-    if (command && command.signature && releasePublicKey) {
+    if (command && command.signature && pinnedKey) {
       const payload = {
         name: command.name, snapshotId: command.snapshotId, clusterId: command.clusterId,
         commandSetVersion: command.commandSetVersion, items: command.items,
       };
-      if (!verifyManifest(payload, command.signature, releasePublicKey)) {
+      if (!verifyManifest(payload, command.signature, pinnedKey)) {
         actions.log('evidence.refused', { reason: 'bad-signature', snapshotId: command.snapshotId });
         client.send({ type: 'command-result', id: command.id, ok: false, error: 'evidence command signature verification failed' });
         return;
@@ -794,6 +865,11 @@ function createAgentRuntime({
     }
     if (isUpdateCommand(command)) {
       await handleUpdate(command);
+      return;
+    }
+    if (isRekeyCommand(command)) {
+      logger.info('Received rekey command; replacing the release trust anchor.');
+      await handleRekey(command);
       return;
     }
     if (isDeleteCommand(command)) {
