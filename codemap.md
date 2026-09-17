@@ -178,6 +178,15 @@ Server → agent commands ([`command.js`](src/command.js)):
   report back via `action-result`. The tool is checked against the agent's OWN allowlist in
   [`toolInstaller.js`](src/toolInstaller.js) (apt/dnf/yum/zypper/apk/pacman) — the agent never
   installs an arbitrary package the server names. Docker-managed agents decline.
+- **update** (PRIVILEGED) → download the release the server named
+  ([`selfUpdate.js`](src/selfUpdate.js)): a SIGNED one is verified against the pinned
+  release key (Ed25519 over the manifest + sha256 + version, fail-closed), a legacy
+  source bundle against its sha256 only; then extract (tar-slip + link members refused),
+  `npm ci --omit=dev`, atomically repoint `current`, and ask systemd to restart. **The
+  restart is checked**: when it fails the new code is on disk but this old process is
+  still the one running, so the agent reports the action FAILED with
+  `run: systemctl restart …` rather than a success whose version never changes. systemd
+  only — docker/unmanaged decline.
 - **run-discovery** (`run[\s_-]?discovery|discovery[\s_-]?sweep|sweep` + a `discovery` object
   `{ cidrs?, ports?, rateLimit?, addressCap?, requestId? }`) → sweep the CIDR scope from THIS
   agent's vantage (empty `cidrs` ⇒ the agent's own subnet via `localIps.collectLocalCidrs`),
