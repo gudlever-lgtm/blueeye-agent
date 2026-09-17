@@ -187,6 +187,16 @@ Server → agent commands ([`command.js`](src/command.js)):
   still the one running, so the agent reports the action FAILED with
   `run: systemctl restart …` rather than a success whose version never changes. systemd
   only — docker/unmanaged decline.
+- **rekey** (`rekey|re-key|rotate-key|re-pin` + a `publicKey` string; PRIVILEGED) → replace the
+  release trust anchor this host pins ([`release/keyStore.js`](src/release/keyStore.js)).
+  The anchor is baked in at install time, so an agent whose server changed its signing
+  key refuses every update it can produce — and there is no shell on these hosts, they
+  are managed from the server. The new key is validated as Ed25519, stored beside the
+  token (`release-key.pem`, which outranks `BLUEEYE_RELEASE_PUBLIC_KEY` at startup),
+  mirrored into the systemd drop-in best-effort, and applied **in memory** so the update
+  that follows needs no restart. When the server can still sign, the command carries a
+  `commandSignature` made with the key being replaced — a proper rotation, and the only
+  form `BLUEEYE_REQUIRE_SIGNED_COMMANDS=1` accepts.
 - **run-discovery** (`run[\s_-]?discovery|discovery[\s_-]?sweep|sweep` + a `discovery` object
   `{ cidrs?, ports?, rateLimit?, addressCap?, requestId? }`) → sweep the CIDR scope from THIS
   agent's vantage (empty `cidrs` ⇒ the agent's own subnet via `localIps.collectLocalCidrs`),
@@ -219,6 +229,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | `BLUEEYE_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` ([`logger.js`](src/logger.js)) |
 | `BLUEEYE_REQUIRE_SIGNED_COMMANDS` | off | refuse an unsigned `update`/`delete`/`install-tool` ([`commandAuth.js`](src/commandAuth.js)) |
 | `BLUEEYE_REQUIRE_SIGNED_UPDATES` | off | refuse an unsigned release ([`selfUpdate.js`](src/selfUpdate.js)) |
+| `BLUEEYE_RELEASE_PUBLIC_KEY` | (installer) | the pinned release anchor. A `rekey` accepted from the server stores one in `release-key.pem` beside the token, and THAT wins ([`release/keyStore.js`](src/release/keyStore.js)) |
 
 ## Error & fatal model
 
