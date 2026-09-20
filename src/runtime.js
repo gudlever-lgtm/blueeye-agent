@@ -10,12 +10,14 @@ const { createEvidenceCollector } = require('./evidenceCollector');
 const { verifyManifest } = require('./release/verifyManifest');
 const fs = require('fs');
 const { createSelfUpdater } = require('./selfUpdate');
-const { verifyCommand, requireSignedCommands } = require('./commandAuth');
+const { verifyCommand, requireSignedCommands, allowUnsignedRekey: allowUnsignedRekeyEnv } = require('./commandAuth');
 const { createSelfDeleter } = require('./selfDelete');
 const { createToolInstaller } = require('./toolInstaller');
 const { createActionLog } = require('./actionLog');
 const { resolveReleasePublicKey } = require('./release/publicKey');
 const keyStore = require('./release/keyStore');
+const releaseGuard = require('./release/releaseGuard');
+const { verifyTrustProof } = require('./license/trustProof');
 const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
 const { runProbe } = require('./probes');
@@ -116,13 +118,26 @@ function createAgentRuntime({
   // the one directory the agent is guaranteed to be able to write). Injectable.
   pinnedKeyPath = keyStore.pinnedKeyPath(config && config.tokenPath),
   keys = keyStore,
+  // Blue/green layout + the guard that rolls a release back when it never
+  // proves itself. Injectable so tests can point them at a scratch directory.
+  releasesDir = process.env.BLUEEYE_RELEASES_DIR || '',
+  guard = releaseGuard,
+  confirmReleaseAfterMs = releaseGuard.DEFAULT_CONFIRM_MS,
   // The release trust anchor; injectable for tests. A key pinned here by an
   // accepted rekey wins over the one the installer baked into the environment.
   releasePublicKey = resolveReleasePublicKey(process.env, { pinnedPath: pinnedKeyPath, readPinned: (f) => keys.readPinnedKey(f) }),
   // Refuse a privileged command (update/delete/install-tool) that carries no
-  // server signature. Off by default so an older server keeps working; on, the
-  // WebSocket session alone is no longer enough to reconfigure the host.
-  strictCommands = requireSignedCommands(),
+  // server signature. DEFAULTS ON wherever a release key is pinned — that agent
+  // can check a signature and its server can make one, so accepting an unsigned
+  // command would mean the WebSocket session alone is enough to reconfigure the
+  // host. An agent with no key pinned stays lenient (nothing could verify
+  // anything), and BLUEEYE_REQUIRE_SIGNED_COMMANDS overrides either way.
+  strictCommands = requireSignedCommands(process.env, { publicKey: releasePublicKey }),
+  // Break-glass: allow an UNSIGNED rekey to replace a trust anchor this host
+  // already holds. Off by default — see the long note in src/commandAuth.js for
+  // why rekey does not follow strictCommands' lenient default. Setting it needs
+  // access to the host, which is the authority re-anchoring trust deserves.
+  allowUnsignedRekey = allowUnsignedRekeyEnv(),
 }) {
   const emitter = new EventEmitter();
   // The trust anchor in force RIGHT NOW. Mutable because a `rekey` command
@@ -779,7 +794,29 @@ function createAgentRuntime({
       try { txManager.flush(); } catch (err) { logger.warn(`Transaction flush failed: ${err.message}`); }
     }
   });
-  client.on('connected', (m) => emitter.emit('connected', m));
+  // Confirming an update is the agent's job, and "connected" alone is not
+  // enough: a release that comes up, connects and then dies on its first real
+  // work would confirm the very thing killing it. So the timer starts on the
+  // first connection and only a connection that HOLDS clears the marker. Until
+  // it does, the release guard counts this release's starts and rolls back.
+  let confirmTimer = null;
+  function armReleaseConfirmation() {
+    if (confirmTimer || !releasesDir) return;
+    const pending = guard.readPending(releasesDir);
+    if (!pending) return; // no update waiting to prove itself
+    logger.info(`Release ${pending.version} is unproven (start ${pending.attempts}); confirming after ${Math.round(confirmReleaseAfterMs / 1000)}s connected.`);
+    confirmTimer = setTimeout(() => {
+      confirmTimer = null;
+      if (guard.confirmRelease(releasesDir)) {
+        actions.log('update.confirmed', { version: pending.version });
+        logger.info(`Release ${pending.version} confirmed — it held a server connection.`);
+        emitter.emit('release-confirmed', pending);
+      }
+    }, confirmReleaseAfterMs);
+    if (typeof confirmTimer.unref === 'function') confirmTimer.unref();
+  }
+
+  client.on('connected', (m) => { armReleaseConfirmation(); emitter.emit('connected', m); });
   client.on('close', (code) => emitter.emit('close', code));
   // A WS-origin fatal (e.g. 401 handshake) must fully shut the runtime down too
   // — stop reporting + mark fatal — not just re-emit, so no timers linger.
@@ -862,7 +899,15 @@ function createAgentRuntime({
   // not run. `names.log` is the local action-log prefix, `names.audit` the
   // server's action name (which is 'upgrade' where the wire says 'update').
   function authorizeCommand(command, names) {
-    const verdict = verifyCommand(command, { publicKey: pinnedKey, agentId, strict: strictCommands });
+    // `rekey` does not follow the lenient default — it replaces the trust
+    // anchor every later signature is checked against. See src/commandAuth.js.
+    const verdict = verifyCommand(command, {
+      publicKey: pinnedKey,
+      agentId,
+      strict: strictCommands,
+      isRekey: names.log === 'rekey',
+      allowUnsignedRekeyOverride: allowUnsignedRekey,
+    });
     if (verdict.ok) return true;
     const auditId = command && command.auditId;
     actions.log(`${names.log}.refused`, { reason: verdict.reason });
@@ -951,9 +996,78 @@ function createAgentRuntime({
   //
   // Not a restart: the new anchor is applied in memory, so the update that
   // usually follows it verifies immediately, and monitoring never stops.
+  // Records what the vendor authorised, which also LATCHES this agent: from
+  // here on a rekey without a vendor authorisation is refused. Best-effort on
+  // the write — a failure means the latch is not yet set, which only ever asks
+  // for more proof later, never less.
+  function recordVendorTrust(verdict) {
+    keys.writeTrustState(pinnedKeyPath, {
+      sequence: verdict.sequence,
+      licenseId: verdict.licenseId,
+      customerId: verdict.customerId,
+      fingerprint: verdict.fingerprint,
+    });
+  }
+
   async function handleRekey(command) {
-    if (!authorizeCommand(command, { log: 'rekey', audit: 'rekey' })) return;
     const auditId = command && command.auditId;
+
+    // What this host has already accepted from the vendor. `vendorRooted` is a
+    // one-way latch: once a vendor-authorised key has been accepted here,
+    // nothing else is ever accepted again, and no server can clear it.
+    const trustState = keys.readTrustState(pinnedKeyPath);
+
+    // The vendor's authorisation, if the server sent one. This is the ONLY
+    // check that can accept a key this agent has never seen: the signature is
+    // the vendor's, over bytes the server can neither forge nor edit, so a
+    // server that has been taken over cannot manufacture one.
+    let vendor = null;
+    if (command && command.vendorProof) {
+      const verdict = verifyTrustProof({
+        proof: command.vendorProof,
+        offeredKey: command.publicKey,
+        expected: {
+          licenseId: trustState.licenseId,
+          customerId: trustState.customerId,
+          sequence: trustState.sequence,
+        },
+      });
+      if (!verdict.ok) {
+        // Fail closed and say which step failed — these codes are what an
+        // operator reads when a rekey does not land.
+        const reason = `refusing rekey: ${verdict.code} — ${verdict.detail}`;
+        actions.log('rekey.refused', { code: verdict.code, reason: verdict.detail });
+        logger.error(reason);
+        client.send({ type: 'ack', id: command && command.id, accepted: false, reason });
+        client.send({ type: 'command-result', id: command && command.id, ok: false, error: reason });
+        if (auditId != null) client.send({ type: 'action-result', auditId, action: 'rekey', ok: false, detail: reason });
+        emitter.emit('rekey-error', new Error(reason));
+        return;
+      }
+      vendor = verdict;
+    } else if (trustState.vendorRooted) {
+      // Latched. A rekey signed with the key being replaced was the migration
+      // path; once the vendor has spoken for this host, that path is closed —
+      // otherwise an attacker who obtained the old private key could still
+      // re-anchor the fleet.
+      const reason = 'refusing rekey: this agent requires a vendor-signed authorisation, and the command carried none. '
+        + 'The server must obtain a licence proof authorising this key (its administrator generates the key, '
+        + 'the vendor approves the fingerprint) before the fleet will accept it.';
+      actions.log('rekey.refused', { code: 'LICENSE_PROOF_INVALID', reason: 'no vendor proof' });
+      logger.error(reason);
+      client.send({ type: 'ack', id: command && command.id, accepted: false, reason });
+      client.send({ type: 'command-result', id: command && command.id, ok: false, error: reason });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'rekey', ok: false, detail: reason });
+      emitter.emit('rekey-error', new Error(reason));
+      return;
+    }
+
+    // A vendor authorisation stands on its own: it proves more than a signature
+    // made with the key being replaced ever could, and requiring both would
+    // make the one case this exists for — recovering a fleet whose server lost
+    // its signing key — impossible again. Without one, the old rules apply.
+    if (!vendor && !authorizeCommand(command, { log: 'rekey', audit: 'rekey' })) return;
+
     const parsed = keys.validatePublicKey(command && command.publicKey);
     if (!parsed.ok) {
       const reason = `refusing rekey: ${parsed.reason}`;
@@ -967,7 +1081,10 @@ function createAgentRuntime({
     }
     client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: capabilities.managed || 'unmanaged' });
     if (pinnedKey && pinnedKey.trim() === parsed.pem.trim()) {
-      // Already the key we trust: report it and touch nothing.
+      // Already the key we trust. Still record the authorisation: a re-sent
+      // proof with a HIGHER sequence is how the anti-rollback floor rises
+      // without the key itself changing.
+      if (vendor) recordVendorTrust(vendor);
       actions.log('rekey.unchanged', { fingerprint: parsed.fingerprint });
       if (auditId != null) client.send({ type: 'action-result', auditId, action: 'rekey', ok: true, detail: `unchanged (${parsed.fingerprint.slice(0, 12)}…)` });
       emitter.emit('rekeyed', { fingerprint: parsed.fingerprint, changed: false });
@@ -980,8 +1097,18 @@ function createAgentRuntime({
       // reads in the unit is the key the agent uses. A failure here is not a
       // failed rekey — the stored file is what the agent reads at startup.
       const unit = keys.syncSystemdDropIn(parsed.pem);
-      actions.log('rekey.applied', { fingerprint: parsed.fingerprint, unit: unit.ok ? unit.path : null, unitReason: unit.ok ? null : unit.reason });
-      logger.warn(`Release trust anchor replaced by the server (sha256 ${parsed.fingerprint.slice(0, 12)}…)${unit.ok ? '' : ` — systemd drop-in not updated: ${unit.reason}`}`);
+      // Written AFTER the key, so a crash between the two leaves the agent
+      // asking for more proof next time, never less.
+      if (vendor) recordVendorTrust(vendor);
+      actions.log('rekey.applied', {
+        fingerprint: parsed.fingerprint,
+        vendor: vendor ? { sequence: vendor.sequence, license: vendor.licenseId } : null,
+        unit: unit.ok ? unit.path : null,
+        unitReason: unit.ok ? null : unit.reason,
+      });
+      logger.warn(`AGENT_TRUST_ACCEPTED: release anchor replaced (sha256 ${parsed.fingerprint.slice(0, 12)}…)`
+        + `${vendor ? `, vendor-authorised seq ${vendor.sequence}` : ' (no vendor authorisation — legacy path)'}`
+        + `${unit.ok ? '' : ` — systemd drop-in not updated: ${unit.reason}`}`);
       if (auditId != null) {
         client.send({ type: 'action-result', auditId, action: 'rekey', ok: true, detail: `pinned ${parsed.fingerprint.slice(0, 12)}…` });
       }
@@ -1153,7 +1280,40 @@ function createAgentRuntime({
     emitter.emit('evidence-captured', { snapshotId: command && command.snapshotId, items });
   }
 
-  client.on('command', async (command) => {
+  // The dispatcher below is `async`, and an async listener on an EventEmitter
+  // has nowhere to put a rejection: it becomes an unhandled rejection, which on
+  // a bare Node process is an exit. One handler that forgets an internal
+  // try/catch would therefore take the whole agent down — from a host where
+  // nobody is watching, so the only symptom is a gap in the data.
+  //
+  // dispatchCommand() holds the routing; this wrapper owns the failure. A
+  // handler that throws costs its own command an error reply, not the agent.
+  client.on('command', (command) => {
+    Promise.resolve()
+      .then(() => dispatchCommand(command))
+      .catch((err) => {
+        logger.error(`Command handler failed: ${err && err.message}`);
+        // Just enough to name the command in the local trail. Deliberately not
+        // command.js's verbOf(): that module's exports are swept by the gate as
+        // the recogniser set, and a parser is not a recogniser.
+        const verb = (command && typeof command === 'object' && (command.name || command.action || command.type))
+          || (typeof command === 'string' ? command : '')
+          || 'unknown';
+        actions.log('command.failed', { verb: String(verb).slice(0, 48), reason: err && err.message });
+        // Tell the server, so the dashboard shows a failed action instead of a
+        // request that silently never completed. Best-effort: the socket may be
+        // exactly what just broke.
+        try {
+          client.send({ type: 'command-result', id: command && command.id, ok: false, error: `handler failed: ${err && err.message}` });
+          if (command && command.auditId != null) {
+            client.send({ type: 'action-result', auditId: command.auditId, ok: false, detail: `handler failed: ${err && err.message}` });
+          }
+        } catch { /* the channel is gone; the log above is the record */ }
+        emitter.emit('command-failed', { command, error: err });
+      });
+  });
+
+  async function dispatchCommand(command) {
     if (isPingCommand(command)) {
       handlePing(command);
       return;
@@ -1226,7 +1386,7 @@ function createAgentRuntime({
     }
     logger.info('Received run-test command; measuring traffic...');
     await runAndSubmit(command, 'command');
-  });
+  }
 
   return {
     agentId,
@@ -1256,6 +1416,7 @@ function createAgentRuntime({
       })();
     },
     stop() {
+      if (confirmTimer) { clearTimeout(confirmTimer); confirmTimer = null; }
       stopReporting();
       stopScheduledProbes();
       stopSyslog();

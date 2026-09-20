@@ -197,3 +197,41 @@ test('an update signed for a DIFFERENT agent is refused without touching the upd
     await server.close();
   }
 });
+
+test('signatures are required wherever a key is pinned, and only there', () => {
+  // The default is derived, not fixed: an agent that pins a key can check a
+  // signature and its server can make one, so an unsigned privileged command is
+  // refused. An agent with no key could not verify anything, so refusing there
+  // would only brick provisioning.
+  assert.equal(requireSignedCommands({}, { publicKey: 'pem' }), true);
+  assert.equal(requireSignedCommands({}, { publicKey: '' }), false);
+  assert.equal(requireSignedCommands({}), false);
+
+  // Both directions stay overridable — a deployment whose server genuinely
+  // cannot sign yet needs a way to keep managing its fleet while it fixes that.
+  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: '0' }, { publicKey: 'pem' }), false);
+  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: 'off' }, { publicKey: 'pem' }), false);
+  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: '1' }, { publicKey: '' }), true);
+  // Anything unrecognised falls back to the derived default rather than
+  // guessing — a typo in a unit file must not quietly disable a check.
+  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: 'maybe' }, { publicKey: 'pem' }), true);
+});
+
+test('the host-side rekey break-glass survives strict mode', () => {
+  // It is checked first on purpose: strict mode is now on by default wherever a
+  // key is pinned, and checking the override second would take the escape hatch
+  // away exactly when it is needed — a server that can sign nothing at all.
+  const verdict = verifyCommand(
+    { name: 'rekey', publicKey: 'x' },
+    { publicKey: 'pinned', strict: true, isRekey: true, allowUnsignedRekeyOverride: true }
+  );
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.signed, false);
+
+  // Without the override it is refused, as everything unsigned is.
+  const refused = verifyCommand(
+    { name: 'rekey', publicKey: 'x' },
+    { publicKey: 'pinned', strict: true, isRekey: true, allowUnsignedRekeyOverride: false }
+  );
+  assert.equal(refused.ok, false);
+});

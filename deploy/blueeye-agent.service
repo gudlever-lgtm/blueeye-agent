@@ -3,8 +3,10 @@ Description=BlueEyes monitoring agent
 Documentation=https://github.com/gudlever-lgtm/blueeye-agent
 After=network-online.target
 Wants=network-online.target
-# A burst of fast restarts (e.g. a bad release) is visible via `systemctl status`;
-# with the kept previous release, selfUpdate.rollback() restores the prior version.
+# A burst of fast restarts (e.g. a bad release) is visible via `systemctl status`.
+# ExecStartPre below acts before the limit is reached: after 3 starts without the
+# agent confirming the release (it deletes releases/.pending once it has held a
+# server connection), `current` is repointed at the previous release.
 StartLimitIntervalSec=120
 StartLimitBurst=5
 
@@ -17,6 +19,11 @@ Type=simple
 WorkingDirectory=/opt/blueeye-agent/current
 # Run from the `current` symlink so a signed update can ATOMICALLY swap the
 # release underneath without rewriting a live tree.
+# Roll back a release that never confirmed itself. The guard is plain sh living
+# OUTSIDE releases/, so a release too broken for Node to parse is still
+# recoverable; the agent installs/refreshes it on startup (src/release/
+# releaseGuard.js). The leading '-' means a missing guard never blocks a start.
+ExecStartPre=-/bin/sh /opt/blueeye-agent/bin/release-guard.sh /opt/blueeye-agent/releases /opt/blueeye-agent/current 3
 ExecStart=/usr/bin/node /opt/blueeye-agent/current/src/index.js
 Restart=on-failure
 RestartSec=5
@@ -32,6 +39,28 @@ Environment=BLUEEYE_AGENT_CONFIG=/var/lib/blueeye-agent/config.json
 Environment=BLUEEYE_ACTION_LOG=/var/log/blueeye-agent/actions.log
 Environment=BLUEEYE_RELEASES_DIR=/opt/blueeye-agent/releases
 Environment=BLUEEYE_CURRENT_LINK=/opt/blueeye-agent/current
+
+# Command authenticity. Without these, a privileged push (update / delete /
+# install-tool) is authenticated ONLY by the WebSocket session: anything holding
+# this agent's socket can reconfigure or wipe the host. With them, the server
+# must also sign the command with the release key this agent pins, so the agent
+# can tell "the server asked" from "something holding a socket asked".
+#
+# Commented out rather than on, because turning them on against a server that
+# has no managed signing key yet stops one-click updates working — and an agent
+# in the field cannot be un-stuck without host access. Turn them on once
+# Settings → Updates shows a signing key, which is also when the server starts
+# signing automatically (services/commandSigner.js). The `rekey` command is
+# strict regardless; it does not need a flag, because it is the one command that
+# replaces what every later signature is checked against.
+#Environment=BLUEEYE_REQUIRE_SIGNED_COMMANDS=1
+#Environment=BLUEEYE_REQUIRE_SIGNED_UPDATES=1
+
+# Break-glass ONLY: lets an unsigned `rekey` replace a trust anchor this host
+# already holds. Needed exactly once, on a fleet whose server lost its signing
+# key and therefore cannot sign the rotation. Leave it off; remove it again
+# after the recovery. See src/commandAuth.js.
+#Environment=BLUEEYE_ALLOW_UNSIGNED_REKEY=1
 
 # Sandboxing. The service runs as root (see above), so these bound what a bug —
 # or a server that pushes something it shouldn't — can reach from inside the

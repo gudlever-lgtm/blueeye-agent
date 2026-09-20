@@ -163,8 +163,8 @@ What the agent calls on **blueeye-server** (mirrored by the fake server):
 ### Command authenticity ([`commandAuth.js`](src/commandAuth.js))
 
 A command is normally trusted because it arrived on the authenticated WebSocket.
-For the three **privileged** ones — `update`, `delete`, `install-tool` — that puts
-the whole host on the server never being wrong, so they may carry a
+For the **privileged** ones — `update`, `delete`, `install-tool`, `rekey` — that
+puts the whole host on the server never being wrong, so they may carry a
 `commandSignature`: an Ed25519 signature (over `agentId` + `issuedAt` + every
 other field except the transport `id`) made with the same release key the agent
 already pins. Verification is fail-closed — a signature that does not check out,
@@ -172,6 +172,15 @@ names another agent, or is older than ±5 min is refused without running the
 action. `BLUEEYE_REQUIRE_SIGNED_COMMANDS=1` additionally refuses UNSIGNED
 privileged commands. Note `update.signature` is a different thing: it signs the
 release manifest (the payload), not the instruction.
+
+**`rekey` does not follow that lenient default.** The other three are bounded —
+a `delete` is visible in the fleet list, an `update` still verifies the release
+manifest separately — but a rekey replaces the anchor every LATER signature is
+checked against, so an unsigned one turns one moment of socket access into
+permanent, silent code execution. When this agent already holds a key, an
+unsigned rekey is refused; a legitimate rotation is signed with the key being
+replaced. `BLUEEYE_ALLOW_UNSIGNED_REKEY=1` is the break-glass for a fleet whose
+server lost its signing key, and setting it needs access to the host.
 
 Server → agent commands ([`command.js`](src/command.js)):
 - **run-test** (`run[\s_-]?test`) → measure traffic + system, `POST /agents/results`.
@@ -191,7 +200,8 @@ Server → agent commands ([`command.js`](src/command.js)):
   still the one running, so the agent reports the action FAILED with
   `run: systemctl restart …` rather than a success whose version never changes. systemd
   only — docker/unmanaged decline.
-- **rekey** (`rekey|re-key|rotate-key|re-pin` + a `publicKey` string; PRIVILEGED) → replace the
+- **rekey** (`rekey|re-key|rotate-key|re-pin` + a `publicKey` string, plus a `vendorProof`
+  where the trust chain is in force; PRIVILEGED) → replace the
   release trust anchor this host pins ([`release/keyStore.js`](src/release/keyStore.js)).
   The anchor is baked in at install time, so an agent whose server changed its signing
   key refuses every update it can produce — and there is no shell on these hosts, they
@@ -201,6 +211,25 @@ Server → agent commands ([`command.js`](src/command.js)):
   that follows needs no restart. When the server can still sign, the command carries a
   `commandSignature` made with the key being replaced — a proper rotation, and the only
   form `BLUEEYE_REQUIRE_SIGNED_COMMANDS=1` accepts.
+- A release the agent cannot start is rolled back ([`release/releaseGuard.js`](src/release/releaseGuard.js)).
+  `atomicInstall` marks the new release unproven (`releases/.pending`) while the OLD,
+  known-good process is still running; the new agent deletes the marker only after it has
+  HELD a server connection for a minute — "the process started" is not proof. A plain `sh`
+  guard living outside the swappable tree (`bin/release-guard.sh`, run by systemd as
+  `ExecStartPre`, installed by the agent itself on startup) counts the starts and repoints
+  `current` at the previous release when they run out. It is not Node on purpose: the
+  failure it recovers from is a release Node cannot even parse.
+- **Who decides which key this agent trusts** ([`license/trustProof.js`](src/license/trustProof.js)).
+  Not the server. The vendor's public key is embedded here
+  ([`license/vendorRoot.js`](src/license/vendorRoot.js), the same key blueeye-server embeds),
+  and a rekey is accepted when the vendor-signed licence proof the server relays names the
+  fingerprint of the key being offered. Every step fails closed: signature, customer/licence
+  binding, `valid_until`, monotonic `sequence` (anti-rollback), then
+  `fingerprint(offered) == fingerprint(authorised)`. A server that has been taken over can
+  send anything; it cannot produce that signature. Accepting one LATCHES this host
+  (`release-trust.json`): from then on nothing but a vendor authorisation is accepted, and
+  no server can clear the latch. Until the first one arrives, a rekey signed with the key
+  being replaced still works — that is the migration path, not a fallback.
 - **run-discovery** (`run[\s_-]?discovery|discovery[\s_-]?sweep|sweep` + a `discovery` object
   `{ cidrs?, ports?, rateLimit?, addressCap?, requestId? }`) → sweep the CIDR scope from THIS
   agent's vantage (empty `cidrs` ⇒ the agent's own subnet via `localIps.collectLocalCidrs`),
@@ -244,8 +273,10 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | `BLUEEYE_REPORT_INTERVAL_MS` | `60000` | continuous-report cadence (`0` disables) |
 | `BLUEEYE_REPORT_SAMPLE_MS` | `1000` | sampling window per measurement |
 | `BLUEEYE_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` ([`logger.js`](src/logger.js)) |
-| `BLUEEYE_REQUIRE_SIGNED_COMMANDS` | off | refuse an unsigned `update`/`delete`/`install-tool` ([`commandAuth.js`](src/commandAuth.js)) |
+| `BLUEEYE_REQUIRE_SIGNED_COMMANDS` | **on where a key is pinned** | refuse an unsigned `update`/`delete`/`install-tool`. Derived, not fixed: an agent with a key can verify and its server can sign, so leniency is left only where nothing could be checked. `=0` opts out ([`commandAuth.js`](src/commandAuth.js)) |
+| `BLUEEYE_VENDOR_ROOT_PUBLIC_KEY` | (embedded) | the vendor trust anchor. Dev/test override only — production ignores it without `BLUEEYE_TRUST_ANCHOR_OVERRIDE_ACK` ([`license/vendorRoot.js`](src/license/vendorRoot.js)) |
 | `BLUEEYE_REQUIRE_SIGNED_UPDATES` | off | refuse an unsigned release ([`selfUpdate.js`](src/selfUpdate.js)) |
+| `BLUEEYE_ALLOW_UNSIGNED_REKEY` | off | break-glass: let an UNSIGNED `rekey` replace an anchor this host already holds. Needed only to recover a fleet whose server lost its signing key ([`commandAuth.js`](src/commandAuth.js)) |
 | `BLUEEYE_RELEASE_PUBLIC_KEY` | (installer) | the pinned release anchor. A `rekey` accepted from the server stores one in `release-key.pem` beside the token, and THAT wins ([`release/keyStore.js`](src/release/keyStore.js)) |
 
 ## Error & fatal model
@@ -280,7 +311,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 
 | Concern | Files |
 | --- | --- |
-| Lifecycle / wiring | [`index.js`](src/index.js), [`runtime.js`](src/runtime.js), [`bootstrap.js`](src/bootstrap.js), [`shutdown.js`](src/shutdown.js) |
+| Lifecycle / wiring | [`index.js`](src/index.js), [`runtime.js`](src/runtime.js), [`bootstrap.js`](src/bootstrap.js), [`shutdown.js`](src/shutdown.js), [`lib/crashGuard.js`](src/lib/crashGuard.js) — the last-resort process guards: an unhandled rejection is logged and survived (this agent is full of deliberately best-effort collectors, and dying on one stops reporting from a host nobody is watching), an uncaught exception stops the runtime and exits non-zero so systemd restarts clean |
 | Connection self-test | [`doctor.js`](src/doctor.js) — `blueeye-agent doctor`: config→token→DNS→TCP→HTTP→auth→WebSocket, each failure with a fix suggestion (run post-install / on an offline agent) |
 | Scheme self-heal | [`serverUrl.js`](src/serverUrl.js) — `resolveEffectiveServerUrl`: if an http:// server redirects to https on the same host, adopt it at boot so WS uses wss:// and REST keeps its auth header (index.js, before the runtime) |
 | Identity / config | [`config.js`](src/config.js), [`system.js`](src/system.js), [`tokenStore.js`](src/tokenStore.js), [`enroll.js`](src/enroll.js), [`capabilities.js`](src/capabilities.js), [`nicInfo.js`](src/nicInfo.js) |

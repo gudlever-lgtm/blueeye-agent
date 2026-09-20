@@ -10,6 +10,8 @@ const { parseArgs, runEnroll, USAGE } = require('./cli');
 const { makePinnedFetch } = require('./httpsClient');
 const { resolveEffectiveServerUrl } = require('./serverUrl');
 const { closeNetworkHandles } = require('./shutdown');
+const { installCrashGuards } = require('./lib/crashGuard');
+const releaseGuard = require('./release/releaseGuard');
 
 // Exit cleanly on every platform.
 //
@@ -114,6 +116,16 @@ async function main() {
     return;
   }
 
+  // Install the release guard before anything else can go wrong. It is a plain
+  // `sh` script outside the swappable release tree, run by systemd as
+  // ExecStartPre, that rolls `current` back when a release never confirms
+  // itself. Every agent in the field predates it, so the agent installs it
+  // itself rather than waiting for a re-install. Best-effort: no systemd, no
+  // root or no blue/green layout simply means no guard.
+  const guardState = releaseGuard.ensureInstalled({});
+  if (guardState.changed) logger.info('Release guard installed (rolls back an update that never comes up).');
+  else if (!guardState.ok) logger.warn(`Release guard not installed: ${guardState.reason}`);
+
   const runtime = createAgentRuntime({
     config,
     token: credentials.token,
@@ -137,6 +149,19 @@ async function main() {
   }
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // Last-resort guards, installed once the runtime exists so the fatal path can
+  // stop its timers and close its sockets. An agent that exits on a stray
+  // promise rejection stops reporting from a host nobody is looking at — the
+  // failure is invisible until someone notices the gap in the data — so a
+  // rejection is logged and survived. An uncaught exception still exits(1):
+  // systemd restarts the unit, and a restarted agent re-enrols nothing and
+  // simply reconnects. See src/lib/crashGuard.js.
+  installCrashGuards({
+    logger,
+    onFatal: () => { try { runtime.stop(); } catch { /* already down */ } },
+    exit: (code) => { exit(code); },
+  });
 }
 
 if (require.main === module) {
