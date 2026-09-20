@@ -3,7 +3,7 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand, isRekeyCommand, isPollSnmpCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand, isRekeyCommand, isPollSnmpCommand, isBurstCommand, isStopBurstCommand } = require('./command');
 const { createScanner, DiscoveryScopeError } = require('./discovery/scanner');
 const { collectLocalCidrs } = require('./localIps');
 const { createEvidenceCollector } = require('./evidenceCollector');
@@ -36,6 +36,7 @@ const { createTransactionManager } = require('./transactions/manager');
 const { createSyslogReceiver } = require('./syslog/receiver');
 const { createSnmpPoller } = require('./snmpPoller');
 const { createTrapReceiver } = require('./traps/receiver');
+const { createBurstRunner } = require('./burst');
 
 // Hard cap on how many targets one scheduled cycle will probe, so a giant
 // configured/nameserver list can't turn into a burst.
@@ -108,6 +109,9 @@ function createAgentRuntime({
   // Receives SNMP traps from those same switches. Injectable so tests drive
   // ingestDatagram() without binding a port or needing net-snmp.
   trapReceiver = null,
+  // One-target, once-a-second measurement on command. Injectable so tests run
+  // a two-minute burst against a fake clock.
+  burstRunner = null,
   // Where a server-sent rekey stores this host's trust anchor (beside the token —
   // the one directory the agent is guaranteed to be able to write). Injectable.
   pinnedKeyPath = keyStore.pinnedKeyPath(config && config.tokenPath),
@@ -237,6 +241,11 @@ function createAgentRuntime({
     })
     : null);
   let trapsBound = null;
+
+  // Burst mode. Built unconditionally: it binds nothing and allocates nothing
+  // until a command arrives, and it is the one tool that must be available the
+  // moment somebody is standing in front of a fault.
+  const burst = burstRunner || createBurstRunner({ probeRunner, logger });
 
   let reportTimer = null;
   let reportingStarted = false; // true once the bootstrap called startReporting()
@@ -603,6 +612,24 @@ function createAgentRuntime({
   // Runs one poll cycle. A 401 is fatal like everywhere else; anything else is
   // non-terminal — a switch that did not answer is reported as a per-device
   // error inside the batch, not as a failure of the cycle.
+  // Runs a burst and streams every sample over the WebSocket the agent already
+  // holds, so the dashboard's chart draws while the measurement happens rather
+  // than appearing whole at the end. A dropped frame costs one point on a
+  // chart; the authoritative series is in the final reply.
+  async function handleBurst(command) {
+    const id = command && command.id;
+    const result = await burst.run(command, {
+      onSample: (sample, progress) => {
+        try {
+          client.send({ type: 'burst_sample', id, sample, index: progress.index, total: progress.total });
+        } catch { /* the chart is a courtesy; the reply is the record */ }
+      },
+    });
+    client.send({ type: 'command-result', id, ok: result.ok, burst: result });
+    emitter.emit('burst', result);
+    return result;
+  }
+
   async function runSnmpCycle(opts) {
     if (fatal || !snmpTargetCount) return { polled: 0, failed: 0 };
     try {
@@ -1137,13 +1164,24 @@ function createAgentRuntime({
       await runProbeAndSubmit(command.probe);
       return;
     }
+    if (isStopBurstCommand(command)) {
+      const wasRunning = burst.cancel();
+      logger.info(wasRunning ? 'Received stop-burst; stopping at the next tick.' : 'Received stop-burst; nothing running.');
+      client.send({ type: 'command-result', id: command && command.id, ok: true, stopped: wasRunning });
+      return;
+    }
+    if (isBurstCommand(command)) {
+      logger.info(`Received burst command (${command.target}).`);
+      await handleBurst(command);
+      return;
+    }
     if (isPollSnmpCommand(command)) {
       logger.info('Received poll-snmp command; polling assigned switches now.');
       const r = await runSnmpCycle({ force: true });
       client.send({ type: 'command-result', id: command && command.id, ok: true, snmp: r });
       return;
     }
-        if (isRunDiscoveryCommand(command)) {
+    if (isRunDiscoveryCommand(command)) {
       logger.info('Received run-discovery command; sweeping configured scope.');
       await runDiscoveryAndSubmit(command.discovery);
       return;
@@ -1185,6 +1223,7 @@ function createAgentRuntime({
       stopScheduledProbes();
       stopSyslog();
       stopTraps();
+      burst.cancel();
       snmp.stop();
       txManager.stop();
       if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
@@ -1195,6 +1234,7 @@ function createAgentRuntime({
     runScheduledProbesNow: () => runScheduledProbes(),
     flushDeviceEventsNow: () => flushDeviceEvents(),
     runSnmpCycleNow: (opts) => runSnmpCycle({ force: true, ...(opts || {}) }),
+    runBurstNow: (spec) => handleBurst(spec),
     getMonitorConfig: () => monitorConfig,
     getHsflowdState: () => lastHsflowdState,
     getDiagnostic: () => buildDiagnostic(),
