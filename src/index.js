@@ -10,6 +10,7 @@ const { parseArgs, runEnroll, USAGE } = require('./cli');
 const { makePinnedFetch } = require('./httpsClient');
 const { resolveEffectiveServerUrl } = require('./serverUrl');
 const { closeNetworkHandles } = require('./shutdown');
+const { installCrashGuards } = require('./lib/crashGuard');
 
 // Exit cleanly on every platform.
 //
@@ -137,6 +138,19 @@ async function main() {
   }
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // Last-resort guards, installed once the runtime exists so the fatal path can
+  // stop its timers and close its sockets. An agent that exits on a stray
+  // promise rejection stops reporting from a host nobody is looking at — the
+  // failure is invisible until someone notices the gap in the data — so a
+  // rejection is logged and survived. An uncaught exception still exits(1):
+  // systemd restarts the unit, and a restarted agent re-enrols nothing and
+  // simply reconnects. See src/lib/crashGuard.js.
+  installCrashGuards({
+    logger,
+    onFatal: () => { try { runtime.stop(); } catch { /* already down */ } },
+    exit: (code) => { exit(code); },
+  });
 }
 
 if (require.main === module) {

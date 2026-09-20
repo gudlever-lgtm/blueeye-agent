@@ -10,7 +10,7 @@ const { createEvidenceCollector } = require('./evidenceCollector');
 const { verifyManifest } = require('./release/verifyManifest');
 const fs = require('fs');
 const { createSelfUpdater } = require('./selfUpdate');
-const { verifyCommand, requireSignedCommands } = require('./commandAuth');
+const { verifyCommand, requireSignedCommands, allowUnsignedRekey: allowUnsignedRekeyEnv } = require('./commandAuth');
 const { createSelfDeleter } = require('./selfDelete');
 const { createToolInstaller } = require('./toolInstaller');
 const { createActionLog } = require('./actionLog');
@@ -123,6 +123,11 @@ function createAgentRuntime({
   // server signature. Off by default so an older server keeps working; on, the
   // WebSocket session alone is no longer enough to reconfigure the host.
   strictCommands = requireSignedCommands(),
+  // Break-glass: allow an UNSIGNED rekey to replace a trust anchor this host
+  // already holds. Off by default — see the long note in src/commandAuth.js for
+  // why rekey does not follow strictCommands' lenient default. Setting it needs
+  // access to the host, which is the authority re-anchoring trust deserves.
+  allowUnsignedRekey = allowUnsignedRekeyEnv(),
 }) {
   const emitter = new EventEmitter();
   // The trust anchor in force RIGHT NOW. Mutable because a `rekey` command
@@ -832,7 +837,15 @@ function createAgentRuntime({
   // not run. `names.log` is the local action-log prefix, `names.audit` the
   // server's action name (which is 'upgrade' where the wire says 'update').
   function authorizeCommand(command, names) {
-    const verdict = verifyCommand(command, { publicKey: pinnedKey, agentId, strict: strictCommands });
+    // `rekey` does not follow the lenient default — it replaces the trust
+    // anchor every later signature is checked against. See src/commandAuth.js.
+    const verdict = verifyCommand(command, {
+      publicKey: pinnedKey,
+      agentId,
+      strict: strictCommands,
+      isRekey: names.log === 'rekey',
+      allowUnsignedRekeyOverride: allowUnsignedRekey,
+    });
     if (verdict.ok) return true;
     const auditId = command && command.auditId;
     actions.log(`${names.log}.refused`, { reason: verdict.reason });
@@ -1123,7 +1136,40 @@ function createAgentRuntime({
     emitter.emit('evidence-captured', { snapshotId: command && command.snapshotId, items });
   }
 
-  client.on('command', async (command) => {
+  // The dispatcher below is `async`, and an async listener on an EventEmitter
+  // has nowhere to put a rejection: it becomes an unhandled rejection, which on
+  // a bare Node process is an exit. One handler that forgets an internal
+  // try/catch would therefore take the whole agent down — from a host where
+  // nobody is watching, so the only symptom is a gap in the data.
+  //
+  // dispatchCommand() holds the routing; this wrapper owns the failure. A
+  // handler that throws costs its own command an error reply, not the agent.
+  client.on('command', (command) => {
+    Promise.resolve()
+      .then(() => dispatchCommand(command))
+      .catch((err) => {
+        logger.error(`Command handler failed: ${err && err.message}`);
+        // Just enough to name the command in the local trail. Deliberately not
+        // command.js's verbOf(): that module's exports are swept by the gate as
+        // the recogniser set, and a parser is not a recogniser.
+        const verb = (command && typeof command === 'object' && (command.name || command.action || command.type))
+          || (typeof command === 'string' ? command : '')
+          || 'unknown';
+        actions.log('command.failed', { verb: String(verb).slice(0, 48), reason: err && err.message });
+        // Tell the server, so the dashboard shows a failed action instead of a
+        // request that silently never completed. Best-effort: the socket may be
+        // exactly what just broke.
+        try {
+          client.send({ type: 'command-result', id: command && command.id, ok: false, error: `handler failed: ${err && err.message}` });
+          if (command && command.auditId != null) {
+            client.send({ type: 'action-result', auditId: command.auditId, ok: false, detail: `handler failed: ${err && err.message}` });
+          }
+        } catch { /* the channel is gone; the log above is the record */ }
+        emitter.emit('command-failed', { command, error: err });
+      });
+  });
+
+  async function dispatchCommand(command) {
     if (isPingCommand(command)) {
       handlePing(command);
       return;
@@ -1193,7 +1239,7 @@ function createAgentRuntime({
     }
     logger.info('Received run-test command; measuring traffic...');
     await runAndSubmit(command, 'command');
-  });
+  }
 
   return {
     agentId,

@@ -163,8 +163,8 @@ What the agent calls on **blueeye-server** (mirrored by the fake server):
 ### Command authenticity ([`commandAuth.js`](src/commandAuth.js))
 
 A command is normally trusted because it arrived on the authenticated WebSocket.
-For the three **privileged** ones — `update`, `delete`, `install-tool` — that puts
-the whole host on the server never being wrong, so they may carry a
+For the **privileged** ones — `update`, `delete`, `install-tool`, `rekey` — that
+puts the whole host on the server never being wrong, so they may carry a
 `commandSignature`: an Ed25519 signature (over `agentId` + `issuedAt` + every
 other field except the transport `id`) made with the same release key the agent
 already pins. Verification is fail-closed — a signature that does not check out,
@@ -172,6 +172,15 @@ names another agent, or is older than ±5 min is refused without running the
 action. `BLUEEYE_REQUIRE_SIGNED_COMMANDS=1` additionally refuses UNSIGNED
 privileged commands. Note `update.signature` is a different thing: it signs the
 release manifest (the payload), not the instruction.
+
+**`rekey` does not follow that lenient default.** The other three are bounded —
+a `delete` is visible in the fleet list, an `update` still verifies the release
+manifest separately — but a rekey replaces the anchor every LATER signature is
+checked against, so an unsigned one turns one moment of socket access into
+permanent, silent code execution. When this agent already holds a key, an
+unsigned rekey is refused; a legitimate rotation is signed with the key being
+replaced. `BLUEEYE_ALLOW_UNSIGNED_REKEY=1` is the break-glass for a fleet whose
+server lost its signing key, and setting it needs access to the host.
 
 Server → agent commands ([`command.js`](src/command.js)):
 - **run-test** (`run[\s_-]?test`) → measure traffic + system, `POST /agents/results`.
@@ -246,6 +255,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | `BLUEEYE_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` ([`logger.js`](src/logger.js)) |
 | `BLUEEYE_REQUIRE_SIGNED_COMMANDS` | off | refuse an unsigned `update`/`delete`/`install-tool` ([`commandAuth.js`](src/commandAuth.js)) |
 | `BLUEEYE_REQUIRE_SIGNED_UPDATES` | off | refuse an unsigned release ([`selfUpdate.js`](src/selfUpdate.js)) |
+| `BLUEEYE_ALLOW_UNSIGNED_REKEY` | off | break-glass: let an UNSIGNED `rekey` replace an anchor this host already holds. Needed only to recover a fleet whose server lost its signing key ([`commandAuth.js`](src/commandAuth.js)) |
 | `BLUEEYE_RELEASE_PUBLIC_KEY` | (installer) | the pinned release anchor. A `rekey` accepted from the server stores one in `release-key.pem` beside the token, and THAT wins ([`release/keyStore.js`](src/release/keyStore.js)) |
 
 ## Error & fatal model
@@ -280,7 +290,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 
 | Concern | Files |
 | --- | --- |
-| Lifecycle / wiring | [`index.js`](src/index.js), [`runtime.js`](src/runtime.js), [`bootstrap.js`](src/bootstrap.js), [`shutdown.js`](src/shutdown.js) |
+| Lifecycle / wiring | [`index.js`](src/index.js), [`runtime.js`](src/runtime.js), [`bootstrap.js`](src/bootstrap.js), [`shutdown.js`](src/shutdown.js), [`lib/crashGuard.js`](src/lib/crashGuard.js) — the last-resort process guards: an unhandled rejection is logged and survived (this agent is full of deliberately best-effort collectors, and dying on one stops reporting from a host nobody is watching), an uncaught exception stops the runtime and exits non-zero so systemd restarts clean |
 | Connection self-test | [`doctor.js`](src/doctor.js) — `blueeye-agent doctor`: config→token→DNS→TCP→HTTP→auth→WebSocket, each failure with a fix suggestion (run post-install / on an offline agent) |
 | Scheme self-heal | [`serverUrl.js`](src/serverUrl.js) — `resolveEffectiveServerUrl`: if an http:// server redirects to https on the same host, adopt it at boot so WS uses wss:// and REST keeps its auth header (index.js, before the runtime) |
 | Identity / config | [`config.js`](src/config.js), [`system.js`](src/system.js), [`tokenStore.js`](src/tokenStore.js), [`enroll.js`](src/enroll.js), [`capabilities.js`](src/capabilities.js), [`nicInfo.js`](src/nicInfo.js) |
