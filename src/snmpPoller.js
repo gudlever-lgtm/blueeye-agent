@@ -85,7 +85,12 @@ function createSnmpPoller({
 
   // Polls every device whose interval has elapsed and submits one batch.
   // Never throws: this runs on a timer nobody is watching.
-  async function runCycle({ force = false } = {}) {
+  // `onResult` is called per successful device, before the batch is submitted.
+  // The runtime uses it to remember interface names, so a trap saying
+  // "ifIndex 1" can be shown as "GigabitEthernet0/1" — the poll already read
+  // that table, and re-reading it for the trap path would be a second walk of
+  // the same data.
+  async function runCycle({ force = false, onResult = null } = {}) {
     if (running) return { polled: 0, failed: 0, skipped: true };
     running = true;
     try {
@@ -105,6 +110,11 @@ function createSnmpPoller({
         try {
           const result = await withTimeout(poll({ device }), timeoutMs, device.host);
           devices.push(result);
+          // Best-effort: a consumer that throws must not cost the poll that
+          // already succeeded.
+          if (onResult) {
+            try { onResult(result); } catch { /* not this cycle's problem */ }
+          }
         } catch (err) {
           errors.push({
             deviceId: device.deviceId,

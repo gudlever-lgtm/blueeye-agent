@@ -106,6 +106,16 @@ function loadConfig({ env = process.env } = {}) {
   const syslogMaxEvents = toInt(env.BLUEEYE_SYSLOG_MAX_EVENTS, file.syslogMaxEvents ?? 5000);
   const syslogRatePerSec = toInt(env.BLUEEYE_SYSLOG_RATE, file.syslogRatePerSec ?? 200);
 
+  // SNMP traps. Off by default like syslog, and 1162 rather than 162 for the
+  // same reason: binding below 1024 needs root, and a monitoring agent must not
+  // run as root to receive unauthenticated UDP. Traps share the device-event
+  // flush with syslog, so they need no interval of their own.
+  const trapsEnabled = toBool(env.BLUEEYE_TRAPS_ENABLED, file.trapsEnabled, false);
+  const trapPort = toInt(env.BLUEEYE_TRAP_PORT, file.trapPort ?? 1162);
+  const trapBindAddress = env.BLUEEYE_TRAP_BIND || file.trapBindAddress || '0.0.0.0';
+  const trapMaxEvents = toInt(env.BLUEEYE_TRAP_MAX_EVENTS, file.trapMaxEvents ?? 2000);
+  const trapRatePerSec = toInt(env.BLUEEYE_TRAP_RATE, file.trapRatePerSec ?? 50);
+
   return {
     configPath,
     serverUrl,
@@ -129,6 +139,11 @@ function loadConfig({ env = process.env } = {}) {
     syslogFlushIntervalMs,
     syslogMaxEvents,
     syslogRatePerSec,
+    trapsEnabled,
+    trapPort,
+    trapBindAddress,
+    trapMaxEvents,
+    trapRatePerSec,
   };
 }
 
