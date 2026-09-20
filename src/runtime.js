@@ -3,7 +3,7 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand, isRekeyCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand, isRekeyCommand, isPollSnmpCommand } = require('./command');
 const { createScanner, DiscoveryScopeError } = require('./discovery/scanner');
 const { collectLocalCidrs } = require('./localIps');
 const { createEvidenceCollector } = require('./evidenceCollector');
@@ -1051,7 +1051,13 @@ function createAgentRuntime({
       await runProbeAndSubmit(command.probe);
       return;
     }
-    if (isRunDiscoveryCommand(command)) {
+    if (isPollSnmpCommand(command)) {
+      logger.info('Received poll-snmp command; polling assigned switches now.');
+      const r = await runSnmpCycle({ force: true });
+      client.send({ type: 'command-result', id: command && command.id, ok: true, snmp: r });
+      return;
+    }
+        if (isRunDiscoveryCommand(command)) {
       logger.info('Received run-discovery command; sweeping configured scope.');
       await runDiscoveryAndSubmit(command.discovery);
       return;

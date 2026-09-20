@@ -110,6 +110,9 @@ test('command recognisers: canonical + spelling variants are recognised; wrong v
     ['isInstallToolCommand', [{ name: 'install-tool', tool: 'traceroute' }], ['install-tool', { name: 'install-tool' }, { name: 'install-tool', tool: '' }, { name: 'install-tool', tool: 42 }]],
     ['isEvidenceCommand', ['evidence', 'evidence-snapshot', { name: 'evidence_snapshot' }], ['evident', 'snapshot']],
     ['isRunDiscoveryCommand', [{ name: 'run-discovery', discovery: {} }, { name: 'sweep', discovery: { cidrs: [] } }], ['run-discovery', { name: 'run-discovery' }, { name: 'run-discovery', discovery: 'all' }]],
+    // poll-snmp takes an OPTIONAL deviceId (absent means "every switch assigned
+    // to me"), so unlike run-probe or install-tool the bare verb IS the command.
+    ['isPollSnmpCommand', ['poll-snmp', 'poll snmp', 'POLL_SNMP', { name: 'poll-snmp' }, { name: 'poll-snmp', deviceId: 7 }], ['poll', 'snmp', 'polls-nmp']],
     ['isRekeyCommand', [{ name: 'rekey', publicKey: 'pem' }, { name: 're-key', publicKey: 'pem' }, { name: 'rotate-key', publicKey: 'pem' }, { name: 're-pin', publicKey: 'pem' }], ['rekey', { name: 'rekey' }, { name: 'rekey', publicKey: '' }, { name: 'rekey', publicKey: 42 }, { name: 'key' }]],
   ];
   for (const [fn, yes, no] of cases) {
@@ -124,7 +127,7 @@ test('command recognisers: canonical + spelling variants are recognised; wrong v
 });
 
 test('no verb is recognised by two different recognisers', () => {
-  const verbs = ['run-test', 'run-probe', 'ping', 'update', 'speedtest', 'diagnose', 'delete', 'install-tool', 'evidence', 'run-discovery', 'rekey'];
+  const verbs = ['run-test', 'run-probe', 'ping', 'update', 'speedtest', 'diagnose', 'delete', 'install-tool', 'evidence', 'run-discovery', 'rekey', 'poll-snmp'];
   for (const v of verbs) {
     const full = { name: v, probe: { type: 'ping' }, tool: 't', discovery: {}, publicKey: 'pem' };
     const hits = Object.entries(command).filter(([, fn]) => fn(full)).map(([n]) => n);

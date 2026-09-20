@@ -10,6 +10,7 @@ const DELETE = /^(delete|self[\s_-]?delete|uninstall)$/i;
 const INSTALL_TOOL = /^install[\s_-]?tool$/i;
 const EVIDENCE = /^evidence(?:[\s_-]?snapshot)?$/i;
 const RUN_DISCOVERY = /^(run[\s_-]?discovery|discovery[\s_-]?sweep|sweep)$/i;
+const POLL_SNMP = /^poll[\s_-]?snmp$/i;
 const REKEY = /^(rekey|re[\s_-]?key|rotate[\s_-]?key|repin|re[\s_-]?pin)$/i;
 
 function verbOf(command) {
@@ -97,8 +98,16 @@ function isRunDiscoveryCommand(command) {
 // rotation; when it cannot, this is how a fleet whose server lost its signing
 // key is recovered — from the server, because an installed agent has no shell.
 // A command with no `publicKey` is not this command.
+// Recognises a poll-snmp command: { name: 'poll-snmp', deviceId? } — run an
+// SNMP topology cycle now rather than waiting out the per-device interval. A
+// missing deviceId means "every device assigned to me". Read-only on the
+// device: it walks tables, it never sets an OID.
+function isPollSnmpCommand(command) {
+  return POLL_SNMP.test(verbOf(command));
+}
+
 function isRekeyCommand(command) {
   return REKEY.test(verbOf(command)) && !!command && typeof command.publicKey === 'string' && command.publicKey.trim() !== '';
 }
 
-module.exports = { isRekeyCommand, isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand };
+module.exports = { isPollSnmpCommand, isRekeyCommand, isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand };
