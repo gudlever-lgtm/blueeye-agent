@@ -311,3 +311,82 @@ test('a device with no host is refused with a coded error', async () => {
     (err) => err.code === 'SNMP_BAD_TARGET',
   );
 });
+
+// ===================================== trin 1: the port inventory, in earnest
+// The server stores these rows now (migration 108), keyed on the NAME, so what
+// the name is and where it came from stopped being cosmetic.
+
+test('a port with no ifName falls back to ifDescr, and the row says so', () => {
+  const out = buildTopology({
+    ifName: {},
+    ifDescr: { 1: 'FastEthernet0/1' },
+    ifAlias: { 1: 'to the printer' },
+    ifOperStatus: { 1: 1 },
+    ifAdminStatus: { 1: 1 },
+    ifHighSpeed: { 1: 100 },
+  });
+  assert.equal(out.interfaces.length, 1);
+  assert.equal(out.interfaces[0].ifName, 'FastEthernet0/1');
+  assert.equal(out.interfaces[0].nameSource, 'ifDescr');
+  assert.equal(out.interfaces[0].operStatus, 'up');
+  assert.equal(out.interfaces[0].speedMbps, 100);
+});
+
+test('a port with neither name is keyed on its index, and marked as such', () => {
+  const out = buildTopology({ ifName: {}, ifDescr: { 7: '   ' }, ifOperStatus: { 7: 2 } });
+  assert.equal(out.interfaces[0].ifName, 'ifIndex.7');
+  assert.equal(out.interfaces[0].nameSource, 'ifIndex');
+  assert.equal(out.interfaces[0].operStatus, 'down');
+});
+
+test('the FABRICATED name never reaches the forwarding table', () => {
+  // Stage 02's rule: a port the switch did not name is reported as null rather
+  // than as a made-up "port N". `ifIndex.7` is exactly such a fabrication — it
+  // is fine as a row id in this device's own port list, and it is NOT an answer
+  // to "which port is this MAC on", because that answer sends somebody walking.
+  const out = buildTopology({
+    // The device listed the port but named it with neither column — a blank
+    // ifDescr is how that actually arrives.
+    ifName: {},
+    ifDescr: { 7: '   ' },
+    basePortIfIndex: { 2: 7 },
+    dFdbPort: { [MAC_OID]: 2 },
+    dFdbStatus: { [MAC_OID]: 3 },
+  });
+  assert.equal(out.interfaces[0].ifName, 'ifIndex.7', 'the inventory still names it');
+  assert.equal(out.fdb.length, 1);
+  assert.equal(out.fdb[0].ifIndex, 7);
+  assert.equal(out.fdb[0].ifName, null, 'the forwarding answer stays honest');
+});
+
+test('admin and oper status are separate answers', () => {
+  // Somebody turned this port off, versus this port fell over. Different
+  // faults, different places to go.
+  const out = buildTopology({
+    ifName: { 1: 'Gi0/1', 2: 'Gi0/2' },
+    ifAdminStatus: { 1: 2, 2: 1 },
+    ifOperStatus: { 1: 2, 2: 2 },
+  });
+  const byName = Object.fromEntries(out.interfaces.map((i) => [i.ifName, i]));
+  assert.equal(byName['Gi0/1'].adminStatus, 'down', 'shut on purpose');
+  assert.equal(byName['Gi0/2'].adminStatus, 'up', 'fell over');
+  assert.equal(byName['Gi0/2'].operStatus, 'down');
+});
+
+test('a speed of zero is NULL, not zero', () => {
+  // ifHighSpeed reads 0 for a port whose speed the device does not know. Stored
+  // as 0 it would make "unknown" look like "stalled", and a utilisation
+  // percentage against it is not a number at all.
+  const out = buildTopology({ ifName: { 1: 'Gi0/1' }, ifHighSpeed: { 1: 0 } });
+  assert.equal(out.interfaces[0].speedMbps, null);
+});
+
+test('ifPhysAddress is rendered once, and only when it is six bytes', () => {
+  const out = buildTopology({
+    ifName: { 1: 'Gi0/1', 2: 'Gi0/2' },
+    ifPhysAddress: { 1: Buffer.from([0x00, 0x1b, 0x44, 0x11, 0x3a, 0xb7]), 2: Buffer.from([0x00, 0x1b]) },
+  });
+  const byName = Object.fromEntries(out.interfaces.map((i) => [i.ifName, i]));
+  assert.equal(byName['Gi0/1'].physAddress, '00:1b:44:11:3a:b7');
+  assert.equal(byName['Gi0/2'].physAddress, null, 'two bytes is not a MAC');
+});

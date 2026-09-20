@@ -23,9 +23,18 @@
 // where it came from, rather than inventing a port.
 
 const OID = {
-  // IF-MIB — the names the resolved ifIndex is turned into.
+  // IF-MIB — the names the resolved ifIndex is turned into, plus the columns
+  // that describe the port itself. ifDescr is the FALLBACK identity: not every
+  // switch implements ifName, and a row built from the weaker one has to say so
+  // (see `nameSource` below and migration 108 on the server).
   ifName: '1.3.6.1.2.1.31.1.1.1.1',
   ifAlias: '1.3.6.1.2.1.31.1.1.1.18',
+  ifDescr: '1.3.6.1.2.1.2.2.1.2',
+  ifType: '1.3.6.1.2.1.2.2.1.3',
+  ifPhysAddress: '1.3.6.1.2.1.2.2.1.6',
+  ifAdminStatus: '1.3.6.1.2.1.2.2.1.7',
+  ifOperStatus: '1.3.6.1.2.1.2.2.1.8',
+  ifHighSpeed: '1.3.6.1.2.1.31.1.1.1.15',
 
   // BRIDGE-MIB (RFC 4188). dot1dBasePortIfIndex is the join without which every
   // forwarding-table answer is a guess.
@@ -135,6 +144,18 @@ function toStr(v) {
   return s || null;
 }
 
+// ifAdminStatus / ifOperStatus, as IF-MIB numbers them. An unlisted value
+// becomes null rather than a guess: an unknown status is not a status.
+const IF_STATUS = { 1: 'up', 2: 'down', 3: 'testing', 4: 'unknown', 5: 'dormant', 6: 'notPresent', 7: 'lowerLayerDown' };
+const ADMIN_STATUS = { 1: 'up', 2: 'down', 3: 'testing' };
+
+// ifPhysAddress is a 6-byte OCTET STRING. Rendered here so the server stores
+// one spelling; anything that is not six bytes is not a MAC and becomes null.
+function toMac(v) {
+  if (!Buffer.isBuffer(v) || v.length !== 6) return null;
+  return [...v].map((b) => b.toString(16).padStart(2, '0')).join(':');
+}
+
 function toNum(v) {
   if (Buffer.isBuffer(v)) return v.length ? v.readUIntBE(0, Math.min(v.length, 6)) : 0;
   const n = Number(v);
@@ -181,13 +202,22 @@ async function defaultReadTables(snmp, { collect = ['if', 'fdb', 'lldp', 'vlan']
     const want = new Set(collect);
 
     const [
-      ifName, ifAlias, basePortIfIndex,
+      ifName, ifAlias, ifDescr, ifType, ifPhysAddress, ifAdminStatus, ifOperStatus, ifHighSpeed,
+      basePortIfIndex,
       qFdbPort, qFdbStatus, dFdbPort, dFdbStatus,
       vlanName,
       lldpChassis, lldpChassisSubtype, lldpPort, lldpPortSubtype, lldpPortDesc, lldpSysName,
     ] = await Promise.all([
       want.has('if') || want.has('fdb') ? safe(OID.ifName) : {},
       want.has('if') ? safe(OID.ifAlias) : {},
+      // ifDescr is fetched whenever a name is wanted, because it is the
+      // fallback when the device has no ifName at all.
+      want.has('if') || want.has('fdb') ? safe(OID.ifDescr) : {},
+      want.has('if') ? safe(OID.ifType) : {},
+      want.has('if') ? safe(OID.ifPhysAddress) : {},
+      want.has('if') ? safe(OID.ifAdminStatus) : {},
+      want.has('if') ? safe(OID.ifOperStatus) : {},
+      want.has('if') ? safe(OID.ifHighSpeed) : {},
       // NOT safe(): without the bridge-port map the forwarding table cannot be
       // resolved to an interface, and an unresolved answer is the one thing
       // this module must not produce silently. An empty result is handled by
@@ -207,7 +237,8 @@ async function defaultReadTables(snmp, { collect = ['if', 'fdb', 'lldp', 'vlan']
     ]);
 
     return {
-      ifName, ifAlias, basePortIfIndex,
+      ifName, ifAlias, ifDescr, ifType, ifPhysAddress, ifAdminStatus, ifOperStatus, ifHighSpeed,
+      basePortIfIndex,
       qFdbPort, qFdbStatus, dFdbPort, dFdbStatus,
       vlanName,
       lldpChassis, lldpChassisSubtype, lldpPort, lldpPortSubtype, lldpPortDesc, lldpSysName,
@@ -230,10 +261,50 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
     const idx = toNum(value);
     if (Number.isInteger(bp) && Number.isInteger(idx) && idx > 0) portToIfIndex.set(bp, idx);
   }
+  // ifIndex -> { name, source }. THE NAME IS THE PORT'S IDENTITY on the server
+  // (migration 108), so where it came from has to travel with it:
+  //
+  //   ifName  — the switch's own short name, stable across a reboot and a
+  //             module insertion. What we want.
+  //   ifDescr — the fallback. Plenty of older gear implements no ifName at all,
+  //             and ifDescr is less stable (some platforms rewrite it), so a
+  //             row built from it is a weaker identity and says so.
+  //   ifIndex — last resort, and the one case where the identity IS the
+  //             volatile number. Marked, so nobody mistakes it for stable.
+  //
+  // Guessing silently would mean a switch quietly getting a new set of ports
+  // after a firmware upgrade, with a year of counters stranded on the old ones.
   const ifNameByIndex = new Map();
-  for (const [idx, value] of Object.entries(t.ifName || {})) {
-    const name = toStr(value);
-    if (name) ifNameByIndex.set(Number(idx), name);
+  const ifNameSource = new Map();
+  const indexes = new Set([
+    ...Object.keys(t.ifName || {}),
+    ...Object.keys(t.ifDescr || {}),
+  ].map((k) => Number(k)).filter((n) => Number.isInteger(n) && n > 0));
+  for (const idx of indexes) {
+    const name = toStr(t.ifName ? t.ifName[idx] : null);
+    const descr = toStr(t.ifDescr ? t.ifDescr[idx] : null);
+    if (name) {
+      ifNameByIndex.set(idx, name);
+      ifNameSource.set(idx, 'ifName');
+    } else if (descr) {
+      ifNameByIndex.set(idx, descr);
+      ifNameSource.set(idx, 'ifDescr');
+    } else {
+      ifNameByIndex.set(idx, `ifIndex.${idx}`);
+      ifNameSource.set(idx, 'ifIndex');
+    }
+  }
+
+  // The names that came off the DEVICE, with no fallback in them. The
+  // forwarding table and the LLDP rows resolve through this one, never through
+  // the map above: stage 02's rule is that a port the switch did not name is
+  // reported as null rather than as a fabricated "port N", and `ifIndex.7` is
+  // exactly such a fabrication. It is an acceptable identity for a row in the
+  // port inventory, which is about THIS device; it is not an acceptable answer
+  // to "which port is this MAC on", which sends somebody walking.
+  const realNameByIndex = new Map();
+  for (const [idx, src] of ifNameSource.entries()) {
+    if (src !== 'ifIndex') realNameByIndex.set(idx, ifNameByIndex.get(idx));
   }
 
   // VLAN id -> name, for a UI that can say "VLAN 20 (Office)".
@@ -278,7 +349,7 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
         bridgePort,
         ifIndex,
         // Null rather than a fabricated "port N": see the note at the top.
-        ifName: ifIndex != null ? (ifNameByIndex.get(ifIndex) || null) : null,
+        ifName: ifIndex != null ? (realNameByIndex.get(ifIndex) || null) : null,
         status,
       });
     }
@@ -325,7 +396,7 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
     neighbours.push({
       localPort,
       localIfIndex: ifIndex,
-      localIfName: ifIndex != null ? (ifNameByIndex.get(ifIndex) || null) : null,
+      localIfName: ifIndex != null ? (realNameByIndex.get(ifIndex) || null) : null,
       remoteChassisId,
       remotePortId: (function decodePort() {
         const st = toNum(t.lldpPortSubtype ? t.lldpPortSubtype[index] : null);
@@ -343,10 +414,22 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
   // --- interfaces ----------------------------------------------------------
   const interfaces = [];
   for (const [idx, name] of ifNameByIndex.entries()) {
+    const speed = toNum(t.ifHighSpeed ? t.ifHighSpeed[idx] : null);
+    const type = toNum(t.ifType ? t.ifType[idx] : null);
     interfaces.push({
       ifIndex: idx,
       ifName: name,
+      nameSource: ifNameSource.get(idx) || 'ifName',
       ifAlias: toStr(t.ifAlias ? t.ifAlias[idx] : null),
+      ifDescr: toStr(t.ifDescr ? t.ifDescr[idx] : null),
+      ifType: Number.isInteger(type) && type > 0 ? type : null,
+      // ifHighSpeed is Mbit/s and reads 0 for a port whose speed the device
+      // does not know. Null, not 0: "unknown" and "stalled" are different, and
+      // a utilisation percentage computed against 0 is not a number.
+      speedMbps: Number.isInteger(speed) && speed > 0 ? speed : null,
+      adminStatus: ADMIN_STATUS[toNum(t.ifAdminStatus ? t.ifAdminStatus[idx] : null)] || null,
+      operStatus: IF_STATUS[toNum(t.ifOperStatus ? t.ifOperStatus[idx] : null)] || null,
+      physAddress: toMac(t.ifPhysAddress ? t.ifPhysAddress[idx] : null),
     });
   }
 
