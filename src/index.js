@@ -11,6 +11,7 @@ const { makePinnedFetch } = require('./httpsClient');
 const { resolveEffectiveServerUrl } = require('./serverUrl');
 const { closeNetworkHandles } = require('./shutdown');
 const { installCrashGuards } = require('./lib/crashGuard');
+const releaseGuard = require('./release/releaseGuard');
 
 // Exit cleanly on every platform.
 //
@@ -114,6 +115,16 @@ async function main() {
     await exit(1);
     return;
   }
+
+  // Install the release guard before anything else can go wrong. It is a plain
+  // `sh` script outside the swappable release tree, run by systemd as
+  // ExecStartPre, that rolls `current` back when a release never confirms
+  // itself. Every agent in the field predates it, so the agent installs it
+  // itself rather than waiting for a re-install. Best-effort: no systemd, no
+  // root or no blue/green layout simply means no guard.
+  const guardState = releaseGuard.ensureInstalled({});
+  if (guardState.changed) logger.info('Release guard installed (rolls back an update that never comes up).');
+  else if (!guardState.ok) logger.warn(`Release guard not installed: ${guardState.reason}`);
 
   const runtime = createAgentRuntime({
     config,

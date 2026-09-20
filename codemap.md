@@ -210,6 +210,14 @@ Server → agent commands ([`command.js`](src/command.js)):
   that follows needs no restart. When the server can still sign, the command carries a
   `commandSignature` made with the key being replaced — a proper rotation, and the only
   form `BLUEEYE_REQUIRE_SIGNED_COMMANDS=1` accepts.
+- A release the agent cannot start is rolled back ([`release/releaseGuard.js`](src/release/releaseGuard.js)).
+  `atomicInstall` marks the new release unproven (`releases/.pending`) while the OLD,
+  known-good process is still running; the new agent deletes the marker only after it has
+  HELD a server connection for a minute — "the process started" is not proof. A plain `sh`
+  guard living outside the swappable tree (`bin/release-guard.sh`, run by systemd as
+  `ExecStartPre`, installed by the agent itself on startup) counts the starts and repoints
+  `current` at the previous release when they run out. It is not Node on purpose: the
+  failure it recovers from is a release Node cannot even parse.
 - **run-discovery** (`run[\s_-]?discovery|discovery[\s_-]?sweep|sweep` + a `discovery` object
   `{ cidrs?, ports?, rateLimit?, addressCap?, requestId? }`) → sweep the CIDR scope from THIS
   agent's vantage (empty `cidrs` ⇒ the agent's own subnet via `localIps.collectLocalCidrs`),

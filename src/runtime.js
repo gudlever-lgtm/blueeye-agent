@@ -16,6 +16,7 @@ const { createToolInstaller } = require('./toolInstaller');
 const { createActionLog } = require('./actionLog');
 const { resolveReleasePublicKey } = require('./release/publicKey');
 const keyStore = require('./release/keyStore');
+const releaseGuard = require('./release/releaseGuard');
 const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
 const { runProbe } = require('./probes');
@@ -116,6 +117,11 @@ function createAgentRuntime({
   // the one directory the agent is guaranteed to be able to write). Injectable.
   pinnedKeyPath = keyStore.pinnedKeyPath(config && config.tokenPath),
   keys = keyStore,
+  // Blue/green layout + the guard that rolls a release back when it never
+  // proves itself. Injectable so tests can point them at a scratch directory.
+  releasesDir = process.env.BLUEEYE_RELEASES_DIR || '',
+  guard = releaseGuard,
+  confirmReleaseAfterMs = releaseGuard.DEFAULT_CONFIRM_MS,
   // The release trust anchor; injectable for tests. A key pinned here by an
   // accepted rekey wins over the one the installer baked into the environment.
   releasePublicKey = resolveReleasePublicKey(process.env, { pinnedPath: pinnedKeyPath, readPinned: (f) => keys.readPinnedKey(f) }),
@@ -761,7 +767,29 @@ function createAgentRuntime({
       try { txManager.flush(); } catch (err) { logger.warn(`Transaction flush failed: ${err.message}`); }
     }
   });
-  client.on('connected', (m) => emitter.emit('connected', m));
+  // Confirming an update is the agent's job, and "connected" alone is not
+  // enough: a release that comes up, connects and then dies on its first real
+  // work would confirm the very thing killing it. So the timer starts on the
+  // first connection and only a connection that HOLDS clears the marker. Until
+  // it does, the release guard counts this release's starts and rolls back.
+  let confirmTimer = null;
+  function armReleaseConfirmation() {
+    if (confirmTimer || !releasesDir) return;
+    const pending = guard.readPending(releasesDir);
+    if (!pending) return; // no update waiting to prove itself
+    logger.info(`Release ${pending.version} is unproven (start ${pending.attempts}); confirming after ${Math.round(confirmReleaseAfterMs / 1000)}s connected.`);
+    confirmTimer = setTimeout(() => {
+      confirmTimer = null;
+      if (guard.confirmRelease(releasesDir)) {
+        actions.log('update.confirmed', { version: pending.version });
+        logger.info(`Release ${pending.version} confirmed — it held a server connection.`);
+        emitter.emit('release-confirmed', pending);
+      }
+    }, confirmReleaseAfterMs);
+    if (typeof confirmTimer.unref === 'function') confirmTimer.unref();
+  }
+
+  client.on('connected', (m) => { armReleaseConfirmation(); emitter.emit('connected', m); });
   client.on('close', (code) => emitter.emit('close', code));
   // A WS-origin fatal (e.g. 401 handshake) must fully shut the runtime down too
   // — stop reporting + mark fatal — not just re-emit, so no timers linger.
@@ -1265,6 +1293,7 @@ function createAgentRuntime({
       })();
     },
     stop() {
+      if (confirmTimer) { clearTimeout(confirmTimer); confirmTimer = null; }
       stopReporting();
       stopScheduledProbes();
       stopSyslog();
