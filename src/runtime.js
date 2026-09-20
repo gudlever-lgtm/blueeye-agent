@@ -34,6 +34,7 @@ const { createConfigStore } = require('./transactions/configStore');
 const { createResultBuffer } = require('./transactions/buffer');
 const { createTransactionManager } = require('./transactions/manager');
 const { createSyslogReceiver } = require('./syslog/receiver');
+const { createSnmpPoller } = require('./snmpPoller');
 
 // Hard cap on how many targets one scheduled cycle will probe, so a giant
 // configured/nameserver list can't turn into a burst.
@@ -100,6 +101,9 @@ function createAgentRuntime({
   // so tests drive it through ingestLine() without binding a port; null means
   // "build the real one if config.syslogEnabled".
   syslogReceiver = null,
+  // Polls the switches the server assigned to THIS agent, alongside its own
+  // traffic sampling. Injectable so tests drive runCycle() without net-snmp.
+  snmpPoller = null,
   // Where a server-sent rekey stores this host's trust anchor (beside the token —
   // the one directory the agent is guaranteed to be able to write). Injectable.
   pinnedKeyPath = keyStore.pinnedKeyPath(config && config.tokenPath),
@@ -174,6 +178,16 @@ function createAgentRuntime({
   let syslogTimer = null;
   let syslogBound = null; // what start() actually managed to bind, or null
   let lastDeviceEventAt = null; // ms epoch of the last successful flush
+
+  // SNMP topology. Built unconditionally (it does nothing without targets) so
+  // the server can start assigning switches to an already-running agent without
+  // waiting for a restart.
+  const snmp = snmpPoller || createSnmpPoller({
+    submit: (payload) => api.postSnmpTopology(payload),
+    logger,
+  });
+  let snmpTargetCount = 0;
+  let lastSnmpAt = null; // ms epoch of the last successful submit
 
   let reportTimer = null;
   let reportingStarted = false; // true once the bootstrap called startReporting()
@@ -353,7 +367,13 @@ function createAgentRuntime({
   // Resilient: only a 401 is fatal; otherwise keep the current source.
   async function loadServerConfig() {
     try {
-      const mc = await api.getConfig();
+      // The WHOLE body, not just monitorConfig: the same call now also carries
+      // `snmpTargets`, the switches this agent polls. Reading it here means a
+      // switch assigned to a running agent is picked up on its next reconnect
+      // rather than waiting for a restart.
+      const body = await api.getFullConfig();
+      const mc = (body && body.monitorConfig) || { source: 'proc' };
+      applySnmpTargets(body && body.snmpTargets);
       monitorConfig = mc;
       // Dispose the previous sampler's background lifecycle (e.g. a netflow
       // UDP socket) before swapping in the new source.
@@ -507,6 +527,38 @@ function createAgentRuntime({
     if (syslogTimer.unref) syslogTimer.unref();
   }
 
+  // Applies the server's switch assignment. An agent whose server is too old to
+  // send the key gets an empty list and polls nothing, which is exactly right.
+  function applySnmpTargets(list) {
+    try {
+      snmpTargetCount = snmp.setTargets(list);
+      if (snmpTargetCount) logger.info(`SNMP topology: polling ${snmpTargetCount} device(s).`);
+    } catch (err) {
+      logger.warn(`Could not apply SNMP targets (${err.message}).`);
+      snmpTargetCount = 0;
+    }
+  }
+
+  // Runs one poll cycle. A 401 is fatal like everywhere else; anything else is
+  // non-terminal — a switch that did not answer is reported as a per-device
+  // error inside the batch, not as a failure of the cycle.
+  async function runSnmpCycle(opts) {
+    if (fatal || !snmpTargetCount) return { polled: 0, failed: 0 };
+    try {
+      const r = await snmp.runCycle(opts);
+      if (r.polled) {
+        lastSnmpAt = Date.now();
+        emitter.emit('snmp-topology', r);
+      }
+      return r;
+    } catch (err) {
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return { polled: 0, failed: 0 }; }
+      logger.warn(`SNMP topology cycle failed (${err.message}).`);
+      reportError('snmp-topology', err);
+      return { polled: 0, failed: 0 };
+    }
+  }
+
   function stopSyslog() {
     if (syslogTimer) {
       clearInterval(syslogTimer);
@@ -625,6 +677,12 @@ function createAgentRuntime({
           bound: syslogBound,
           lastSubmitAt: lastDeviceEventAt ? new Date(lastDeviceEventAt).toISOString() : null,
         }
+        : null,
+      // Which switches this agent polls, when each was last attempted, and
+      // whether anything has been submitted. Answers "why is this switch's
+      // port table empty?" from the dashboard, without host access.
+      snmp: snmpTargetCount
+        ? { ...snmp.stats(), lastSubmitAt: lastSnmpAt ? new Date(lastSnmpAt).toISOString() : null }
         : null,
     };
   }
@@ -1021,6 +1079,9 @@ function createAgentRuntime({
         startReporting();
         startScheduledProbes();
         await startSyslog();
+        // The tick only asks which devices are due; the per-device interval
+        // decides what is actually polled.
+        snmp.start({ tickMs: 30000 });
         // Start running any persisted transaction tests (server pushes fresh
         // config on connect, which replaces these).
         try { txManager.start(); } catch (err) { logger.warn(`Transaction manager start failed: ${err.message}`); }
@@ -1030,6 +1091,7 @@ function createAgentRuntime({
       stopReporting();
       stopScheduledProbes();
       stopSyslog();
+      snmp.stop();
       txManager.stop();
       if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
       client.stop();
@@ -1038,6 +1100,7 @@ function createAgentRuntime({
     reportNow: () => runAndSubmit({ name: 'auto-report', intervalMs: config.reportSampleMs }, 'manual'),
     runScheduledProbesNow: () => runScheduledProbes(),
     flushDeviceEventsNow: () => flushDeviceEvents(),
+    runSnmpCycleNow: (opts) => runSnmpCycle({ force: true, ...(opts || {}) }),
     getMonitorConfig: () => monitorConfig,
     getHsflowdState: () => lastHsflowdState,
     getDiagnostic: () => buildDiagnostic(),

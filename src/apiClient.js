@@ -53,6 +53,32 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     return body.monitorConfig || { source: 'proc' };
   }
 
+  // The same call, returning the WHOLE body rather than just monitorConfig, so
+  // a caller can read `snmpTargets` too. Kept separate from getConfig() rather
+  // than changing its return shape: every existing caller of getConfig expects
+  // a monitorConfig object, and widening it would be a silent contract change
+  // in the one place the agent decides how it measures.
+  async function getFullConfig() {
+    const res = await fetchImpl(`${serverUrl}/agents/me/config`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assertOk(res, 'fetching config', 'fetch config');
+    return res.json();
+  }
+
+  // Submits one SNMP topology cycle: the forwarding/neighbour/VLAN tables read
+  // from each switch this agent polls, plus a per-device error for the ones
+  // that did not answer.
+  async function postSnmpTopology(payload) {
+    const res = await fetchImpl(`${serverUrl}/agents/me/snmp-topology`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    assertOk(res, 'posting SNMP topology', 'post SNMP topology');
+    return jsonOrEmpty(res);
+  }
+
   // Posts active-probe results (ping/tcp/dns/traceroute) for this agent.
   async function postProbeResults(results) {
     const res = await fetchImpl(`${serverUrl}/agents/probe-results`, {
@@ -110,7 +136,10 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     return jsonOrEmpty(res);
   }
 
-  return { postResults, getConfig, postCapabilities, postProbeResults, postDiscoveryResults, postSpeedtest, postDeviceEvents };
+  return {
+    postResults, getConfig, getFullConfig, postCapabilities, postProbeResults,
+    postDiscoveryResults, postSpeedtest, postDeviceEvents, postSnmpTopology,
+  };
 }
 
 module.exports = { createApiClient };
