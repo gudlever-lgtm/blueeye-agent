@@ -119,11 +119,30 @@ test('makePinnedFetch uploads a Buffer body verbatim (no JSON re-encoding)', asy
 test('runSpeedtest measures end-to-end over a pinned TLS connection', async () => {
   const server = await tlsServer({ validTokens: ['tok'] });
   try {
-    const r = await runSpeedtest({ serverUrl: server.url, token: 'tok', bytes: 64 * 1024, fetchImpl: makePinnedFetch(REAL_FP) });
+    // THE CLOCK IS INJECTED, and it has to be. `runSpeedtest` times the
+    // transfer with Date.now(), which has millisecond resolution, and 64 KiB
+    // over a loopback TLS socket can finish inside one millisecond on a fast
+    // machine. Then `ms` is 0, `mbps()` correctly answers null rather than
+    // dividing by zero, and `null > 0` is false — so the test failed on the
+    // runner being quick. Production never sees this: the default transfer is
+    // 10 MiB each way, which no real link does in under a millisecond.
+    //
+    // Advancing 100 ms per reading makes the arithmetic the thing under test.
+    // 64 KiB in 100 ms is 5.24 Mbps, and asserting that exact number says more
+    // than "> 0" did.
+    let clock = 0;
+    const now = () => { clock += 100; return clock; };
+    const r = await runSpeedtest({
+      serverUrl: server.url, token: 'tok', bytes: 64 * 1024,
+      fetchImpl: makePinnedFetch(REAL_FP), now,
+    });
     assert.equal(r.ok, true, r.detail || 'speed test failed');
     assert.equal(r.downBytes, 64 * 1024);
     assert.equal(r.upBytes, 64 * 1024);
-    assert.ok(r.downMbps > 0 && r.upMbps > 0);
+    assert.equal(r.downMs, 100);
+    assert.equal(r.upMs, 100);
+    assert.equal(r.downMbps, 5.24, '64 KiB in 100 ms');
+    assert.equal(r.upMbps, 5.24);
   } finally {
     await server.close();
   }
