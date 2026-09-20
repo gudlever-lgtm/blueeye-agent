@@ -107,12 +107,26 @@ function openSession(device, { snmp = null, timeoutMs = 5000, retries = 1 } = {}
       level: hasPriv ? net.SecurityLevel.authPriv
         : (hasAuth ? net.SecurityLevel.authNoPriv : net.SecurityLevel.noAuthNoPriv),
     };
+    // A protocol NAME the library does not know indexes to `undefined`, and an
+    // undefined protocol on an authPriv user is a session that fails somewhere
+    // inside net-snmp with a message nobody can act on. The server's ENUM and
+    // these names agree today; the day they stop agreeing — a widened ENUM and
+    // an agent in the field that has not updated — this says which name it was.
+    const protocol = (table, name, what) => {
+      const value = table[name];
+      if (value === undefined) {
+        const err = new Error(`SNMPv3 ${what} protocol "${name}" is not one this agent knows.`);
+        err.code = 'SNMP_BAD_CREDENTIAL';
+        throw err;
+      }
+      return value;
+    };
     if (hasAuth) {
-      user.authProtocol = net.AuthProtocols[v3.authProto];
+      user.authProtocol = protocol(net.AuthProtocols, v3.authProto, 'auth');
       user.authKey = v3.authKey;
     }
     if (hasPriv) {
-      user.privProtocol = net.PrivProtocols[v3.privProto];
+      user.privProtocol = protocol(net.PrivProtocols, v3.privProto, 'priv');
       user.privKey = v3.privKey;
     }
     return net.createV3Session(device.host, user, options);

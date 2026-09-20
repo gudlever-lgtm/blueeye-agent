@@ -251,6 +251,30 @@ test('version 3 with no user is refused, not silently downgraded', () => {
   );
 });
 
+test('a protocol name the library does not know is refused, not passed as undefined', () => {
+  // The cross-repo contract: the server's ENUM values ARE net-snmp's protocol
+  // names. The day they stop agreeing — a widened ENUM on a server whose
+  // agents have not updated — `AuthProtocols[name]` is `undefined`, and an
+  // undefined protocol on an authPriv user fails somewhere inside the library
+  // with a message nobody can act on. This one says which name it was.
+  assert.throws(
+    () => openSession({
+      host: 'h', version: '3',
+      v3: { user: 'u', authProto: 'sha3', authKey: 'k' },
+    }, { snmp: v3Snmp([]) }),
+    /auth protocol "sha3"/,
+  );
+  assert.throws(
+    () => openSession({
+      host: 'h', version: '3',
+      v3: { user: 'u', authProto: 'sha', authKey: 'k', privProto: 'aes256r', privKey: 'p' },
+    }, { snmp: v3Snmp([]) }),
+    /priv protocol "aes256r"/,
+    'the fake above deliberately lacks aes256r — a name the real library HAS, '
+      + 'which is the point: the check is against what the loaded library knows',
+  );
+});
+
 test('a v3 credential on a device row still saying 2c still opens v3', () => {
   // The version that runs is the CREDENTIAL's. A profile upgraded to v3 must
   // not be undone by a device row nobody remembered to edit.
