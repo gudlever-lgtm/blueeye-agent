@@ -26,7 +26,8 @@ See **[codemap.md](codemap.md)** for the module map.
 
 `src/runtime.js` handles commands the server pushes: `run-test`, `run-probe`, `ping`
 (liveness ack), `update` (self‑update, systemd only), `rekey` (replace the pinned
-release key — the host has no shell, so key handling is server‑driven), `speedtest`,
+release key — server‑driven, and only ever accepted when a **vendor‑signed** licence
+proof authorises the new key's fingerprint; see `src/license/trustProof.js`), `speedtest`,
 `poll-snmp` (an SNMP topology cycle now) and `burst`/`stop-burst` (one target, once a
 second, streaming every sample). Adding one = a recognizer in `src/command.js` +
 a handler in `src/runtime.js` + a `fakeServer` endpoint (if it calls back) + tests.

@@ -17,6 +17,7 @@ const { createActionLog } = require('./actionLog');
 const { resolveReleasePublicKey } = require('./release/publicKey');
 const keyStore = require('./release/keyStore');
 const releaseGuard = require('./release/releaseGuard');
+const { verifyTrustProof } = require('./license/trustProof');
 const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
 const { runProbe } = require('./probes');
@@ -126,9 +127,12 @@ function createAgentRuntime({
   // accepted rekey wins over the one the installer baked into the environment.
   releasePublicKey = resolveReleasePublicKey(process.env, { pinnedPath: pinnedKeyPath, readPinned: (f) => keys.readPinnedKey(f) }),
   // Refuse a privileged command (update/delete/install-tool) that carries no
-  // server signature. Off by default so an older server keeps working; on, the
-  // WebSocket session alone is no longer enough to reconfigure the host.
-  strictCommands = requireSignedCommands(),
+  // server signature. DEFAULTS ON wherever a release key is pinned — that agent
+  // can check a signature and its server can make one, so accepting an unsigned
+  // command would mean the WebSocket session alone is enough to reconfigure the
+  // host. An agent with no key pinned stays lenient (nothing could verify
+  // anything), and BLUEEYE_REQUIRE_SIGNED_COMMANDS overrides either way.
+  strictCommands = requireSignedCommands(process.env, { publicKey: releasePublicKey }),
   // Break-glass: allow an UNSIGNED rekey to replace a trust anchor this host
   // already holds. Off by default — see the long note in src/commandAuth.js for
   // why rekey does not follow strictCommands' lenient default. Setting it needs
@@ -962,9 +966,78 @@ function createAgentRuntime({
   //
   // Not a restart: the new anchor is applied in memory, so the update that
   // usually follows it verifies immediately, and monitoring never stops.
+  // Records what the vendor authorised, which also LATCHES this agent: from
+  // here on a rekey without a vendor authorisation is refused. Best-effort on
+  // the write — a failure means the latch is not yet set, which only ever asks
+  // for more proof later, never less.
+  function recordVendorTrust(verdict) {
+    keys.writeTrustState(pinnedKeyPath, {
+      sequence: verdict.sequence,
+      licenseId: verdict.licenseId,
+      customerId: verdict.customerId,
+      fingerprint: verdict.fingerprint,
+    });
+  }
+
   async function handleRekey(command) {
-    if (!authorizeCommand(command, { log: 'rekey', audit: 'rekey' })) return;
     const auditId = command && command.auditId;
+
+    // What this host has already accepted from the vendor. `vendorRooted` is a
+    // one-way latch: once a vendor-authorised key has been accepted here,
+    // nothing else is ever accepted again, and no server can clear it.
+    const trustState = keys.readTrustState(pinnedKeyPath);
+
+    // The vendor's authorisation, if the server sent one. This is the ONLY
+    // check that can accept a key this agent has never seen: the signature is
+    // the vendor's, over bytes the server can neither forge nor edit, so a
+    // server that has been taken over cannot manufacture one.
+    let vendor = null;
+    if (command && command.vendorProof) {
+      const verdict = verifyTrustProof({
+        proof: command.vendorProof,
+        offeredKey: command.publicKey,
+        expected: {
+          licenseId: trustState.licenseId,
+          customerId: trustState.customerId,
+          sequence: trustState.sequence,
+        },
+      });
+      if (!verdict.ok) {
+        // Fail closed and say which step failed — these codes are what an
+        // operator reads when a rekey does not land.
+        const reason = `refusing rekey: ${verdict.code} — ${verdict.detail}`;
+        actions.log('rekey.refused', { code: verdict.code, reason: verdict.detail });
+        logger.error(reason);
+        client.send({ type: 'ack', id: command && command.id, accepted: false, reason });
+        client.send({ type: 'command-result', id: command && command.id, ok: false, error: reason });
+        if (auditId != null) client.send({ type: 'action-result', auditId, action: 'rekey', ok: false, detail: reason });
+        emitter.emit('rekey-error', new Error(reason));
+        return;
+      }
+      vendor = verdict;
+    } else if (trustState.vendorRooted) {
+      // Latched. A rekey signed with the key being replaced was the migration
+      // path; once the vendor has spoken for this host, that path is closed —
+      // otherwise an attacker who obtained the old private key could still
+      // re-anchor the fleet.
+      const reason = 'refusing rekey: this agent requires a vendor-signed authorisation, and the command carried none. '
+        + 'The server must obtain a licence proof authorising this key (its administrator generates the key, '
+        + 'the vendor approves the fingerprint) before the fleet will accept it.';
+      actions.log('rekey.refused', { code: 'LICENSE_PROOF_INVALID', reason: 'no vendor proof' });
+      logger.error(reason);
+      client.send({ type: 'ack', id: command && command.id, accepted: false, reason });
+      client.send({ type: 'command-result', id: command && command.id, ok: false, error: reason });
+      if (auditId != null) client.send({ type: 'action-result', auditId, action: 'rekey', ok: false, detail: reason });
+      emitter.emit('rekey-error', new Error(reason));
+      return;
+    }
+
+    // A vendor authorisation stands on its own: it proves more than a signature
+    // made with the key being replaced ever could, and requiring both would
+    // make the one case this exists for — recovering a fleet whose server lost
+    // its signing key — impossible again. Without one, the old rules apply.
+    if (!vendor && !authorizeCommand(command, { log: 'rekey', audit: 'rekey' })) return;
+
     const parsed = keys.validatePublicKey(command && command.publicKey);
     if (!parsed.ok) {
       const reason = `refusing rekey: ${parsed.reason}`;
@@ -978,7 +1051,10 @@ function createAgentRuntime({
     }
     client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: capabilities.managed || 'unmanaged' });
     if (pinnedKey && pinnedKey.trim() === parsed.pem.trim()) {
-      // Already the key we trust: report it and touch nothing.
+      // Already the key we trust. Still record the authorisation: a re-sent
+      // proof with a HIGHER sequence is how the anti-rollback floor rises
+      // without the key itself changing.
+      if (vendor) recordVendorTrust(vendor);
       actions.log('rekey.unchanged', { fingerprint: parsed.fingerprint });
       if (auditId != null) client.send({ type: 'action-result', auditId, action: 'rekey', ok: true, detail: `unchanged (${parsed.fingerprint.slice(0, 12)}…)` });
       emitter.emit('rekeyed', { fingerprint: parsed.fingerprint, changed: false });
@@ -991,8 +1067,18 @@ function createAgentRuntime({
       // reads in the unit is the key the agent uses. A failure here is not a
       // failed rekey — the stored file is what the agent reads at startup.
       const unit = keys.syncSystemdDropIn(parsed.pem);
-      actions.log('rekey.applied', { fingerprint: parsed.fingerprint, unit: unit.ok ? unit.path : null, unitReason: unit.ok ? null : unit.reason });
-      logger.warn(`Release trust anchor replaced by the server (sha256 ${parsed.fingerprint.slice(0, 12)}…)${unit.ok ? '' : ` — systemd drop-in not updated: ${unit.reason}`}`);
+      // Written AFTER the key, so a crash between the two leaves the agent
+      // asking for more proof next time, never less.
+      if (vendor) recordVendorTrust(vendor);
+      actions.log('rekey.applied', {
+        fingerprint: parsed.fingerprint,
+        vendor: vendor ? { sequence: vendor.sequence, license: vendor.licenseId } : null,
+        unit: unit.ok ? unit.path : null,
+        unitReason: unit.ok ? null : unit.reason,
+      });
+      logger.warn(`AGENT_TRUST_ACCEPTED: release anchor replaced (sha256 ${parsed.fingerprint.slice(0, 12)}…)`
+        + `${vendor ? `, vendor-authorised seq ${vendor.sequence}` : ' (no vendor authorisation — legacy path)'}`
+        + `${unit.ok ? '' : ` — systemd drop-in not updated: ${unit.reason}`}`);
       if (auditId != null) {
         client.send({ type: 'action-result', auditId, action: 'rekey', ok: true, detail: `pinned ${parsed.fingerprint.slice(0, 12)}…` });
       }

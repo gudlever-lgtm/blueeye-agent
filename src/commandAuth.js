@@ -44,10 +44,31 @@ function signedPayload(command) {
 }
 
 const TRUTHY = /^(1|true|yes|on)$/i;
+const FALSY = /^(0|false|no|off)$/i;
 
-// Is the agent configured to REQUIRE signed privileged commands?
-function requireSignedCommands(env = process.env) {
-  return TRUTHY.test(String(env.BLUEEYE_REQUIRE_SIGNED_COMMANDS || '').trim());
+// Does this agent REQUIRE signed privileged commands?
+//
+// The answer is now "yes, wherever it can be": an agent that pins a release key
+// has, by definition, a key to check a signature against, and its server signs
+// with that key whenever it holds the private half. Leaving those agents lenient
+// meant the WebSocket session alone was enough to update, delete or install on
+// the host — which is the whole thing the signature exists to prevent.
+//
+// The default is therefore derived rather than off:
+//
+//   a key is pinned      -> require signatures (the server can produce them)
+//   no key pinned at all -> stay lenient (nothing could verify a signature, and
+//                           refusing would brick a host mid-provisioning)
+//
+// Both directions stay overridable, because a deployment whose server genuinely
+// cannot sign yet needs a way to keep managing its fleet while it fixes that:
+// BLUEEYE_REQUIRE_SIGNED_COMMANDS=0 turns it off, =1 forces it on even with no
+// key (which fails every privileged command closed, deliberately).
+function requireSignedCommands(env = process.env, { publicKey = '' } = {}) {
+  const raw = String(env.BLUEEYE_REQUIRE_SIGNED_COMMANDS || '').trim();
+  if (TRUTHY.test(raw)) return true;
+  if (FALSY.test(raw)) return false;
+  return !!publicKey;
 }
 
 // REKEY IS DIFFERENT, and is strict by default.
@@ -99,6 +120,12 @@ function verifyCommand(command, {
 } = {}) {
   const signature = command && command.commandSignature;
   if (!signature) {
+    // The host-side break-glass is checked BEFORE strict mode, not after.
+    // BLUEEYE_ALLOW_UNSIGNED_REKEY is set by someone with access to this host,
+    // for the one case where the server cannot sign anything at all — and strict
+    // mode is now the default wherever a key is pinned, so checking it second
+    // would silently take the escape hatch away exactly when it is needed.
+    if (isRekey && allowUnsignedRekeyOverride) return { ok: true, signed: false };
     if (strict) return { ok: false, reason: 'refused: unsigned command (this agent requires signed commands)' };
     if (isRekey && publicKey && !allowUnsignedRekeyOverride) {
       return {

@@ -197,14 +197,20 @@ test('the pinned file outranks the installer environment, base64 or PEM', () => 
   assert.equal(resolveReleasePublicKey(env, { pinnedPath: '/pinned', readPinned: () => rekeyed }).trim(), rekeyed.trim());
 });
 
-// ------------------------------------------- rekey is strict by DEFAULT
+// ------------------------------------------- privileged commands are signed
 //
-// update/delete/install-tool are lenient unless BLUEEYE_REQUIRE_SIGNED_COMMANDS
-// is set, for backward compatibility with a server that cannot sign. `rekey`
-// deliberately does not follow that default, because it is the one command
-// whose effect is to change what every LATER signature is checked against: an
-// unsigned rekey turns one moment of access to the socket into permanent,
-// silent code execution on the host. See the note in src/commandAuth.js.
+// An agent that pins a release key requires a signature on EVERY privileged
+// command now, not just on rekey. It has a key to check one against and its
+// server signs with that key, so accepting an unsigned update or delete meant
+// the WebSocket session alone was enough to reconfigure the host — the thing
+// the signature exists to prevent. Leniency is left where a signature could not
+// be checked at all (no key pinned) and behind an explicit opt-out
+// (BLUEEYE_REQUIRE_SIGNED_COMMANDS=0). See src/commandAuth.js.
+//
+// The recovery path is unaffected: a rekey carrying a VENDOR authorisation
+// skips this gate entirely (the vendor's signature proves more than the
+// server's could), which is what lets a server that has lost its signing key
+// be re-authorised without touching the host.
 
 test('an UNSIGNED rekey is refused by default when the agent already trusts a key', async (t) => {
   const sc = scratch(t);
@@ -219,27 +225,29 @@ test('an UNSIGNED rekey is refused by default when the agent already trusts a ke
   server.sendCommandToAll({ name: 'rekey', id: 'k6', auditId: 60, publicKey: attacker.pem });
 
   const msg = await withTimeout(refused, 4000, 'an unsigned rekey was NOT refused');
-  assert.match(msg.detail, /unsigned rekey cannot replace a trust anchor/);
-  // The refusal must say how a legitimate operator recovers, or it is a dead end.
-  assert.match(msg.detail, /BLUEEYE_ALLOW_UNSIGNED_REKEY=1/);
+  // Which gate refuses it depends on the agent: one that pins a key now
+  // requires signatures on every privileged command, so it is turned away
+  // before the rekey-specific rule is even reached. Either way it is refused
+  // and the anchor is untouched, which is the contract.
+  assert.match(msg.detail, /requires signed commands|unsigned rekey cannot replace a trust anchor/);
   assert.equal(keyStore.readPinnedKey(sc.pinnedKeyPath), '', 'the anchor must be untouched');
 });
 
-test('an unsigned update is still accepted — the strict rule is rekey-specific, not a blanket change', async (t) => {
+test('an unsigned update is refused too, where a key is pinned to check one against', async (t) => {
   const sc = scratch(t);
   const current = keyPair();
   const { server, runtime } = await runtimeWith(t, { pinnedKey: current.pem, pinnedKeyPath: sc.pinnedKeyPath });
 
-  // An unsigned `update` reaches its handler as before. It declines here only
-  // because the fake host is not self-updatable in the way the handler wants —
-  // what matters is that it was NOT refused at the authorisation gate.
-  const acked = server.waitForWsMessage((m) => m.type === 'ack' && m.id === 'u9');
+  // This agent pins a key, so its server can sign — and an unsigned update is
+  // now turned away at the gate rather than run on the strength of whoever
+  // holds the socket.
+  const refused = server.waitForWsMessage((m) => m.type === 'ack' && m.id === 'u9' && m.accepted === false);
   runtime.start();
   await withTimeout(onceEvent(runtime, 'config'), 4000, 'no config');
   server.sendCommandToAll({ name: 'update', id: 'u9', auditId: 61 });
 
-  const msg = await withTimeout(acked, 4000, 'the unsigned update never reached its handler');
-  assert.equal(msg.reason, undefined, 'an unsigned update must not be refused by the rekey rule');
+  const msg = await withTimeout(refused, 4000, 'an unsigned update was NOT refused');
+  assert.match(msg.reason, /requires signed commands/);
 });
 
 test('break-glass: with the host-side override, an unsigned rekey is accepted again', async (t) => {
