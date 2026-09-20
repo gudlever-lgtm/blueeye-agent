@@ -79,6 +79,20 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     return jsonOrEmpty(res);
   }
 
+  // Submits one SNMP counter cycle: a snapshot of every interface counter on
+  // each switch that asked for them. Its own endpoint rather than folded into
+  // the topology POST, because the two run at different cadences and a counter
+  // batch is an order of magnitude larger.
+  async function postSnmpCounters(payload) {
+    const res = await fetchImpl(`${serverUrl}/agents/me/snmp-counters`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    assertOk(res, 'posting SNMP counters', 'post SNMP counters');
+    return jsonOrEmpty(res);
+  }
+
   // Posts active-probe results (ping/tcp/dns/traceroute) for this agent.
   async function postProbeResults(results) {
     const res = await fetchImpl(`${serverUrl}/agents/probe-results`, {
@@ -138,7 +152,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
 
   return {
     postResults, getConfig, getFullConfig, postCapabilities, postProbeResults,
-    postDiscoveryResults, postSpeedtest, postDeviceEvents, postSnmpTopology,
+    postDiscoveryResults, postSpeedtest, postDeviceEvents, postSnmpTopology, postSnmpCounters,
   };
 }
 

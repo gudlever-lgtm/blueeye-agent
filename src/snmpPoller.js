@@ -1,6 +1,7 @@
 'use strict';
 
 const { pollSnmpTopology } = require('./snmpTopology');
+const { pollSnmpCounters } = require('./snmp/counters');
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -29,6 +30,29 @@ const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 // a production switch is a way to become the outage.
 const MIN_INTERVAL_SEC = 60;
 
+// The COUNTER cycle is a different shape from the topology cycle, and that is
+// the point of having two.
+//
+// A forwarding table is a snapshot of where things are; polling it every five
+// minutes is generous. Interface counters are a TIME SERIES, and the gap
+// between samples is the measurement's resolution — a 5-minute counter cannot
+// show a two-minute error burst at all. So counters run on their own, faster
+// interval.
+//
+// Which immediately hits the wall the audit called out: the topology cycle is
+// deliberately SEQUENTIAL, and twenty devices at a 30-second timeout is ten
+// minutes in the worst case, against a wanted interval of sixty seconds. One
+// minute of polling for twenty switches cannot be done one at a time.
+//
+// So the counter cycle runs a BOUNDED number at once. Not Promise.all over
+// everything — that is the burst that looks like a scan, and it is exactly what
+// the sequential rule was protecting against. Four at a time is enough to fit
+// twenty devices into a minute with a 30-second worst case, and small enough
+// that the traffic out of one agent still looks like monitoring.
+const COUNTER_MIN_INTERVAL_SEC = 30;
+const COUNTER_DEFAULT_INTERVAL_SEC = 60;
+const COUNTER_CONCURRENCY = 4;
+
 // How long one device gets before its turn is abandoned. A switch that has
 // stopped answering must not hold the cycle open for the others.
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -52,9 +76,15 @@ function withTimeout(promise, ms, host) {
 
 function createSnmpPoller({
   submit,
+  // Counters go to their own endpoint at their own cadence. Null disables the
+  // counter cycle entirely, which is what an older server (or a fleet that does
+  // not want the volume) gets.
+  submitCounters = null,
   logger = silentLogger,
   poll = pollSnmpTopology,
+  pollCounters = pollSnmpCounters,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  counterConcurrency = COUNTER_CONCURRENCY,
   now = () => Date.now(),
 } = {}) {
   let targets = [];
@@ -62,8 +92,14 @@ function createSnmpPoller({
   // that keeps failing waits out its own interval like any other, rather than
   // being retried every tick.
   const lastAttempt = new Map();
+  // The same, for the counter cycle. Kept apart on purpose: a device whose
+  // bridge-table walk is timing out may well still answer a counter read, and
+  // one cycle's bad luck must not stall the other's schedule.
+  const lastCounterAttempt = new Map();
   let timer = null;
+  let counterTimer = null;
   let running = false;
+  let counterRunning = false;
 
   // Replaces the target list. Devices that disappeared from the config lose
   // their schedule state with them.
@@ -73,6 +109,9 @@ function createSnmpPoller({
     const live = new Set(next.map((d) => d.deviceId));
     for (const id of [...lastAttempt.keys()]) {
       if (!live.has(id)) lastAttempt.delete(id);
+    }
+    for (const id of [...lastCounterAttempt.keys()]) {
+      if (!live.has(id)) lastCounterAttempt.delete(id);
     }
     return targets.length;
   }
@@ -143,6 +182,89 @@ function createSnmpPoller({
     }
   }
 
+  // Is this device due for a COUNTER read? Its own interval, floored, and
+  // defaulting faster than the topology one because a counter's interval IS the
+  // measurement's resolution.
+  function counterDue(device, t) {
+    const wanted = Number(device.counterIntervalSec) || COUNTER_DEFAULT_INTERVAL_SEC;
+    const interval = Math.max(wanted, COUNTER_MIN_INTERVAL_SEC) * 1000;
+    const last = lastCounterAttempt.get(device.deviceId);
+    return last == null || (t - last) >= interval;
+  }
+
+  // Which devices want counters at all. `collect` is the same list the topology
+  // poller reads; a device that does not ask for 'ifcounters' is simply not in
+  // this cycle, so the volume is opt-in per device.
+  function wantsCounters(device) {
+    const collect = Array.isArray(device.collect) ? device.collect : [];
+    return collect.includes('ifcounters');
+  }
+
+  // Runs `limit` at a time over a list, in order. Not Promise.all (a burst that
+  // looks like a scan) and not a strict sequence (twenty devices at a 30-second
+  // worst case does not fit in a minute). Never throws: each task's own failure
+  // is its own.
+  async function inBatches(items, limit, task) {
+    const queue = [...items];
+    const workers = [];
+    for (let i = 0; i < Math.max(1, limit); i += 1) {
+      workers.push((async () => {
+        for (;;) {
+          const item = queue.shift();
+          if (item === undefined) return;
+          await task(item);
+        }
+      })());
+    }
+    await Promise.all(workers);
+  }
+
+  // One counter cycle. Reads every due device's interface counters and submits
+  // them as ONE batch.
+  //
+  // Never throws, and never holds results for a retry: a counter snapshot is
+  // only meaningful next to the reading before it, and re-sending a stale one
+  // later would have the server compute a rate over a gap that never happened.
+  async function runCounterCycle({ force = false } = {}) {
+    if (!submitCounters) return { polled: 0, failed: 0, skipped: true };
+    if (counterRunning) return { polled: 0, failed: 0, skipped: true };
+    counterRunning = true;
+    try {
+      const t = now();
+      const batch = targets.filter((d) => wantsCounters(d) && (force || counterDue(d, t)));
+      if (!batch.length) return { polled: 0, failed: 0 };
+
+      const devices = [];
+      const errors = [];
+      await inBatches(batch, counterConcurrency, async (device) => {
+        lastCounterAttempt.set(device.deviceId, now());
+        try {
+          const result = await withTimeout(pollCounters({ device }), timeoutMs, device.host);
+          devices.push(result);
+        } catch (err) {
+          errors.push({
+            deviceId: device.deviceId,
+            error: String((err && err.message) || 'counter poll failed').slice(0, 255),
+            code: (err && err.code) || null,
+          });
+          logger.warn(`SNMP counter poll of ${device.host} failed: ${err && err.message}`);
+        }
+      });
+
+      if (devices.length || errors.length) {
+        try {
+          await submitCounters({ devices, errors });
+        } catch (err) {
+          logger.warn(`Could not submit SNMP counters (${err && err.message}).`);
+          throw err;
+        }
+      }
+      return { polled: devices.length, failed: errors.length };
+    } finally {
+      counterRunning = false;
+    }
+  }
+
   // The tick is deliberately short and cheap: it only asks which devices are
   // due. The per-device interval decides what actually gets polled.
   function start({ tickMs = 30000 } = {}) {
@@ -154,11 +276,31 @@ function createSnmpPoller({
     if (timer.unref) timer.unref();
   }
 
+  // The counter tick, on its own timer. Separate from the topology one because
+  // the two cadences are different by design and a slow bridge-table walk must
+  // not delay a counter read.
+  function startCounters({ tickMs = 15000 } = {}) {
+    stopCounters();
+    if (!submitCounters || !tickMs || tickMs <= 0) return;
+    counterTimer = setInterval(() => {
+      runCounterCycle().catch(() => { /* runCounterCycle already logged */ });
+    }, tickMs);
+    if (counterTimer.unref) counterTimer.unref();
+  }
+
+  function stopCounters() {
+    if (counterTimer) {
+      clearInterval(counterTimer);
+      counterTimer = null;
+    }
+  }
+
   function stop() {
     if (timer) {
       clearInterval(timer);
       timer = null;
     }
+    stopCounters();
   }
 
   function stats() {
@@ -173,7 +315,14 @@ function createSnmpPoller({
     };
   }
 
-  return { setTargets, runCycle, start, stop, stats };
+  return { setTargets, runCycle, runCounterCycle, start, startCounters, stop, stopCounters, stats };
 }
 
-module.exports = { createSnmpPoller, MIN_INTERVAL_SEC, DEFAULT_TIMEOUT_MS };
+module.exports = {
+  createSnmpPoller,
+  MIN_INTERVAL_SEC,
+  DEFAULT_TIMEOUT_MS,
+  COUNTER_MIN_INTERVAL_SEC,
+  COUNTER_DEFAULT_INTERVAL_SEC,
+  COUNTER_CONCURRENCY,
+};
