@@ -3,7 +3,7 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand, isRekeyCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand, isRekeyCommand, isPollSnmpCommand, isBurstCommand, isStopBurstCommand } = require('./command');
 const { createScanner, DiscoveryScopeError } = require('./discovery/scanner');
 const { collectLocalCidrs } = require('./localIps');
 const { createEvidenceCollector } = require('./evidenceCollector');
@@ -33,6 +33,10 @@ const { createSecretStore } = require('./transactions/secretStore');
 const { createConfigStore } = require('./transactions/configStore');
 const { createResultBuffer } = require('./transactions/buffer');
 const { createTransactionManager } = require('./transactions/manager');
+const { createSyslogReceiver } = require('./syslog/receiver');
+const { createSnmpPoller } = require('./snmpPoller');
+const { createTrapReceiver } = require('./traps/receiver');
+const { createBurstRunner } = require('./burst');
 
 // Hard cap on how many targets one scheduled cycle will probe, so a giant
 // configured/nameserver list can't turn into a burst.
@@ -95,6 +99,19 @@ function createAgentRuntime({
   toolInstaller = null,
   actionLog = null,
   hsflowdManager = null,
+  // Receives syslog from the network devices pointing at this host. Injectable
+  // so tests drive it through ingestLine() without binding a port; null means
+  // "build the real one if config.syslogEnabled".
+  syslogReceiver = null,
+  // Polls the switches the server assigned to THIS agent, alongside its own
+  // traffic sampling. Injectable so tests drive runCycle() without net-snmp.
+  snmpPoller = null,
+  // Receives SNMP traps from those same switches. Injectable so tests drive
+  // ingestDatagram() without binding a port or needing net-snmp.
+  trapReceiver = null,
+  // One-target, once-a-second measurement on command. Injectable so tests run
+  // a two-minute burst against a fake clock.
+  burstRunner = null,
   // Where a server-sent rekey stores this host's trust anchor (beside the token —
   // the one directory the agent is guaranteed to be able to write). Injectable.
   pinnedKeyPath = keyStore.pinnedKeyPath(config && config.tokenPath),
@@ -152,6 +169,83 @@ function createAgentRuntime({
   client.on('transaction-config', (tests) => {
     try { txManager.applyConfig(tests); } catch (err) { logger.warn(`Failed to apply transaction config: ${err.message}`); }
   });
+
+  // Syslog: built only when enabled, so a host that never turned it on binds
+  // nothing and allocates nothing. An injected receiver always wins (tests).
+  const syslog = syslogReceiver || (config.syslogEnabled
+    ? createSyslogReceiver({
+      port: config.syslogPort,
+      bindAddress: config.syslogBindAddress,
+      udp: config.syslogUdp,
+      tcp: config.syslogTcp,
+      maxEvents: config.syslogMaxEvents,
+      ratePerSec: config.syslogRatePerSec,
+      logger,
+    })
+    : null);
+  let syslogTimer = null;
+  let syslogBound = null; // what start() actually managed to bind, or null
+  let lastDeviceEventAt = null; // ms epoch of the last successful flush
+
+  // SNMP topology. Built unconditionally (it does nothing without targets) so
+  // the server can start assigning switches to an already-running agent without
+  // waiting for a restart.
+  const snmp = snmpPoller || createSnmpPoller({
+    submit: (payload) => api.postSnmpTopology(payload),
+    logger,
+  });
+  let snmpTargetCount = 0;
+  let lastSnmpAt = null; // ms epoch of the last successful submit
+
+  // Interface names learned by the SNMP topology poll, keyed by the device's
+  // address, so a trap saying "ifIndex 1" can be shown as "GigabitEthernet0/1".
+  // Populated from the poll results the agent already submits; a device not in
+  // here resolves to null and the trap shows the index, which is honest.
+  const ifNamesByHost = new Map(); // host -> Map(ifIndex -> ifName)
+  const hostByDeviceId = new Map();
+
+  function rememberInterfaces(result) {
+    const host = hostByDeviceId.get(result.deviceId);
+    if (!host || !Array.isArray(result.interfaces)) return;
+    const names = new Map();
+    for (const i of result.interfaces) {
+      if (Number.isInteger(i.ifIndex) && i.ifName) names.set(i.ifIndex, i.ifName);
+    }
+    if (names.size) ifNamesByHost.set(host, names);
+  }
+
+  function resolveTrapIfName(sourceIp, ifIndex) {
+    const names = ifNamesByHost.get(sourceIp);
+    return names ? (names.get(ifIndex) || null) : null;
+  }
+
+  // An SNMPv2c trap is unauthenticated: anyone who can route UDP here can claim
+  // to be any switch. The source address is all we have, so a trap is accepted
+  // only from an address this agent actually polls. Weak, and the strongest
+  // check v2c permits.
+  function isPolledSender(sourceIp) {
+    return hostByDeviceId.size > 0 && [...hostByDeviceId.values()].includes(sourceIp);
+  }
+
+  // Traps: built only when enabled, like syslog. Shares the device-event flush,
+  // because a trap and a syslog line are the same thing over a different socket.
+  const traps = trapReceiver || (config.trapsEnabled
+    ? createTrapReceiver({
+      port: config.trapPort,
+      bindAddress: config.trapBindAddress,
+      maxEvents: config.trapMaxEvents,
+      ratePerSec: config.trapRatePerSec,
+      isKnownSender: isPolledSender,
+      resolveIfName: resolveTrapIfName,
+      logger,
+    })
+    : null);
+  let trapsBound = null;
+
+  // Burst mode. Built unconditionally: it binds nothing and allocates nothing
+  // until a command arrives, and it is the one tool that must be available the
+  // moment somebody is standing in front of a fault.
+  const burst = burstRunner || createBurstRunner({ probeRunner, logger });
 
   let reportTimer = null;
   let reportingStarted = false; // true once the bootstrap called startReporting()
@@ -331,7 +425,13 @@ function createAgentRuntime({
   // Resilient: only a 401 is fatal; otherwise keep the current source.
   async function loadServerConfig() {
     try {
-      const mc = await api.getConfig();
+      // The WHOLE body, not just monitorConfig: the same call now also carries
+      // `snmpTargets`, the switches this agent polls. Reading it here means a
+      // switch assigned to a running agent is picked up on its next reconnect
+      // rather than waiting for a restart.
+      const body = await api.getFullConfig();
+      const mc = (body && body.monitorConfig) || { source: 'proc' };
+      applySnmpTargets(body && body.snmpTargets);
       monitorConfig = mc;
       // Dispose the previous sampler's background lifecycle (e.g. a netflow
       // UDP socket) before swapping in the new source.
@@ -424,6 +524,160 @@ function createAgentRuntime({
       clearInterval(reportTimer);
       reportTimer = null;
     }
+  }
+
+  // Drains the syslog buffer and ships one batch. A 401 is fatal; anything else
+  // is non-terminal — but the drained events are NOT put back. A server that is
+  // down for an hour would otherwise have the agent hold an hour of log lines in
+  // memory on a host it does not own, and the receiver's own bounded buffer
+  // exists precisely so this process never becomes the outage. The counters in
+  // stats() record what was lost, so the gap is visible rather than silent.
+  async function flushDeviceEvents() {
+    if (fatal || (!syslog && !traps)) return 0;
+    // Both receivers drain into ONE batch: a trap and a syslog line are the
+    // same kind of row, and sending them separately would double the requests
+    // for no benefit. A receiver that throws costs its own rows, not the
+    // other's.
+    const events = [];
+    for (const [name, rx] of [['syslog', syslog], ['traps', traps]]) {
+      if (!rx) continue;
+      try {
+        events.push(...rx.drain());
+      } catch (err) {
+        logger.warn(`Could not drain the ${name} buffer (${err.message}).`);
+      }
+    }
+    if (!events.length) return 0;
+    try {
+      await api.postDeviceEvents(events);
+      lastDeviceEventAt = Date.now();
+      logger.info(`Submitted ${events.length} device event(s).`);
+      emitter.emit('device-events', events.length);
+      return events.length;
+    } catch (err) {
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return 0; }
+      logger.warn(`Could not submit ${events.length} device event(s) (${err.message}).`);
+      reportError('device-events', err);
+      return 0;
+    }
+  }
+
+  // Binds the receiver and starts the flush timer. A bind failure is reported
+  // and survived: the agent's traffic reporting and probes must keep working on
+  // a host where something else already holds the port.
+  async function startSyslog() {
+    if (!syslog || fatal) return;
+    try {
+      syslogBound = typeof syslog.start === 'function' ? await syslog.start() : { injected: true };
+      emitter.emit('syslog', syslogBound);
+    } catch (err) {
+      logger.warn(`Syslog receiver did not start (${err.message}).`);
+      reportError('syslog-bind', err);
+      emitter.emit('syslog', null);
+      return;
+    }
+    const intervalMs = config.syslogFlushIntervalMs;
+    if (!intervalMs || intervalMs <= 0) return;
+    let running = false;
+    syslogTimer = setInterval(async () => {
+      if (fatal || running) return;
+      running = true;
+      try {
+        await flushDeviceEvents();
+      } finally {
+        running = false;
+      }
+    }, intervalMs);
+    if (syslogTimer.unref) syslogTimer.unref();
+  }
+
+  // Applies the server's switch assignment. An agent whose server is too old to
+  // send the key gets an empty list and polls nothing, which is exactly right.
+  function applySnmpTargets(list) {
+    try {
+      snmpTargetCount = snmp.setTargets(list);
+      // The trap allowlist and the ifIndex resolver both key on the device's
+      // address, so they are rebuilt from the same assignment.
+      hostByDeviceId.clear();
+      for (const d of Array.isArray(list) ? list : []) {
+        if (d && d.deviceId != null && typeof d.host === 'string') hostByDeviceId.set(d.deviceId, d.host);
+      }
+      if (snmpTargetCount) logger.info(`SNMP topology: polling ${snmpTargetCount} device(s).`);
+    } catch (err) {
+      logger.warn(`Could not apply SNMP targets (${err.message}).`);
+      snmpTargetCount = 0;
+    }
+  }
+
+  // Runs one poll cycle. A 401 is fatal like everywhere else; anything else is
+  // non-terminal — a switch that did not answer is reported as a per-device
+  // error inside the batch, not as a failure of the cycle.
+  // Runs a burst and streams every sample over the WebSocket the agent already
+  // holds, so the dashboard's chart draws while the measurement happens rather
+  // than appearing whole at the end. A dropped frame costs one point on a
+  // chart; the authoritative series is in the final reply.
+  async function handleBurst(command) {
+    const id = command && command.id;
+    const result = await burst.run(command, {
+      onSample: (sample, progress) => {
+        try {
+          client.send({ type: 'burst_sample', id, sample, index: progress.index, total: progress.total });
+        } catch { /* the chart is a courtesy; the reply is the record */ }
+      },
+    });
+    client.send({ type: 'command-result', id, ok: result.ok, burst: result });
+    emitter.emit('burst', result);
+    return result;
+  }
+
+  async function runSnmpCycle(opts) {
+    if (fatal || !snmpTargetCount) return { polled: 0, failed: 0 };
+    try {
+      const r = await snmp.runCycle({ ...(opts || {}), onResult: rememberInterfaces });
+      if (r.polled) {
+        lastSnmpAt = Date.now();
+        emitter.emit('snmp-topology', r);
+      }
+      return r;
+    } catch (err) {
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return { polled: 0, failed: 0 }; }
+      logger.warn(`SNMP topology cycle failed (${err.message}).`);
+      reportError('snmp-topology', err);
+      return { polled: 0, failed: 0 };
+    }
+  }
+
+  // Binds the trap receiver. Like syslog, a failure here is reported and
+  // survived: an agent that cannot bind 1162 must keep reporting traffic,
+  // running probes and polling switches.
+  async function startTraps() {
+    if (!traps || fatal) return;
+    try {
+      trapsBound = typeof traps.start === 'function' ? await traps.start() : { injected: true };
+      emitter.emit('traps', trapsBound);
+    } catch (err) {
+      logger.warn(`SNMP trap receiver did not start (${err.message}).`);
+      reportError('trap-bind', err);
+      emitter.emit('traps', null);
+    }
+  }
+
+  function stopTraps() {
+    if (traps && typeof traps.stop === 'function') {
+      try { traps.stop(); } catch { /* shutdown must not throw */ }
+    }
+    trapsBound = null;
+  }
+
+  function stopSyslog() {
+    if (syslogTimer) {
+      clearInterval(syslogTimer);
+      syslogTimer = null;
+    }
+    if (syslog && typeof syslog.stop === 'function') {
+      try { syslog.stop(); } catch { /* shutdown must not throw */ }
+    }
+    syslogBound = null;
   }
 
   // Resolves the scheduled probe set (gateway + DNS + configured), runs each and
@@ -524,6 +778,25 @@ function createAgentRuntime({
       lastReportAt: lastReportAt ? new Date(lastReportAt).toISOString() : null,
       collector: stats ? { kind, ...stats } : null,
       hsflowd: lastHsflowdState ? { state: lastHsflowdState.state, detail: lastHsflowdState.detail || null } : null,
+      // Same question as the flow pipeline, one layer over: are device events
+      // arriving at all, are they being refused by the rate limit, and is the
+      // buffer overflowing? Answerable from the dashboard, without host access.
+      syslog: syslog && typeof syslog.stats === 'function'
+        ? {
+          ...syslog.stats(),
+          bound: syslogBound,
+          lastSubmitAt: lastDeviceEventAt ? new Date(lastDeviceEventAt).toISOString() : null,
+        }
+        : null,
+      traps: traps && typeof traps.stats === 'function'
+        ? { ...traps.stats(), bound: trapsBound }
+        : null,
+      // Which switches this agent polls, when each was last attempted, and
+      // whether anything has been submitted. Answers "why is this switch's
+      // port table empty?" from the dashboard, without host access.
+      snmp: snmpTargetCount
+        ? { ...snmp.stats(), lastSubmitAt: lastSnmpAt ? new Date(lastSnmpAt).toISOString() : null }
+        : null,
     };
   }
 
@@ -891,6 +1164,23 @@ function createAgentRuntime({
       await runProbeAndSubmit(command.probe);
       return;
     }
+    if (isStopBurstCommand(command)) {
+      const wasRunning = burst.cancel();
+      logger.info(wasRunning ? 'Received stop-burst; stopping at the next tick.' : 'Received stop-burst; nothing running.');
+      client.send({ type: 'command-result', id: command && command.id, ok: true, stopped: wasRunning });
+      return;
+    }
+    if (isBurstCommand(command)) {
+      logger.info(`Received burst command (${command.target}).`);
+      await handleBurst(command);
+      return;
+    }
+    if (isPollSnmpCommand(command)) {
+      logger.info('Received poll-snmp command; polling assigned switches now.');
+      const r = await runSnmpCycle({ force: true });
+      client.send({ type: 'command-result', id: command && command.id, ok: true, snmp: r });
+      return;
+    }
     if (isRunDiscoveryCommand(command)) {
       logger.info('Received run-discovery command; sweeping configured scope.');
       await runDiscoveryAndSubmit(command.discovery);
@@ -918,6 +1208,11 @@ function createAgentRuntime({
         if (fatal) return;
         startReporting();
         startScheduledProbes();
+        await startSyslog();
+        await startTraps();
+        // The tick only asks which devices are due; the per-device interval
+        // decides what is actually polled.
+        snmp.start({ tickMs: 30000 });
         // Start running any persisted transaction tests (server pushes fresh
         // config on connect, which replaces these).
         try { txManager.start(); } catch (err) { logger.warn(`Transaction manager start failed: ${err.message}`); }
@@ -926,6 +1221,10 @@ function createAgentRuntime({
     stop() {
       stopReporting();
       stopScheduledProbes();
+      stopSyslog();
+      stopTraps();
+      burst.cancel();
+      snmp.stop();
       txManager.stop();
       if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
       client.stop();
@@ -933,6 +1232,9 @@ function createAgentRuntime({
     // Exposed for tests / manual triggering.
     reportNow: () => runAndSubmit({ name: 'auto-report', intervalMs: config.reportSampleMs }, 'manual'),
     runScheduledProbesNow: () => runScheduledProbes(),
+    flushDeviceEventsNow: () => flushDeviceEvents(),
+    runSnmpCycleNow: (opts) => runSnmpCycle({ force: true, ...(opts || {}) }),
+    runBurstNow: (spec) => handleBurst(spec),
     getMonitorConfig: () => monitorConfig,
     getHsflowdState: () => lastHsflowdState,
     getDiagnostic: () => buildDiagnostic(),

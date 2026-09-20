@@ -88,6 +88,34 @@ function loadConfig({ env = process.env } = {}) {
   const probeAutoDns = toBool(env.BLUEEYE_PROBE_DNS, file.probeDns, true);
   const probeTargets = parseConfiguredTargets(env.BLUEEYE_PROBE_TARGETS ?? file.probeTargets);
 
+  // Syslog receiver: the agent listens for the log messages switches, firewalls
+  // and APs already emit, and forwards them to the server. Off by default — a
+  // listening port is opt-in, never something an upgrade starts on its own.
+  //
+  // 1514, not 514: binding below 1024 needs root or CAP_NET_BIND_SERVICE, and
+  // this agent must not run as root to receive untrusted UDP. A host that wants
+  // the well-known port grants the capability to the service unit instead.
+  const syslogEnabled = toBool(env.BLUEEYE_SYSLOG_ENABLED, file.syslogEnabled, false);
+  const syslogPort = toInt(env.BLUEEYE_SYSLOG_PORT, file.syslogPort ?? 1514);
+  const syslogBindAddress = env.BLUEEYE_SYSLOG_BIND || file.syslogBindAddress || '0.0.0.0';
+  const syslogUdp = toBool(env.BLUEEYE_SYSLOG_UDP, file.syslogUdp, true);
+  const syslogTcp = toBool(env.BLUEEYE_SYSLOG_TCP, file.syslogTcp, true);
+  // How often buffered device events are flushed to the server. Independent of
+  // reportIntervalMs: a link-down should not wait on a traffic sample.
+  const syslogFlushIntervalMs = toInt(env.BLUEEYE_SYSLOG_FLUSH_MS, file.syslogFlushIntervalMs ?? 30000);
+  const syslogMaxEvents = toInt(env.BLUEEYE_SYSLOG_MAX_EVENTS, file.syslogMaxEvents ?? 5000);
+  const syslogRatePerSec = toInt(env.BLUEEYE_SYSLOG_RATE, file.syslogRatePerSec ?? 200);
+
+  // SNMP traps. Off by default like syslog, and 1162 rather than 162 for the
+  // same reason: binding below 1024 needs root, and a monitoring agent must not
+  // run as root to receive unauthenticated UDP. Traps share the device-event
+  // flush with syslog, so they need no interval of their own.
+  const trapsEnabled = toBool(env.BLUEEYE_TRAPS_ENABLED, file.trapsEnabled, false);
+  const trapPort = toInt(env.BLUEEYE_TRAP_PORT, file.trapPort ?? 1162);
+  const trapBindAddress = env.BLUEEYE_TRAP_BIND || file.trapBindAddress || '0.0.0.0';
+  const trapMaxEvents = toInt(env.BLUEEYE_TRAP_MAX_EVENTS, file.trapMaxEvents ?? 2000);
+  const trapRatePerSec = toInt(env.BLUEEYE_TRAP_RATE, file.trapRatePerSec ?? 50);
+
   return {
     configPath,
     serverUrl,
@@ -103,6 +131,19 @@ function loadConfig({ env = process.env } = {}) {
     probeAutoGateway,
     probeAutoDns,
     probeTargets,
+    syslogEnabled,
+    syslogPort,
+    syslogBindAddress,
+    syslogUdp,
+    syslogTcp,
+    syslogFlushIntervalMs,
+    syslogMaxEvents,
+    syslogRatePerSec,
+    trapsEnabled,
+    trapPort,
+    trapBindAddress,
+    trapMaxEvents,
+    trapRatePerSec,
   };
 }
 

@@ -20,6 +20,10 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 | Traffic sources | proc · snmp · netflow · sflow (server picks per agent) |
 | Active probes | ping · tcp · dns · rdns · traceroute · tcptraceroute · http · tls |
 | Transaction tests | [`src/transactions/`](src/transactions/) — server pushes `transaction_config` over WS; the manager schedules each http/tcp/dns/icmp test (`interval_sec` ±10% jitter), runs an executor (Node core `http`/`https`/`net`/`dns` + system `ping`), classifies the failure phase, buffers results (max 1000, oldest dropped) and flushes `transaction_result` batches on reconnect. Config persists to a local JSON file with secrets AES-256-GCM-encrypted (key derived from the token) |
+| SNMP topology | [`snmpTopology.js`](src/snmpTopology.js) + [`snmpPoller.js`](src/snmpPoller.js) — the agent polls the **switches the server assigns to it** (`snmpTargets` in the agent config) for the forwarding table, LLDP neighbours and VLAN names, ALONGSIDE its own traffic sampling. Breaks the old 1:1 binding where `monitorConfig.source='snmp'` made a whole agent poll one device. **Bridge port is not ifIndex** — `dot1dBasePortIfIndex` is walked and resolved before anything is reported |
+| Device events | [`src/syslog/`](src/syslog/) — the agent is the **syslog collector**: devices on the customer's own network point their logging at it (udp+tcp **1514**, off by default), it parses RFC 3164/5424 per line, classifies the fault, masks credentials and batches to `POST /agents/me/device-events`. Bounded buffer + per-sender token bucket, so a switch in an STP loop cannot make the agent the outage |
+| SNMP traps | [`src/traps/`](src/traps/) — udp **1162**, off by default. Same start/drain/stats/stop contract as the syslog receiver, so both drain into ONE device-event batch. A trap is accepted only from an address this agent actually polls — v2c is unauthenticated and the source address is the strongest check it permits — and that is checked BEFORE any decoding |
+| Burst mode | [`burst.js`](src/burst.js) — one target, **once a second** for up to two minutes, on demand. Streams every sample as it is taken so the dashboard draws the chart live. Length and rate are clamped HERE as well as validated on the server: a burst is a packet generator, and the thing emitting the packets must not depend on the thing that asked having validated correctly. One at a time |
 | Tests | `node --test` over [`test/`](test) against [`test-support/fakeServer.js`](test-support/fakeServer.js) |
 
 ## Boot sequence
@@ -211,6 +215,19 @@ Server → agent commands ([`command.js`](src/command.js)):
   server's allowlist is not trusted (defense in depth). When a release public key is
   configured, a signed command with a bad signature is refused (reuses
   [`verifyManifest.js`](src/release/verifyManifest.js)). Never a write action.
+- **poll-snmp** (`poll[\s_-]?snmp`) → run an SNMP topology cycle NOW rather than waiting
+  out the per-device interval: each assigned switch's forwarding table, LLDP neighbours
+  and VLAN names ([`snmpPoller.js`](src/snmpPoller.js)), then
+  `POST /agents/me/snmp-topology`. Read-only on the device — it walks tables, it never
+  sets an OID — and one bad device costs itself, not the cycle.
+- **burst** (`burst` + a `target`) → measure that one target once a second for up to two
+  minutes ([`burst.js`](src/burst.js)), streaming a `burst_sample` frame per tick and
+  replying `command-result` with the whole series. The caps are enforced here, not only in
+  the server's validation — a caller that asks for an hour at 50 Hz gets two minutes at
+  2 Hz, and the reply says what was clamped, because the technician is mid-fault and a
+  rejection helps nobody. Refused, not queued, while one is already running.
+- **stop-burst** (`stop[\s_-]?burst`) → end the running burst at its next tick and report
+  the partial run. Whoever is watching the chart saw what they needed.
 
 ## Configuration & environment
 
@@ -271,6 +288,10 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | Commands | [`command.js`](src/command.js), [`commandAuth.js`](src/commandAuth.js) |
 | Measurement orchestration | [`testRunner.js`](src/testRunner.js), [`monitor.js`](src/monitor.js), [`systemMetrics.js`](src/systemMetrics.js) |
 | Traffic sources | [`trafficMonitor.js`](src/trafficMonitor.js), [`trafficMonitorWin.js`](src/trafficMonitorWin.js), [`snmpMonitor.js`](src/snmpMonitor.js), [`netflow/`](src/netflow), [`sflow/`](src/sflow) |
+| SNMP topology | [`snmpTopology.js`](src/snmpTopology.js) reads FDB/LLDP/VLAN (pure `buildTopology`, injectable reader — no device and no `net-snmp` needed to test it), [`snmpPoller.js`](src/snmpPoller.js) schedules per device with a 60 s floor, a 30 s per-device timeout and per-device error isolation |
+| Device events | [`syslog/receiver.js`](src/syslog/receiver.js) binds + buffers, [`syslog/parse.js`](src/syslog/parse.js) is the pure per-line parser (four dialects), [`syslog/classify.js`](src/syslog/classify.js) maps a line onto an `event_type` (unknown stays `syslog.raw`, never guessed), [`syslog/mask.js`](src/syslog/mask.js) redacts credentials BEFORE the line leaves the host |
+| SNMP traps | [`traps/translate.js`](src/traps/translate.js) is a TABLE of ~40 well-known trap OIDs, not a MIB compiler; an unknown trap keeps its OID and is never mapped to a neighbour. [`traps/receiver.js`](src/traps/receiver.js) binds + allowlists + folds. The interface is named from what the stage-02 poll already read, so “ifIndex 1” shows as “GigabitEthernet0/1” |
+| Burst mode | [`burst.js`](src/burst.js) — `planBurst()` is pure (the clamps), `createBurstRunner()` runs the ticks and subtracts the probe's own time so the cadence stays 1 Hz rather than drifting |
 | Connection table | [`connTable.js`](src/connTable.js) — established-TCP edges from `ss`/`netstat`/Get-NetTCPConnection (pure per-platform parsers + orientation + aggregation; injectable exec), reported in `capabilities.connections` |
 | Active probes | [`probes/`](src/probes); [`probes/curlArgs.js`](src/probes/curlArgs.js) keeps a server-supplied header/body from becoming a curl `@file` read, [`probes/safeRegex.js`](src/probes/safeRegex.js) bounds a server-supplied pattern in time + input so it can't wedge the event loop |
 | Logging | [`logger.js`](src/logger.js) |

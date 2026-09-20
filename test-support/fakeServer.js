@@ -4,6 +4,8 @@
 // agent's integration tests. It mirrors the real endpoints from prompts 4-5:
 //   POST /agents/enroll        -> { agentId, token } | 401
 //   POST /agents/results       -> 201 { inserted }   | 401 (Bearer token)
+//   POST /agents/me/device-events -> 202 { ingested } | 401 (Bearer token)
+//   POST /agents/me/snmp-topology -> 202 { ingested } | 401 (Bearer token)
 //   WS   /ws/agent             -> Bearer/query token; rejects with 401
 // The real server needs MySQL, which isn't available here, so the agent is
 // exercised against this faithful stub.
@@ -45,8 +47,13 @@ function startFakeServer(options = {}) {
   const receivedResults = [];
   const receivedCapabilities = [];
   const receivedDiscovery = [];
+  const receivedDeviceEvents = [];
+  const receivedSnmpTopology = [];
   const receivedSpeedtests = [];
   const monitorConfig = options.monitorConfig || { source: 'proc' };
+  // The switches the server has assigned to this agent to poll. Absent by
+  // default, which is what an older server looks like to a newer agent.
+  const snmpTargets = options.snmpTargets || null;
   const sockets = new Set();
 
   // Agent -> server WebSocket frames (acks, heartbeats), so tests can assert the
@@ -136,7 +143,9 @@ function startFakeServer(options = {}) {
         return;
       }
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ agentId: issuedAgentId, monitorConfig }));
+      const body = { agentId: issuedAgentId, monitorConfig };
+      if (snmpTargets) body.snmpTargets = snmpTargets;
+      res.end(JSON.stringify(body));
       return;
     }
 
@@ -151,6 +160,34 @@ function startFakeServer(options = {}) {
       receivedCapabilities.push(body.capabilities);
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ agentId: issuedAgentId, capabilities: body.capabilities }));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/agents/me/device-events') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid agent token' }));
+        return;
+      }
+      const body = await readJson(req);
+      receivedDeviceEvents.push({ token, events: body.events });
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, ingested: Array.isArray(body.events) ? body.events.length : 0 }));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/agents/me/snmp-topology') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid agent token' }));
+        return;
+      }
+      const body = await readJson(req);
+      receivedSnmpTopology.push(body);
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, devices: Array.isArray(body.devices) ? body.devices.length : 0 }));
       return;
     }
 
@@ -254,6 +291,14 @@ function startFakeServer(options = {}) {
         receivedResults,
         receivedCapabilities,
         receivedDiscovery,
+        receivedDeviceEvents,
+        receivedSnmpTopology,
+        // Posts a topology batch the way the agent's apiClient would, so a test
+        // can drive an injected poller straight at this server.
+        postSnmpTopology: async (payload) => {
+          receivedSnmpTopology.push(payload);
+          return { ok: true };
+        },
         receivedSpeedtests,
         socketCount: () => sockets.size,
         sendCommandToAll,
@@ -261,6 +306,7 @@ function startFakeServer(options = {}) {
         receivedWsMessages,
         waitForWsMessage,
         addValidToken: (t) => validTokens.add(t),
+        revokeAllTokens: () => validTokens.clear(),
         close: () =>
           new Promise((done) => {
             dropAllSockets();

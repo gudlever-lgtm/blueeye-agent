@@ -110,6 +110,15 @@ test('command recognisers: canonical + spelling variants are recognised; wrong v
     ['isInstallToolCommand', [{ name: 'install-tool', tool: 'traceroute' }], ['install-tool', { name: 'install-tool' }, { name: 'install-tool', tool: '' }, { name: 'install-tool', tool: 42 }]],
     ['isEvidenceCommand', ['evidence', 'evidence-snapshot', { name: 'evidence_snapshot' }], ['evident', 'snapshot']],
     ['isRunDiscoveryCommand', [{ name: 'run-discovery', discovery: {} }, { name: 'sweep', discovery: { cidrs: [] } }], ['run-discovery', { name: 'run-discovery' }, { name: 'run-discovery', discovery: 'all' }]],
+    // A burst REQUIRES a target: a burst with no destination is a packet
+    // generator with nowhere to point, so the bare verb must not be a command.
+    ['isBurstCommand', [{ name: 'burst', target: '10.14.0.11' }, { name: 'burst-mode', target: 'x' }], ['burst', { name: 'burst' }, { name: 'burst', target: '' }, { name: 'burst', target: 42 }]],
+    // Stop is its own verb rather than a flag on `burst`, so a stop can never
+    // be read as a start with missing parameters — a start nobody asked for.
+    ['isStopBurstCommand', ['stop-burst', 'burst-stop', { name: 'stop_burst' }], ['burst', 'stop']],
+    // poll-snmp takes an OPTIONAL deviceId (absent means "every switch assigned
+    // to me"), so unlike run-probe or install-tool the bare verb IS the command.
+    ['isPollSnmpCommand', ['poll-snmp', 'poll snmp', 'POLL_SNMP', { name: 'poll-snmp' }, { name: 'poll-snmp', deviceId: 7 }], ['poll', 'snmp', 'polls-nmp']],
     ['isRekeyCommand', [{ name: 'rekey', publicKey: 'pem' }, { name: 're-key', publicKey: 'pem' }, { name: 'rotate-key', publicKey: 'pem' }, { name: 're-pin', publicKey: 'pem' }], ['rekey', { name: 'rekey' }, { name: 'rekey', publicKey: '' }, { name: 'rekey', publicKey: 42 }, { name: 'key' }]],
   ];
   for (const [fn, yes, no] of cases) {
@@ -124,9 +133,9 @@ test('command recognisers: canonical + spelling variants are recognised; wrong v
 });
 
 test('no verb is recognised by two different recognisers', () => {
-  const verbs = ['run-test', 'run-probe', 'ping', 'update', 'speedtest', 'diagnose', 'delete', 'install-tool', 'evidence', 'run-discovery', 'rekey'];
+  const verbs = ['run-test', 'run-probe', 'ping', 'update', 'speedtest', 'diagnose', 'delete', 'install-tool', 'evidence', 'run-discovery', 'rekey', 'poll-snmp', 'burst', 'stop-burst'];
   for (const v of verbs) {
-    const full = { name: v, probe: { type: 'ping' }, tool: 't', discovery: {}, publicKey: 'pem' };
+    const full = { name: v, probe: { type: 'ping' }, tool: 't', discovery: {}, publicKey: 'pem', target: '10.0.0.1' };
     const hits = Object.entries(command).filter(([, fn]) => fn(full)).map(([n]) => n);
     assert.equal(hits.length, 1, `${v} matched ${hits.join(', ')}`);
   }

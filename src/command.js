@@ -10,6 +10,9 @@ const DELETE = /^(delete|self[\s_-]?delete|uninstall)$/i;
 const INSTALL_TOOL = /^install[\s_-]?tool$/i;
 const EVIDENCE = /^evidence(?:[\s_-]?snapshot)?$/i;
 const RUN_DISCOVERY = /^(run[\s_-]?discovery|discovery[\s_-]?sweep|sweep)$/i;
+const BURST = /^burst(?:[\s_-]?mode)?$/i;
+const BURST_STOP = /^(stop[\s_-]?burst|burst[\s_-]?stop)$/i;
+const POLL_SNMP = /^poll[\s_-]?snmp$/i;
 const REKEY = /^(rekey|re[\s_-]?key|rotate[\s_-]?key|repin|re[\s_-]?pin)$/i;
 
 function verbOf(command) {
@@ -90,6 +93,31 @@ function isRunDiscoveryCommand(command) {
   return RUN_DISCOVERY.test(verbOf(command)) && !!command && typeof command.discovery === 'object' && command.discovery !== null;
 }
 
+// Recognises a burst command: { name: 'burst', id, target, seconds?, hz?,
+// probe?, size?, df? } — measure one target once a second for up to two
+// minutes and stream every sample. The target is required: a burst with no
+// target is a packet generator with no destination.
+function isBurstCommand(command) {
+  return BURST.test(verbOf(command))
+    && !!command && typeof command === 'object'
+    && typeof command.target === 'string' && command.target.trim() !== '';
+}
+
+// Recognises a stop: { name: 'stop-burst', id }. Separate from `burst` rather
+// than a flag on it, so a stop can never be mistaken for a start with missing
+// parameters — which would be a start nobody asked for.
+function isStopBurstCommand(command) {
+  return BURST_STOP.test(verbOf(command));
+}
+
+// Recognises a poll-snmp command: { name: 'poll-snmp', deviceId? } — run an
+// SNMP topology cycle now rather than waiting out the per-device interval. A
+// missing deviceId means "every device assigned to me". Read-only on the
+// device: it walks tables, it never sets an OID.
+function isPollSnmpCommand(command) {
+  return POLL_SNMP.test(verbOf(command));
+}
+
 // Recognises a rekey command: { name: 'rekey', id, auditId, publicKey } — replace
 // the release trust anchor this host pins for signed self-updates. PRIVILEGED
 // (see Command authenticity): when the server can still sign, the command
@@ -101,4 +129,4 @@ function isRekeyCommand(command) {
   return REKEY.test(verbOf(command)) && !!command && typeof command.publicKey === 'string' && command.publicKey.trim() !== '';
 }
 
-module.exports = { isRekeyCommand, isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand };
+module.exports = { isBurstCommand, isStopBurstCommand, isPollSnmpCommand, isRekeyCommand, isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand };
