@@ -89,8 +89,14 @@ test('a walk that returns no EtherLike column at all still produces a sample', a
   assert.equal(r.interfaces[0].lateCollisions, null);
 });
 
-test('toNumber still turns an absent value into 0 — which is why the reader checks for the key instead', () => {
-  assert.equal(toNumber(undefined), 0);
-  assert.equal(toNumber(null), 0);
+test('toNumber says NULL for an absent value — the reader still checks for the key', () => {
+  // The shared coercion (src/snmp/session.js) distinguishes "the device did not
+  // answer" from "the device answered zero", which is the whole argument for
+  // the lateCollisions column above. The reader's hasOwnProperty check stays
+  // regardless: a column the WALK never returned is absent from the object, and
+  // no coercion can see a key that is not there.
+  assert.equal(toNumber(undefined), null);
+  assert.equal(toNumber(null), null);
   assert.equal(toNumber(7), 7);
+  assert.equal(toNumber(0), 0, 'a real zero is a real measurement');
 });

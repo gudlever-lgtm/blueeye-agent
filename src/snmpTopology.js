@@ -22,44 +22,37 @@
 // the mapping is missing the resolved fields are null and the row still says
 // where it came from, rather than inventing a port.
 
+const { IF_MIB, BRIDGE, Q_BRIDGE, LLDP, SYSTEM: SYS } = require('./snmp/oids');
+const {
+  openSession, closeSession, walkColumn, getScalars, toNumber, toText, toMac,
+} = require('./snmp/session');
+
+// The columns this module walks, assembled from the shared OID map. The names
+// are local so the rest of the file reads as it did; the numbers live in one
+// place now (src/snmp/oids.js) rather than being written out here and again in
+// snmpMonitor.js.
 const OID = {
-  // IF-MIB — the names the resolved ifIndex is turned into, plus the columns
-  // that describe the port itself. ifDescr is the FALLBACK identity: not every
-  // switch implements ifName, and a row built from the weaker one has to say so
-  // (see `nameSource` below and migration 108 on the server).
-  ifName: '1.3.6.1.2.1.31.1.1.1.1',
-  ifAlias: '1.3.6.1.2.1.31.1.1.1.18',
-  ifDescr: '1.3.6.1.2.1.2.2.1.2',
-  ifType: '1.3.6.1.2.1.2.2.1.3',
-  ifPhysAddress: '1.3.6.1.2.1.2.2.1.6',
-  ifAdminStatus: '1.3.6.1.2.1.2.2.1.7',
-  ifOperStatus: '1.3.6.1.2.1.2.2.1.8',
-  ifHighSpeed: '1.3.6.1.2.1.31.1.1.1.15',
-
-  // BRIDGE-MIB (RFC 4188). dot1dBasePortIfIndex is the join without which every
-  // forwarding-table answer is a guess.
-  dot1dBasePortIfIndex: '1.3.6.1.2.1.17.1.4.1.2',
-  dot1dTpFdbPort: '1.3.6.1.2.1.17.4.3.1.2',
-  dot1dTpFdbStatus: '1.3.6.1.2.1.17.4.3.1.3',
-
-  // Q-BRIDGE-MIB (RFC 4363) — the same table, per VLAN. Preferred, because a
-  // MAC can legitimately be in two VLANs and the older table cannot say so.
-  dot1qTpFdbPort: '1.3.6.1.2.1.17.7.1.2.2.1.2',
-  dot1qTpFdbStatus: '1.3.6.1.2.1.17.7.1.2.2.1.3',
-  dot1qVlanStaticName: '1.3.6.1.2.1.17.7.1.4.3.1.1',
-
-  // LLDP-MIB (IEEE 802.1AB) — neighbours as seen BY THE SWITCH, which is a
-  // different and usually larger set than the ones an agent host can see.
-  // The subtype columns are what say whether an id is a MAC or a name. Without
-  // them a 6-byte OCTET STRING is ambiguous — "Gi0/24" is exactly six bytes —
-  // and length alone would render a perfectly good port name as a MAC address.
-  lldpRemChassisIdSubtype: '1.0.8802.1.1.2.1.4.1.1.4',
-  lldpRemChassisId: '1.0.8802.1.1.2.1.4.1.1.5',
-  lldpRemPortIdSubtype: '1.0.8802.1.1.2.1.4.1.1.6',
-  lldpRemPortId: '1.0.8802.1.1.2.1.4.1.1.7',
-  lldpRemPortDesc: '1.0.8802.1.1.2.1.4.1.1.8',
-  lldpRemSysName: '1.0.8802.1.1.2.1.4.1.1.9',
-  lldpLocPortIdSubtype: '1.0.8802.1.1.2.1.3.7.1.2',
+  ifName: IF_MIB.ifName,
+  ifAlias: IF_MIB.ifAlias,
+  ifDescr: IF_MIB.ifDescr,
+  ifType: IF_MIB.ifType,
+  ifPhysAddress: IF_MIB.ifPhysAddress,
+  ifAdminStatus: IF_MIB.ifAdminStatus,
+  ifOperStatus: IF_MIB.ifOperStatus,
+  ifHighSpeed: IF_MIB.ifHighSpeed,
+  dot1dBasePortIfIndex: BRIDGE.dot1dBasePortIfIndex,
+  dot1dTpFdbPort: BRIDGE.dot1dTpFdbPort,
+  dot1dTpFdbStatus: BRIDGE.dot1dTpFdbStatus,
+  dot1qTpFdbPort: Q_BRIDGE.dot1qTpFdbPort,
+  dot1qTpFdbStatus: Q_BRIDGE.dot1qTpFdbStatus,
+  dot1qVlanStaticName: Q_BRIDGE.dot1qVlanStaticName,
+  lldpRemChassisIdSubtype: LLDP.lldpRemChassisIdSubtype,
+  lldpRemChassisId: LLDP.lldpRemChassisId,
+  lldpRemPortIdSubtype: LLDP.lldpRemPortIdSubtype,
+  lldpRemPortId: LLDP.lldpRemPortId,
+  lldpRemPortDesc: LLDP.lldpRemPortDesc,
+  lldpRemSysName: LLDP.lldpRemSysName,
+  lldpLocPortIdSubtype: LLDP.lldpLocPortIdSubtype,
 };
 
 // dot1qTpFdbStatus / dot1dTpFdbStatus. `self` is the switch's own address and
@@ -137,67 +130,30 @@ function decodeLldpId(value, subtype) {
   return value.toString('hex');
 }
 
-function toStr(v) {
-  if (v == null) return null;
-  if (Buffer.isBuffer(v)) return v.toString('utf8').replace(/\0+$/, '').trim() || null;
-  const s = String(v).trim();
-  return s || null;
-}
+// Local aliases for the shared coercions, so the call sites below read as they
+// always have.
+const toStr = toText;
+const toNum = toNumber;
 
 // ifAdminStatus / ifOperStatus, as IF-MIB numbers them. An unlisted value
 // becomes null rather than a guess: an unknown status is not a status.
 const IF_STATUS = { 1: 'up', 2: 'down', 3: 'testing', 4: 'unknown', 5: 'dormant', 6: 'notPresent', 7: 'lowerLayerDown' };
 const ADMIN_STATUS = { 1: 'up', 2: 'down', 3: 'testing' };
 
-// ifPhysAddress is a 6-byte OCTET STRING. Rendered here so the server stores
-// one spelling; anything that is not six bytes is not a MAC and becomes null.
-function toMac(v) {
-  if (!Buffer.isBuffer(v) || v.length !== 6) return null;
-  return [...v].map((b) => b.toString(16).padStart(2, '0')).join(':');
-}
-
-function toNum(v) {
-  if (Buffer.isBuffer(v)) return v.length ? v.readUIntBE(0, Math.min(v.length, 6)) : 0;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-// Walks one column and returns { [indexSuffix]: value }. Same helper shape as
-// snmpMonitor.walkColumn; kept local so neither file owns the other's lifetime.
-function walkColumn(session, baseOid) {
-  return new Promise((resolve, reject) => {
-    const out = {};
-    session.subtree(
-      baseOid,
-      (varbinds) => {
-        for (const vb of varbinds) {
-          if (vb.type === undefined) continue; // error varbind
-          out[vb.oid.slice(baseOid.length + 1)] = vb.value;
-        }
-      },
-      (err) => (err ? reject(err) : resolve(out)),
-    );
-  });
-}
 
 // The default reader. Every column except the bridge-port map is best-effort:
 // a device that does not implement Q-BRIDGE must still yield its BRIDGE-MIB
 // table, and a device with no LLDP must still yield its forwarding table.
 async function defaultReadTables(snmp, { collect = ['if', 'fdb', 'lldp', 'vlan'] } = {}) {
-  let net;
+  const session = openSession(snmp);
   try {
-    net = require('net-snmp');
-  } catch {
-    const err = new Error('SNMP topology requested but the optional "net-snmp" dependency is not installed.');
-    err.code = 'SNMP_UNAVAILABLE';
-    throw err;
-  }
-  const version = snmp.version === '1' ? net.Version1 : net.Version2c;
-  const session = net.createSession(snmp.host, snmp.community || 'public', {
-    port: snmp.port || 161,
-    version,
-  });
-  try {
+    // sysUpTime FIRST, in one GET beside the device's own name. It is read on
+    // every poll whatever else was asked for, because it is what says whether
+    // the NEXT poll's counter delta is a measurement or an artefact of a
+    // reboot — and reading it needs one round trip against a device we have
+    // already opened a session to.
+    const system = await getScalars(session, [SYS.sysUpTime, SYS.sysName, SYS.sysDescr])
+      .catch(() => ({}));
     const safe = (oid) => walkColumn(session, oid).catch(() => ({}));
     const want = new Set(collect);
 
@@ -237,6 +193,12 @@ async function defaultReadTables(snmp, { collect = ['if', 'fdb', 'lldp', 'vlan']
     ]);
 
     return {
+      // Hundredths of a second since the device last re-initialised, and what
+      // the device calls itself. Null when it did not answer — an unknown
+      // uptime must never read as "just booted".
+      sysUpTimeTicks: toNumber(system[SYS.sysUpTime]),
+      sysName: toText(system[SYS.sysName]),
+      sysDescr: toText(system[SYS.sysDescr]),
       ifName, ifAlias, ifDescr, ifType, ifPhysAddress, ifAdminStatus, ifOperStatus, ifHighSpeed,
       basePortIfIndex,
       qFdbPort, qFdbStatus, dFdbPort, dFdbStatus,
@@ -244,7 +206,7 @@ async function defaultReadTables(snmp, { collect = ['if', 'fdb', 'lldp', 'vlan']
       lldpChassis, lldpChassisSubtype, lldpPort, lldpPortSubtype, lldpPortDesc, lldpSysName,
     };
   } finally {
-    try { session.close(); } catch { /* ignore */ }
+    closeSession(session);
   }
 }
 
@@ -448,6 +410,13 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
   if (vlans.length) supported.push('vlan');
 
   return {
+    // The device's own clock and name, straight through. sysUpTime is what the
+    // server compares against the ELAPSED REAL TIME to decide whether a counter
+    // delta survived a reboot — a device that restarted and came back up
+    // between two polls has a RISING uptime that rose by less than the wall
+    // clock did, which is the case everybody forgets.
+    sysUpTimeTicks: t.sysUpTimeTicks ?? null,
+    sysName: t.sysName ?? null,
     interfaces,
     fdb,
     fdbTruncated,
