@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const { verifyManifest } = require('./release/verifyManifest');
+const releaseGuard = require('./release/releaseGuard');
 
 // Self-update for systemd-managed agents. Given the server URL + token and the
 // command's expectations, it:
@@ -32,6 +33,7 @@ function createSelfUpdater({
   keepReleases = 3,
   exec = spawnSync,
   fsImpl = fs,
+  guard = releaseGuard,
   logger = console,
 } = {}) {
   function fail(code, message) {
@@ -232,6 +234,13 @@ function createSelfUpdater({
     if (prev && path.resolve(prev) !== path.resolve(newDir)) {
       try { fsImpl.writeFileSync(path.join(releasesDir, '.previous'), prev); } catch { /* best-effort */ }
     }
+    // The release is installed but UNPROVEN. Mark it here — this is the last
+    // moment code that is certainly working gets to run: after the restart, the
+    // process making decisions is the new release itself, and the failure this
+    // guards against is exactly the one where that process never runs. The
+    // marker is cleared by the new agent once it has held a server connection
+    // (releaseGuard.confirmRelease), and the guard rolls back if it never is.
+    guard.markPending(releasesDir, path.basename(newDir), { fsImpl });
     pruneReleases(newDir, prev);
   }
 

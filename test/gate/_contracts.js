@@ -49,6 +49,23 @@ const crypto = require('crypto');
 // blueeye-agent/src/release/canonicalize.js.
 const CANONICALIZE_DIGEST = 'e703fc7c35b09e3a8a9c161122cc0ab25988a1b3175dfbf521714a4964b577d7';
 
+// src/release/fingerprint.js — THE definition of a public key's fingerprint for
+// the whole product: SHA-256 over the key's SPKI DER bytes. blueeye-licens signs
+// that fingerprint into the licence proof and this agent computes it over the key
+// a server offers, so a divergence means no agent accepts any key. Duplicated
+// byte-for-byte in blueeye-licens (src/lib/fingerprint.js) and blueeye-server
+// (src/lib/fingerprint.js).
+const FINGERPRINT_DIGEST = '22351ca4ca228ed751f8c80c9202c14665885e551e56a003336a09b6a0b5e661';
+
+// The vendor's public key, as embedded in this agent (src/license/vendorRoot.js)
+// and in blueeye-server (src/license/publicKey.js). It is the permanent trust
+// anchor: the agent verifies the licence proof that authorises a server's release
+// key against it. The two copies must be the same key, or an agent rejects every
+// authorisation its own server relays.
+const VENDOR_ROOT_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAZpCaHLTayNw1SOfTRSoWKfUZWC2RJrUK7yoLdVhCyxo=
+-----END PUBLIC KEY-----`;
+
 // blueeye-server/src/protocol.js and blueeye-agent/src/protocol.js.
 const PROTOCOL_VERSION = 1;
 
@@ -105,6 +122,8 @@ function digestOf(source) {
 }
 
 module.exports = {
+  FINGERPRINT_DIGEST,
+  VENDOR_ROOT_PUBLIC_KEY,
   CANONICALIZE_DIGEST,
   CANONICALIZE_VECTORS,
   PROTOCOL_VERSION,

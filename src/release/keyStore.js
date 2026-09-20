@@ -27,6 +27,14 @@ const { spawnSync } = require('child_process');
 // it is only ever written by a rekey this agent accepted.
 
 const FILE_NAME = 'release-key.pem';
+// What this host has accepted from the vendor, beside the key itself:
+//   { sequence, licenseId, customerId, fingerprint, vendorRooted, acceptedAt }
+// `vendorRooted` is a ONE-WAY latch. Until the first vendor-authorised key
+// arrives, a rekey signed with the key being replaced is still accepted — that
+// is the migration path for every agent installed before this chain existed.
+// Once one has arrived, nothing but a vendor authorisation is ever accepted
+// again, and no server can clear the latch: it is only ever set, never unset.
+const TRUST_STATE_FILE = 'release-trust.json';
 
 function looksLikePem(value) {
   return typeof value === 'string' && value.includes('BEGIN PUBLIC KEY');
@@ -35,8 +43,71 @@ function looksLikePem(value) {
 // The pinned-key path for a given token path (same directory — the one place
 // the agent is guaranteed to be able to write).
 function pinnedKeyPath(tokenPath) {
-  const dir = tokenPath ? path.dirname(String(tokenPath)) : path.join(__dirname, '..', '..', '.blueeye-agent');
-  return path.join(dir, FILE_NAME);
+  return path.join(stateDir(tokenPath), FILE_NAME);
+}
+
+function stateDir(tokenPath) {
+  return tokenPath ? path.dirname(String(tokenPath)) : path.join(__dirname, '..', '..', '.blueeye-agent');
+}
+
+function trustStatePath(pinnedPath) {
+  return path.join(path.dirname(String(pinnedPath || '')), TRUST_STATE_FILE);
+}
+
+// What this agent has accepted so far. A missing or unreadable file reads as
+// "nothing accepted yet", which is the safe direction: it can only make the
+// agent ask for MORE proof (the latch defaults off), never less.
+function readTrustState(pinnedPath, { fsImpl = fs } = {}) {
+  const empty = { sequence: null, licenseId: null, customerId: null, fingerprint: null, vendorRooted: false, acceptedAt: null };
+  if (!pinnedPath) return empty;
+  try {
+    const raw = JSON.parse(fsImpl.readFileSync(trustStatePath(pinnedPath), 'utf8'));
+    if (!raw || typeof raw !== 'object') return empty;
+    const sequence = Number.isInteger(raw.sequence) ? raw.sequence : null;
+    return {
+      sequence,
+      licenseId: raw.licenseId != null ? String(raw.licenseId) : null,
+      customerId: raw.customerId != null ? String(raw.customerId) : null,
+      fingerprint: isFingerprintLike(raw.fingerprint) ? raw.fingerprint : null,
+      // Latched by the data, not by a flag a rewrite could drop: having ever
+      // accepted a sequence IS having been vendor-rooted.
+      vendorRooted: raw.vendorRooted === true || sequence !== null,
+      acceptedAt: typeof raw.acceptedAt === 'string' ? raw.acceptedAt : null,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+function isFingerprintLike(value) {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
+
+// Records an accepted vendor authorisation. Written atomically, and never
+// backwards: a lower sequence than the one already stored is ignored rather
+// than written, so even a bug here cannot roll the anchor back.
+function writeTrustState(pinnedPath, next, { fsImpl = fs } = {}) {
+  if (!pinnedPath || !next) return false;
+  const current = readTrustState(pinnedPath, { fsImpl });
+  if (current.sequence != null && Number(next.sequence) < current.sequence) return false;
+  const file = trustStatePath(pinnedPath);
+  const body = JSON.stringify({
+    sequence: Number.isInteger(next.sequence) ? next.sequence : current.sequence,
+    licenseId: next.licenseId != null ? String(next.licenseId) : current.licenseId,
+    customerId: next.customerId != null ? String(next.customerId) : current.customerId,
+    fingerprint: isFingerprintLike(next.fingerprint) ? next.fingerprint : current.fingerprint,
+    vendorRooted: true,
+    acceptedAt: new Date().toISOString(),
+  }, null, 2);
+  try {
+    fsImpl.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fsImpl.writeFileSync(tmp, `${body}\n`, { mode: 0o600 });
+    fsImpl.renameSync(tmp, file);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Accepts PEM or base64-of-PEM (the form the systemd unit carries) and returns
@@ -127,6 +198,7 @@ function fingerprintOf(pem) {
 }
 
 module.exports = {
-  FILE_NAME, pinnedKeyPath, normalizePem, validatePublicKey, readPinnedKey,
+  FILE_NAME, TRUST_STATE_FILE, pinnedKeyPath, trustStatePath, readTrustState, writeTrustState,
+  normalizePem, validatePublicKey, readPinnedKey,
   writePinnedKey, syncSystemdDropIn, fingerprintOf, looksLikePem, tmpdir: os.tmpdir,
 };
