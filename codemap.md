@@ -20,6 +20,7 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 | Traffic sources | proc · snmp · netflow · sflow (server picks per agent) |
 | Active probes | ping · tcp · dns · rdns · traceroute · tcptraceroute · http · tls |
 | Transaction tests | [`src/transactions/`](src/transactions/) — server pushes `transaction_config` over WS; the manager schedules each http/tcp/dns/icmp test (`interval_sec` ±10% jitter), runs an executor (Node core `http`/`https`/`net`/`dns` + system `ping`), classifies the failure phase, buffers results (max 1000, oldest dropped) and flushes `transaction_result` batches on reconnect. Config persists to a local JSON file with secrets AES-256-GCM-encrypted (key derived from the token) |
+| Device events | [`src/syslog/`](src/syslog/) — the agent is the **syslog collector**: devices on the customer's own network point their logging at it (udp+tcp **1514**, off by default), it parses RFC 3164/5424 per line, classifies the fault, masks credentials and batches to `POST /agents/me/device-events`. Bounded buffer + per-sender token bucket, so a switch in an STP loop cannot make the agent the outage |
 | Tests | `node --test` over [`test/`](test) against [`test-support/fakeServer.js`](test-support/fakeServer.js) |
 
 ## Boot sequence
@@ -271,6 +272,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | Commands | [`command.js`](src/command.js), [`commandAuth.js`](src/commandAuth.js) |
 | Measurement orchestration | [`testRunner.js`](src/testRunner.js), [`monitor.js`](src/monitor.js), [`systemMetrics.js`](src/systemMetrics.js) |
 | Traffic sources | [`trafficMonitor.js`](src/trafficMonitor.js), [`trafficMonitorWin.js`](src/trafficMonitorWin.js), [`snmpMonitor.js`](src/snmpMonitor.js), [`netflow/`](src/netflow), [`sflow/`](src/sflow) |
+| Device events | [`syslog/receiver.js`](src/syslog/receiver.js) binds + buffers, [`syslog/parse.js`](src/syslog/parse.js) is the pure per-line parser (four dialects), [`syslog/classify.js`](src/syslog/classify.js) maps a line onto an `event_type` (unknown stays `syslog.raw`, never guessed), [`syslog/mask.js`](src/syslog/mask.js) redacts credentials BEFORE the line leaves the host |
 | Connection table | [`connTable.js`](src/connTable.js) — established-TCP edges from `ss`/`netstat`/Get-NetTCPConnection (pure per-platform parsers + orientation + aggregation; injectable exec), reported in `capabilities.connections` |
 | Active probes | [`probes/`](src/probes); [`probes/curlArgs.js`](src/probes/curlArgs.js) keeps a server-supplied header/body from becoming a curl `@file` read, [`probes/safeRegex.js`](src/probes/safeRegex.js) bounds a server-supplied pattern in time + input so it can't wedge the event loop |
 | Logging | [`logger.js`](src/logger.js) |

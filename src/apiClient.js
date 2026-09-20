@@ -86,6 +86,19 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     return jsonOrEmpty(res);
   }
 
+  // Posts device events (syslog now, SNMP traps later) this agent RECEIVED from
+  // the network devices pointing at it. One batch per flush interval; the server
+  // resolves each sender to a device and folds repeats.
+  async function postDeviceEvents(events) {
+    const res = await fetchImpl(`${serverUrl}/agents/me/device-events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ events }),
+    });
+    assertOk(res, 'posting device events', 'post device events');
+    return jsonOrEmpty(res);
+  }
+
   // Reports what this agent can do (e.g. { sources: ['proc','snmp'] }).
   async function postCapabilities(capabilities) {
     const res = await fetchImpl(`${serverUrl}/agents/me/capabilities`, {
@@ -97,7 +110,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
     return jsonOrEmpty(res);
   }
 
-  return { postResults, getConfig, postCapabilities, postProbeResults, postDiscoveryResults, postSpeedtest };
+  return { postResults, getConfig, postCapabilities, postProbeResults, postDiscoveryResults, postSpeedtest, postDeviceEvents };
 }
 
 module.exports = { createApiClient };

@@ -4,6 +4,7 @@
 // agent's integration tests. It mirrors the real endpoints from prompts 4-5:
 //   POST /agents/enroll        -> { agentId, token } | 401
 //   POST /agents/results       -> 201 { inserted }   | 401 (Bearer token)
+//   POST /agents/me/device-events -> 202 { ingested } | 401 (Bearer token)
 //   WS   /ws/agent             -> Bearer/query token; rejects with 401
 // The real server needs MySQL, which isn't available here, so the agent is
 // exercised against this faithful stub.
@@ -45,6 +46,7 @@ function startFakeServer(options = {}) {
   const receivedResults = [];
   const receivedCapabilities = [];
   const receivedDiscovery = [];
+  const receivedDeviceEvents = [];
   const receivedSpeedtests = [];
   const monitorConfig = options.monitorConfig || { source: 'proc' };
   const sockets = new Set();
@@ -154,6 +156,20 @@ function startFakeServer(options = {}) {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/agents/me/device-events') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid agent token' }));
+        return;
+      }
+      const body = await readJson(req);
+      receivedDeviceEvents.push({ token, events: body.events });
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, ingested: Array.isArray(body.events) ? body.events.length : 0 }));
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/agents/discovery-results') {
       const token = bearer(req);
       if (!token || !validTokens.has(token)) {
@@ -254,6 +270,7 @@ function startFakeServer(options = {}) {
         receivedResults,
         receivedCapabilities,
         receivedDiscovery,
+        receivedDeviceEvents,
         receivedSpeedtests,
         socketCount: () => sockets.size,
         sendCommandToAll,
@@ -261,6 +278,7 @@ function startFakeServer(options = {}) {
         receivedWsMessages,
         waitForWsMessage,
         addValidToken: (t) => validTokens.add(t),
+        revokeAllTokens: () => validTokens.clear(),
         close: () =>
           new Promise((done) => {
             dropAllSockets();

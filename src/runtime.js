@@ -33,6 +33,7 @@ const { createSecretStore } = require('./transactions/secretStore');
 const { createConfigStore } = require('./transactions/configStore');
 const { createResultBuffer } = require('./transactions/buffer');
 const { createTransactionManager } = require('./transactions/manager');
+const { createSyslogReceiver } = require('./syslog/receiver');
 
 // Hard cap on how many targets one scheduled cycle will probe, so a giant
 // configured/nameserver list can't turn into a burst.
@@ -95,6 +96,10 @@ function createAgentRuntime({
   toolInstaller = null,
   actionLog = null,
   hsflowdManager = null,
+  // Receives syslog from the network devices pointing at this host. Injectable
+  // so tests drive it through ingestLine() without binding a port; null means
+  // "build the real one if config.syslogEnabled".
+  syslogReceiver = null,
   // Where a server-sent rekey stores this host's trust anchor (beside the token —
   // the one directory the agent is guaranteed to be able to write). Injectable.
   pinnedKeyPath = keyStore.pinnedKeyPath(config && config.tokenPath),
@@ -152,6 +157,23 @@ function createAgentRuntime({
   client.on('transaction-config', (tests) => {
     try { txManager.applyConfig(tests); } catch (err) { logger.warn(`Failed to apply transaction config: ${err.message}`); }
   });
+
+  // Syslog: built only when enabled, so a host that never turned it on binds
+  // nothing and allocates nothing. An injected receiver always wins (tests).
+  const syslog = syslogReceiver || (config.syslogEnabled
+    ? createSyslogReceiver({
+      port: config.syslogPort,
+      bindAddress: config.syslogBindAddress,
+      udp: config.syslogUdp,
+      tcp: config.syslogTcp,
+      maxEvents: config.syslogMaxEvents,
+      ratePerSec: config.syslogRatePerSec,
+      logger,
+    })
+    : null);
+  let syslogTimer = null;
+  let syslogBound = null; // what start() actually managed to bind, or null
+  let lastDeviceEventAt = null; // ms epoch of the last successful flush
 
   let reportTimer = null;
   let reportingStarted = false; // true once the bootstrap called startReporting()
@@ -426,6 +448,76 @@ function createAgentRuntime({
     }
   }
 
+  // Drains the syslog buffer and ships one batch. A 401 is fatal; anything else
+  // is non-terminal — but the drained events are NOT put back. A server that is
+  // down for an hour would otherwise have the agent hold an hour of log lines in
+  // memory on a host it does not own, and the receiver's own bounded buffer
+  // exists precisely so this process never becomes the outage. The counters in
+  // stats() record what was lost, so the gap is visible rather than silent.
+  async function flushDeviceEvents() {
+    if (fatal || !syslog) return 0;
+    let events;
+    try {
+      events = syslog.drain();
+    } catch (err) {
+      logger.warn(`Could not drain syslog buffer (${err.message}).`);
+      return 0;
+    }
+    if (!events.length) return 0;
+    try {
+      await api.postDeviceEvents(events);
+      lastDeviceEventAt = Date.now();
+      logger.info(`Submitted ${events.length} device event(s).`);
+      emitter.emit('device-events', events.length);
+      return events.length;
+    } catch (err) {
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return 0; }
+      logger.warn(`Could not submit ${events.length} device event(s) (${err.message}).`);
+      reportError('device-events', err);
+      return 0;
+    }
+  }
+
+  // Binds the receiver and starts the flush timer. A bind failure is reported
+  // and survived: the agent's traffic reporting and probes must keep working on
+  // a host where something else already holds the port.
+  async function startSyslog() {
+    if (!syslog || fatal) return;
+    try {
+      syslogBound = typeof syslog.start === 'function' ? await syslog.start() : { injected: true };
+      emitter.emit('syslog', syslogBound);
+    } catch (err) {
+      logger.warn(`Syslog receiver did not start (${err.message}).`);
+      reportError('syslog-bind', err);
+      emitter.emit('syslog', null);
+      return;
+    }
+    const intervalMs = config.syslogFlushIntervalMs;
+    if (!intervalMs || intervalMs <= 0) return;
+    let running = false;
+    syslogTimer = setInterval(async () => {
+      if (fatal || running) return;
+      running = true;
+      try {
+        await flushDeviceEvents();
+      } finally {
+        running = false;
+      }
+    }, intervalMs);
+    if (syslogTimer.unref) syslogTimer.unref();
+  }
+
+  function stopSyslog() {
+    if (syslogTimer) {
+      clearInterval(syslogTimer);
+      syslogTimer = null;
+    }
+    if (syslog && typeof syslog.stop === 'function') {
+      try { syslog.stop(); } catch { /* shutdown must not throw */ }
+    }
+    syslogBound = null;
+  }
+
   // Resolves the scheduled probe set (gateway + DNS + configured), runs each and
   // submits the batch in one POST. A 401 is fatal; other errors are non-terminal.
   // runProbe never throws, so a single bad target can't abort the cycle.
@@ -524,6 +616,16 @@ function createAgentRuntime({
       lastReportAt: lastReportAt ? new Date(lastReportAt).toISOString() : null,
       collector: stats ? { kind, ...stats } : null,
       hsflowd: lastHsflowdState ? { state: lastHsflowdState.state, detail: lastHsflowdState.detail || null } : null,
+      // Same question as the flow pipeline, one layer over: are device events
+      // arriving at all, are they being refused by the rate limit, and is the
+      // buffer overflowing? Answerable from the dashboard, without host access.
+      syslog: syslog && typeof syslog.stats === 'function'
+        ? {
+          ...syslog.stats(),
+          bound: syslogBound,
+          lastSubmitAt: lastDeviceEventAt ? new Date(lastDeviceEventAt).toISOString() : null,
+        }
+        : null,
     };
   }
 
@@ -918,6 +1020,7 @@ function createAgentRuntime({
         if (fatal) return;
         startReporting();
         startScheduledProbes();
+        await startSyslog();
         // Start running any persisted transaction tests (server pushes fresh
         // config on connect, which replaces these).
         try { txManager.start(); } catch (err) { logger.warn(`Transaction manager start failed: ${err.message}`); }
@@ -926,6 +1029,7 @@ function createAgentRuntime({
     stop() {
       stopReporting();
       stopScheduledProbes();
+      stopSyslog();
       txManager.stop();
       if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
       client.stop();
@@ -933,6 +1037,7 @@ function createAgentRuntime({
     // Exposed for tests / manual triggering.
     reportNow: () => runAndSubmit({ name: 'auto-report', intervalMs: config.reportSampleMs }, 'manual'),
     runScheduledProbesNow: () => runScheduledProbes(),
+    flushDeviceEventsNow: () => flushDeviceEvents(),
     getMonitorConfig: () => monitorConfig,
     getHsflowdState: () => lastHsflowdState,
     getDiagnostic: () => buildDiagnostic(),
