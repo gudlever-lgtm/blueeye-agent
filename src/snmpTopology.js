@@ -446,7 +446,10 @@ async function pollSnmpTopology({
     : ['if', 'fdb', 'lldp', 'vlan'];
 
   const tables = await readTables(
-    { host: device.host, port: device.port, version: device.version, community: device.community },
+    {
+      host: device.host, port: device.port, version: device.version,
+      community: device.community, v3: device.v3,
+    },
     { collect },
   );
   const topology = buildTopology(tables, { maxFdb, maxNeighbours });

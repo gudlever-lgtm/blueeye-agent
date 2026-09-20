@@ -185,3 +185,82 @@ test('net-snmp is present, so the SNMP features actually run', () => {
   // deployed host — the audit's first finding.
   assert.doesNotThrow(() => loadNetSnmp('SNMP'));
 });
+
+// ==================================================================== v3
+// The server resolves ONE credential per device and sends it; the agent never
+// tries alternatives. Trying credentials in order against an address is
+// credential spraying — it locks v3 accounts, and on v2c a wrong community
+// usually just times out.
+
+function v3Snmp(calls) {
+  return {
+    Version1: 0, Version2c: 1, Version3: 3,
+    SecurityLevel: { noAuthNoPriv: 1, authNoPriv: 2, authPriv: 3 },
+    AuthProtocols: { md5: 1, sha: 2, sha256: 5 },
+    PrivProtocols: { des: 2, aes: 4, aes256b: 6 },
+    createSession: (host, community, opts) => { calls.push({ kind: 'v2c', host, community, opts }); return {}; },
+    createV3Session: (host, user, opts) => { calls.push({ kind: 'v3', host, user, opts }); return {}; },
+  };
+}
+
+test('a v3 credential opens a v3 session', () => {
+  const calls = [];
+  openSession({
+    host: '10.14.0.11', version: '3',
+    v3: { user: 'blueeye', authProto: 'sha256', authKey: 'authsecret', privProto: 'aes', privKey: 'privsecret' },
+  }, { snmp: v3Snmp(calls) });
+
+  assert.equal(calls[0].kind, 'v3');
+  assert.equal(calls[0].user.name, 'blueeye');
+  assert.equal(calls[0].user.level, 3, 'authPriv');
+  assert.equal(calls[0].user.authProtocol, 5);
+  assert.equal(calls[0].user.privProtocol, 4);
+});
+
+test('the security LEVEL is derived from the keys, never stated', () => {
+  // A stated level can disagree with the keys, and the keys are what actually
+  // happens on the wire. Deriving it means the two cannot drift.
+  const calls = [];
+  const snmp = v3Snmp(calls);
+  openSession({ host: 'h', version: '3', v3: { user: 'u' } }, { snmp });
+  openSession({ host: 'h', version: '3', v3: { user: 'u', authProto: 'sha', authKey: 'k' } }, { snmp });
+  openSession({ host: 'h', version: '3', v3: { user: 'u', authProto: 'sha', authKey: 'k', privProto: 'aes', privKey: 'p' } }, { snmp });
+
+  assert.equal(calls[0].user.level, 1, 'noAuthNoPriv');
+  assert.equal(calls[1].user.level, 2, 'authNoPriv');
+  assert.equal(calls[2].user.level, 3, 'authPriv');
+});
+
+test('a priv key without an auth key is NOT authPriv', () => {
+  // SNMPv3 cannot encrypt without authenticating. A credential like this is
+  // misconfigured, and pretending otherwise would send the keys in a mode the
+  // device will refuse.
+  const calls = [];
+  openSession({ host: 'h', version: '3', v3: { user: 'u', privProto: 'aes', privKey: 'p' } }, { snmp: v3Snmp(calls) });
+  assert.equal(calls[0].user.level, 1, 'noAuthNoPriv, because there is no auth');
+  assert.equal(calls[0].user.privKey, undefined);
+});
+
+test('version 3 with no user is refused, not silently downgraded', () => {
+  // Falling back to a community would authenticate with something that does
+  // not exist on a v3-only device — and worse, would look like it worked
+  // wherever v2c is still enabled.
+  assert.throws(
+    () => openSession({ host: 'h', version: '3' }, { snmp: v3Snmp([]) }),
+    /SNMPv3 needs a user/,
+  );
+});
+
+test('a v3 credential on a device row still saying 2c still opens v3', () => {
+  // The version that runs is the CREDENTIAL's. A profile upgraded to v3 must
+  // not be undone by a device row nobody remembered to edit.
+  const calls = [];
+  openSession({ host: 'h', version: '2c', v3: { user: 'u', authProto: 'sha', authKey: 'k' } }, { snmp: v3Snmp(calls) });
+  assert.equal(calls[0].kind, 'v3');
+});
+
+test('the v3 context is passed when the device needs one stated', () => {
+  const calls = [];
+  openSession({ host: 'h', version: '3', v3: { user: 'u', context: 'vlan-20' } }, { snmp: v3Snmp(calls) });
+  assert.equal(calls[0].opts.context, 'vlan-20');
+});

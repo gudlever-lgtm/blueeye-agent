@@ -77,18 +77,49 @@ function toMac(value) {
   return [...value].map((b) => b.toString(16).padStart(2, '0')).join(':');
 }
 
-// Opens a session to one device. v1/v2c today; `createV3Session` is what a v3
-// credential would use, and the shape of this function is what keeps that a
-// change in one place rather than three.
+// Opens a session to one device — v1, v2c or v3.
+//
+// THE SERVER DECIDES WHICH. The agent receives one resolved credential per
+// device in `snmpTargets` and never tries alternatives: trying credentials in
+// order against an address is credential spraying, it locks v3 accounts, and on
+// v2c a wrong community usually just times out.
+//
+// v3's SECURITY LEVEL is derived from which keys are present rather than sent
+// as a field, for the same reason the server derives it: a stated level can
+// disagree with the keys, and the keys are what actually happens on the wire.
 function openSession(device, { snmp = null, timeoutMs = 5000, retries = 1 } = {}) {
   const net = snmp || loadNetSnmp();
-  const version = String(device.version) === '1' ? net.Version1 : net.Version2c;
-  return net.createSession(device.host, device.community || 'public', {
-    port: device.port || 161,
-    version,
-    timeout: timeoutMs,
-    retries,
-  });
+  const options = { port: device.port || 161, timeout: timeoutMs, retries };
+
+  const v3 = device.v3 && device.v3.user ? device.v3 : null;
+  if (v3 || String(device.version) === '3') {
+    if (!v3 || !v3.user) {
+      const err = new Error('SNMPv3 needs a user; none was supplied for this device.');
+      err.code = 'SNMP_BAD_CREDENTIAL';
+      throw err;
+    }
+    const hasAuth = !!(v3.authKey && v3.authProto);
+    const hasPriv = hasAuth && !!(v3.privKey && v3.privProto);
+    options.version = net.Version3;
+    if (v3.context) options.context = v3.context;
+    const user = {
+      name: v3.user,
+      level: hasPriv ? net.SecurityLevel.authPriv
+        : (hasAuth ? net.SecurityLevel.authNoPriv : net.SecurityLevel.noAuthNoPriv),
+    };
+    if (hasAuth) {
+      user.authProtocol = net.AuthProtocols[v3.authProto];
+      user.authKey = v3.authKey;
+    }
+    if (hasPriv) {
+      user.privProtocol = net.PrivProtocols[v3.privProto];
+      user.privKey = v3.privKey;
+    }
+    return net.createV3Session(device.host, user, options);
+  }
+
+  options.version = String(device.version) === '1' ? net.Version1 : net.Version2c;
+  return net.createSession(device.host, device.community || 'public', options);
 }
 
 // Walks one columnar OID and returns { [indexSuffix]: rawValue }, where the

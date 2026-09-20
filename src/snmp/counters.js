@@ -187,7 +187,8 @@ async function pollSnmpCounters({ device, readCounters = defaultReadCounters, no
   }
   const readAt = now();
   const out = await readCounters({
-    host: device.host, port: device.port, version: device.version, community: device.community,
+    host: device.host, port: device.port, version: device.version,
+    community: device.community, v3: device.v3,
   });
   return {
     deviceId: device.deviceId,
