@@ -8,8 +8,12 @@ See **[codemap.md](codemap.md)** for the module map.
 
 ## Conventions (must follow)
 
-- **CommonJS only**, plain Node.js, single runtime dependency (`ws`). **No** build
-  step, **not** TypeScript, **not** ESM.
+- **CommonJS only**, plain Node.js. **No** build step, **not** TypeScript, **not** ESM.
+  Two runtime dependencies: `ws`, and `net-snmp` as an **optional** one — it is
+  installed by every install path (`npm ci --omit=dev` takes optional deps), and a
+  host where it fails to install still runs, with `capabilities.unavailable.snmp`
+  saying so. Every SNMP module lazily `require`s it inside a try/catch for exactly
+  that case, and every SNMP test injects a reader so none of them need it.
 - **Dependency injection** — `createX(deps)` factories; tests wire fakes (notably
   `test-support/fakeServer.js`). Run tests: `npm test` (`node --test`).
 - **Privacy by design** — metadata only (ports/ASN/timings/5‑tuple), never payload/DPI.

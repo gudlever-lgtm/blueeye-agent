@@ -6,6 +6,7 @@
 //   POST /agents/results       -> 201 { inserted }   | 401 (Bearer token)
 //   POST /agents/me/device-events -> 202 { ingested } | 401 (Bearer token)
 //   POST /agents/me/snmp-topology -> 202 { ingested } | 401 (Bearer token)
+//   POST /agents/me/snmp-counters -> 202 { ingested } | 401 (Bearer token)
 //   WS   /ws/agent             -> Bearer/query token; rejects with 401
 // The real server needs MySQL, which isn't available here, so the agent is
 // exercised against this faithful stub.
@@ -49,6 +50,7 @@ function startFakeServer(options = {}) {
   const receivedDiscovery = [];
   const receivedDeviceEvents = [];
   const receivedSnmpTopology = [];
+  const receivedSnmpCounters = [];
   const receivedSpeedtests = [];
   const monitorConfig = options.monitorConfig || { source: 'proc' };
   // The switches the server has assigned to this agent to poll. Absent by
@@ -191,6 +193,20 @@ function startFakeServer(options = {}) {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/agents/me/snmp-counters') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid agent token' }));
+        return;
+      }
+      const body = await readJson(req);
+      receivedSnmpCounters.push(body);
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, devices: Array.isArray(body.devices) ? body.devices.length : 0 }));
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/agents/discovery-results') {
       const token = bearer(req);
       if (!token || !validTokens.has(token)) {
@@ -293,10 +309,15 @@ function startFakeServer(options = {}) {
         receivedDiscovery,
         receivedDeviceEvents,
         receivedSnmpTopology,
+        receivedSnmpCounters,
         // Posts a topology batch the way the agent's apiClient would, so a test
         // can drive an injected poller straight at this server.
         postSnmpTopology: async (payload) => {
           receivedSnmpTopology.push(payload);
+          return { ok: true };
+        },
+        postSnmpCounters: async (payload) => {
+          receivedSnmpCounters.push(payload);
           return { ok: true };
         },
         receivedSpeedtests,

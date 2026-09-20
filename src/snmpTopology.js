@@ -22,35 +22,37 @@
 // the mapping is missing the resolved fields are null and the row still says
 // where it came from, rather than inventing a port.
 
+const { IF_MIB, BRIDGE, Q_BRIDGE, LLDP, SYSTEM: SYS } = require('./snmp/oids');
+const {
+  openSession, closeSession, walkColumn, getScalars, toNumber, toText, toMac,
+} = require('./snmp/session');
+
+// The columns this module walks, assembled from the shared OID map. The names
+// are local so the rest of the file reads as it did; the numbers live in one
+// place now (src/snmp/oids.js) rather than being written out here and again in
+// snmpMonitor.js.
 const OID = {
-  // IF-MIB — the names the resolved ifIndex is turned into.
-  ifName: '1.3.6.1.2.1.31.1.1.1.1',
-  ifAlias: '1.3.6.1.2.1.31.1.1.1.18',
-
-  // BRIDGE-MIB (RFC 4188). dot1dBasePortIfIndex is the join without which every
-  // forwarding-table answer is a guess.
-  dot1dBasePortIfIndex: '1.3.6.1.2.1.17.1.4.1.2',
-  dot1dTpFdbPort: '1.3.6.1.2.1.17.4.3.1.2',
-  dot1dTpFdbStatus: '1.3.6.1.2.1.17.4.3.1.3',
-
-  // Q-BRIDGE-MIB (RFC 4363) — the same table, per VLAN. Preferred, because a
-  // MAC can legitimately be in two VLANs and the older table cannot say so.
-  dot1qTpFdbPort: '1.3.6.1.2.1.17.7.1.2.2.1.2',
-  dot1qTpFdbStatus: '1.3.6.1.2.1.17.7.1.2.2.1.3',
-  dot1qVlanStaticName: '1.3.6.1.2.1.17.7.1.4.3.1.1',
-
-  // LLDP-MIB (IEEE 802.1AB) — neighbours as seen BY THE SWITCH, which is a
-  // different and usually larger set than the ones an agent host can see.
-  // The subtype columns are what say whether an id is a MAC or a name. Without
-  // them a 6-byte OCTET STRING is ambiguous — "Gi0/24" is exactly six bytes —
-  // and length alone would render a perfectly good port name as a MAC address.
-  lldpRemChassisIdSubtype: '1.0.8802.1.1.2.1.4.1.1.4',
-  lldpRemChassisId: '1.0.8802.1.1.2.1.4.1.1.5',
-  lldpRemPortIdSubtype: '1.0.8802.1.1.2.1.4.1.1.6',
-  lldpRemPortId: '1.0.8802.1.1.2.1.4.1.1.7',
-  lldpRemPortDesc: '1.0.8802.1.1.2.1.4.1.1.8',
-  lldpRemSysName: '1.0.8802.1.1.2.1.4.1.1.9',
-  lldpLocPortIdSubtype: '1.0.8802.1.1.2.1.3.7.1.2',
+  ifName: IF_MIB.ifName,
+  ifAlias: IF_MIB.ifAlias,
+  ifDescr: IF_MIB.ifDescr,
+  ifType: IF_MIB.ifType,
+  ifPhysAddress: IF_MIB.ifPhysAddress,
+  ifAdminStatus: IF_MIB.ifAdminStatus,
+  ifOperStatus: IF_MIB.ifOperStatus,
+  ifHighSpeed: IF_MIB.ifHighSpeed,
+  dot1dBasePortIfIndex: BRIDGE.dot1dBasePortIfIndex,
+  dot1dTpFdbPort: BRIDGE.dot1dTpFdbPort,
+  dot1dTpFdbStatus: BRIDGE.dot1dTpFdbStatus,
+  dot1qTpFdbPort: Q_BRIDGE.dot1qTpFdbPort,
+  dot1qTpFdbStatus: Q_BRIDGE.dot1qTpFdbStatus,
+  dot1qVlanStaticName: Q_BRIDGE.dot1qVlanStaticName,
+  lldpRemChassisIdSubtype: LLDP.lldpRemChassisIdSubtype,
+  lldpRemChassisId: LLDP.lldpRemChassisId,
+  lldpRemPortIdSubtype: LLDP.lldpRemPortIdSubtype,
+  lldpRemPortId: LLDP.lldpRemPortId,
+  lldpRemPortDesc: LLDP.lldpRemPortDesc,
+  lldpRemSysName: LLDP.lldpRemSysName,
+  lldpLocPortIdSubtype: LLDP.lldpLocPortIdSubtype,
 };
 
 // dot1qTpFdbStatus / dot1dTpFdbStatus. `self` is the switch's own address and
@@ -128,66 +130,50 @@ function decodeLldpId(value, subtype) {
   return value.toString('hex');
 }
 
-function toStr(v) {
-  if (v == null) return null;
-  if (Buffer.isBuffer(v)) return v.toString('utf8').replace(/\0+$/, '').trim() || null;
-  const s = String(v).trim();
-  return s || null;
-}
+// Local aliases for the shared coercions, so the call sites below read as they
+// always have.
+const toStr = toText;
+const toNum = toNumber;
 
-function toNum(v) {
-  if (Buffer.isBuffer(v)) return v.length ? v.readUIntBE(0, Math.min(v.length, 6)) : 0;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
+// ifAdminStatus / ifOperStatus, as IF-MIB numbers them. An unlisted value
+// becomes null rather than a guess: an unknown status is not a status.
+const IF_STATUS = { 1: 'up', 2: 'down', 3: 'testing', 4: 'unknown', 5: 'dormant', 6: 'notPresent', 7: 'lowerLayerDown' };
+const ADMIN_STATUS = { 1: 'up', 2: 'down', 3: 'testing' };
 
-// Walks one column and returns { [indexSuffix]: value }. Same helper shape as
-// snmpMonitor.walkColumn; kept local so neither file owns the other's lifetime.
-function walkColumn(session, baseOid) {
-  return new Promise((resolve, reject) => {
-    const out = {};
-    session.subtree(
-      baseOid,
-      (varbinds) => {
-        for (const vb of varbinds) {
-          if (vb.type === undefined) continue; // error varbind
-          out[vb.oid.slice(baseOid.length + 1)] = vb.value;
-        }
-      },
-      (err) => (err ? reject(err) : resolve(out)),
-    );
-  });
-}
 
 // The default reader. Every column except the bridge-port map is best-effort:
 // a device that does not implement Q-BRIDGE must still yield its BRIDGE-MIB
 // table, and a device with no LLDP must still yield its forwarding table.
 async function defaultReadTables(snmp, { collect = ['if', 'fdb', 'lldp', 'vlan'] } = {}) {
-  let net;
+  const session = openSession(snmp);
   try {
-    net = require('net-snmp');
-  } catch {
-    const err = new Error('SNMP topology requested but the optional "net-snmp" dependency is not installed.');
-    err.code = 'SNMP_UNAVAILABLE';
-    throw err;
-  }
-  const version = snmp.version === '1' ? net.Version1 : net.Version2c;
-  const session = net.createSession(snmp.host, snmp.community || 'public', {
-    port: snmp.port || 161,
-    version,
-  });
-  try {
+    // sysUpTime FIRST, in one GET beside the device's own name. It is read on
+    // every poll whatever else was asked for, because it is what says whether
+    // the NEXT poll's counter delta is a measurement or an artefact of a
+    // reboot — and reading it needs one round trip against a device we have
+    // already opened a session to.
+    const system = await getScalars(session, [SYS.sysUpTime, SYS.sysName, SYS.sysDescr])
+      .catch(() => ({}));
     const safe = (oid) => walkColumn(session, oid).catch(() => ({}));
     const want = new Set(collect);
 
     const [
-      ifName, ifAlias, basePortIfIndex,
+      ifName, ifAlias, ifDescr, ifType, ifPhysAddress, ifAdminStatus, ifOperStatus, ifHighSpeed,
+      basePortIfIndex,
       qFdbPort, qFdbStatus, dFdbPort, dFdbStatus,
       vlanName,
       lldpChassis, lldpChassisSubtype, lldpPort, lldpPortSubtype, lldpPortDesc, lldpSysName,
     ] = await Promise.all([
       want.has('if') || want.has('fdb') ? safe(OID.ifName) : {},
       want.has('if') ? safe(OID.ifAlias) : {},
+      // ifDescr is fetched whenever a name is wanted, because it is the
+      // fallback when the device has no ifName at all.
+      want.has('if') || want.has('fdb') ? safe(OID.ifDescr) : {},
+      want.has('if') ? safe(OID.ifType) : {},
+      want.has('if') ? safe(OID.ifPhysAddress) : {},
+      want.has('if') ? safe(OID.ifAdminStatus) : {},
+      want.has('if') ? safe(OID.ifOperStatus) : {},
+      want.has('if') ? safe(OID.ifHighSpeed) : {},
       // NOT safe(): without the bridge-port map the forwarding table cannot be
       // resolved to an interface, and an unresolved answer is the one thing
       // this module must not produce silently. An empty result is handled by
@@ -207,13 +193,20 @@ async function defaultReadTables(snmp, { collect = ['if', 'fdb', 'lldp', 'vlan']
     ]);
 
     return {
-      ifName, ifAlias, basePortIfIndex,
+      // Hundredths of a second since the device last re-initialised, and what
+      // the device calls itself. Null when it did not answer — an unknown
+      // uptime must never read as "just booted".
+      sysUpTimeTicks: toNumber(system[SYS.sysUpTime]),
+      sysName: toText(system[SYS.sysName]),
+      sysDescr: toText(system[SYS.sysDescr]),
+      ifName, ifAlias, ifDescr, ifType, ifPhysAddress, ifAdminStatus, ifOperStatus, ifHighSpeed,
+      basePortIfIndex,
       qFdbPort, qFdbStatus, dFdbPort, dFdbStatus,
       vlanName,
       lldpChassis, lldpChassisSubtype, lldpPort, lldpPortSubtype, lldpPortDesc, lldpSysName,
     };
   } finally {
-    try { session.close(); } catch { /* ignore */ }
+    closeSession(session);
   }
 }
 
@@ -230,10 +223,50 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
     const idx = toNum(value);
     if (Number.isInteger(bp) && Number.isInteger(idx) && idx > 0) portToIfIndex.set(bp, idx);
   }
+  // ifIndex -> { name, source }. THE NAME IS THE PORT'S IDENTITY on the server
+  // (migration 108), so where it came from has to travel with it:
+  //
+  //   ifName  — the switch's own short name, stable across a reboot and a
+  //             module insertion. What we want.
+  //   ifDescr — the fallback. Plenty of older gear implements no ifName at all,
+  //             and ifDescr is less stable (some platforms rewrite it), so a
+  //             row built from it is a weaker identity and says so.
+  //   ifIndex — last resort, and the one case where the identity IS the
+  //             volatile number. Marked, so nobody mistakes it for stable.
+  //
+  // Guessing silently would mean a switch quietly getting a new set of ports
+  // after a firmware upgrade, with a year of counters stranded on the old ones.
   const ifNameByIndex = new Map();
-  for (const [idx, value] of Object.entries(t.ifName || {})) {
-    const name = toStr(value);
-    if (name) ifNameByIndex.set(Number(idx), name);
+  const ifNameSource = new Map();
+  const indexes = new Set([
+    ...Object.keys(t.ifName || {}),
+    ...Object.keys(t.ifDescr || {}),
+  ].map((k) => Number(k)).filter((n) => Number.isInteger(n) && n > 0));
+  for (const idx of indexes) {
+    const name = toStr(t.ifName ? t.ifName[idx] : null);
+    const descr = toStr(t.ifDescr ? t.ifDescr[idx] : null);
+    if (name) {
+      ifNameByIndex.set(idx, name);
+      ifNameSource.set(idx, 'ifName');
+    } else if (descr) {
+      ifNameByIndex.set(idx, descr);
+      ifNameSource.set(idx, 'ifDescr');
+    } else {
+      ifNameByIndex.set(idx, `ifIndex.${idx}`);
+      ifNameSource.set(idx, 'ifIndex');
+    }
+  }
+
+  // The names that came off the DEVICE, with no fallback in them. The
+  // forwarding table and the LLDP rows resolve through this one, never through
+  // the map above: stage 02's rule is that a port the switch did not name is
+  // reported as null rather than as a fabricated "port N", and `ifIndex.7` is
+  // exactly such a fabrication. It is an acceptable identity for a row in the
+  // port inventory, which is about THIS device; it is not an acceptable answer
+  // to "which port is this MAC on", which sends somebody walking.
+  const realNameByIndex = new Map();
+  for (const [idx, src] of ifNameSource.entries()) {
+    if (src !== 'ifIndex') realNameByIndex.set(idx, ifNameByIndex.get(idx));
   }
 
   // VLAN id -> name, for a UI that can say "VLAN 20 (Office)".
@@ -278,7 +311,7 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
         bridgePort,
         ifIndex,
         // Null rather than a fabricated "port N": see the note at the top.
-        ifName: ifIndex != null ? (ifNameByIndex.get(ifIndex) || null) : null,
+        ifName: ifIndex != null ? (realNameByIndex.get(ifIndex) || null) : null,
         status,
       });
     }
@@ -325,7 +358,7 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
     neighbours.push({
       localPort,
       localIfIndex: ifIndex,
-      localIfName: ifIndex != null ? (ifNameByIndex.get(ifIndex) || null) : null,
+      localIfName: ifIndex != null ? (realNameByIndex.get(ifIndex) || null) : null,
       remoteChassisId,
       remotePortId: (function decodePort() {
         const st = toNum(t.lldpPortSubtype ? t.lldpPortSubtype[index] : null);
@@ -343,10 +376,22 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
   // --- interfaces ----------------------------------------------------------
   const interfaces = [];
   for (const [idx, name] of ifNameByIndex.entries()) {
+    const speed = toNum(t.ifHighSpeed ? t.ifHighSpeed[idx] : null);
+    const type = toNum(t.ifType ? t.ifType[idx] : null);
     interfaces.push({
       ifIndex: idx,
       ifName: name,
+      nameSource: ifNameSource.get(idx) || 'ifName',
       ifAlias: toStr(t.ifAlias ? t.ifAlias[idx] : null),
+      ifDescr: toStr(t.ifDescr ? t.ifDescr[idx] : null),
+      ifType: Number.isInteger(type) && type > 0 ? type : null,
+      // ifHighSpeed is Mbit/s and reads 0 for a port whose speed the device
+      // does not know. Null, not 0: "unknown" and "stalled" are different, and
+      // a utilisation percentage computed against 0 is not a number.
+      speedMbps: Number.isInteger(speed) && speed > 0 ? speed : null,
+      adminStatus: ADMIN_STATUS[toNum(t.ifAdminStatus ? t.ifAdminStatus[idx] : null)] || null,
+      operStatus: IF_STATUS[toNum(t.ifOperStatus ? t.ifOperStatus[idx] : null)] || null,
+      physAddress: toMac(t.ifPhysAddress ? t.ifPhysAddress[idx] : null),
     });
   }
 
@@ -365,6 +410,13 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
   if (vlans.length) supported.push('vlan');
 
   return {
+    // The device's own clock and name, straight through. sysUpTime is what the
+    // server compares against the ELAPSED REAL TIME to decide whether a counter
+    // delta survived a reboot — a device that restarted and came back up
+    // between two polls has a RISING uptime that rose by less than the wall
+    // clock did, which is the case everybody forgets.
+    sysUpTimeTicks: t.sysUpTimeTicks ?? null,
+    sysName: t.sysName ?? null,
     interfaces,
     fdb,
     fdbTruncated,
@@ -394,7 +446,10 @@ async function pollSnmpTopology({
     : ['if', 'fdb', 'lldp', 'vlan'];
 
   const tables = await readTables(
-    { host: device.host, port: device.port, version: device.version, community: device.community },
+    {
+      host: device.host, port: device.port, version: device.version,
+      community: device.community, v3: device.v3,
+    },
     { collect },
   );
   const topology = buildTopology(tables, { maxFdb, maxNeighbours });

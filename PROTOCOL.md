@@ -395,8 +395,8 @@ to take a monitoring agent off a host nobody is watching.
 
 `agent.error` categories currently emitted (`src/runtime.js reportError`):
 `capabilities`, `config`, `device-events`, `discovery`, `probe`,
-`probe-targets`, `scheduled-probes`, `snmp-topology`, `speedtest`,
-`syslog-bind`, `traffic-report`, `trap-bind`. Best-effort: sent only when the
+`probe-targets`, `scheduled-probes`, `snmp-counters`, `snmp-topology`,
+`speedtest`, `syslog-bind`, `traffic-report`, `trap-bind`. Best-effort: sent only when the
 socket is open; a closed socket drops the frame (the server infers offline
 anyway). A 401 is never reported this way (it is fatal instead).
 

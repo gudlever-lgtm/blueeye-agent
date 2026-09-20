@@ -1,5 +1,7 @@
 'use strict';
 
+const { loadNetSnmp } = require('../snmp/session');
+
 const dgram = require('dgram');
 const { translateTrap } = require('./translate');
 
@@ -68,14 +70,7 @@ function createTrapReceiver({
   const buckets = new Map();
 
   function defaultDecode(msg) {
-    let net;
-    try {
-      net = require('net-snmp');
-    } catch {
-      const err = new Error('SNMP traps requested but the optional "net-snmp" dependency is not installed.');
-      err.code = 'SNMP_UNAVAILABLE';
-      throw err;
-    }
+    const net = loadNetSnmp('SNMP traps');
     // net-snmp exposes the same message parser the trap receiver uses. A v1
     // trap is converted to the v2 varbind shape by the library, so there is one
     // path here rather than two.
@@ -163,15 +158,7 @@ function createTrapReceiver({
     // Fail at START, not on the first packet: a host without net-snmp should
     // say so in the log at boot, when somebody is looking, rather than silently
     // discarding every trap.
-    if (!decode) {
-      try {
-        require('net-snmp');
-      } catch {
-        const err = new Error('SNMP traps requested but the optional "net-snmp" dependency is not installed.');
-        err.code = 'SNMP_UNAVAILABLE';
-        throw err;
-      }
-    }
+    if (!decode) loadNetSnmp('SNMP traps');
     await new Promise((resolve, reject) => {
       socket = createSocket();
       socket.on('message', (msg, rinfo) => {

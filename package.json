@@ -1,6 +1,6 @@
 {
   "name": "blueeye-agent",
-  "version": "0.35.0",
+  "version": "0.35.4",
   "private": true,
   "description": "BlueEyes Network Resilience System agent — runs on customer machines and connects to blueeye-server.",
   "license": "MIT",
@@ -30,5 +30,8 @@
       "bufferutil",
       "utf-8-validate"
     ]
+  },
+  "optionalDependencies": {
+    "net-snmp": "^3.29.1"
   }
 }

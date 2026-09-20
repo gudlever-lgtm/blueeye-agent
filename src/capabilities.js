@@ -5,7 +5,7 @@ const fs = require('fs');
 // Detects what this agent can do, so the server can offer only the sources that
 // actually work here:
 //   - 'proc': /proc/net/dev is readable (Linux host / on-device Linux).
-//   - 'snmp': the optional `net-snmp` module is installed (poll a device's
+//   - 'snmp': the `net-snmp` module is installed (poll a device's
 //     interface counters over SNMP).
 //   - 'netflow': always available — a built-in UDP collector for NetFlow
 //     v5/v9/IPFIX flow exports (vendor-neutral; the device must export flows to
@@ -24,7 +24,7 @@ function detectCapabilities({
   const sources = [];
   const unavailable = {};
   if (canReadProc()) sources.push('proc'); else unavailable.proc = '/proc/net/dev not readable';
-  if (hasSnmp()) sources.push('snmp'); else unavailable.snmp = 'net-snmp not installed (npm install net-snmp)';
+  if (hasSnmp()) sources.push('snmp'); else unavailable.snmp = 'net-snmp is missing — reinstall the agent, or run npm install in its directory';
   if (hasNetflow()) sources.push('netflow');
   if (hasSflow()) sources.push('sflow');
   // `managed` tells the server how this agent is supervised, so it knows whether

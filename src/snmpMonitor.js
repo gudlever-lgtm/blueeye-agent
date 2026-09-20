@@ -10,30 +10,26 @@
 
 // IF-MIB columns, by ifIndex. High-capacity octets + the health columns
 // (errors/discards/oper-status/speed) network/firewall techs troubleshoot with.
+const { IF_MIB, ETHERLIKE, IF_OPER_STATUS } = require('./snmp/oids');
+const { openSession, closeSession, walkColumn, toNumber } = require('./snmp/session');
+
+// The columns this sampler walks. High-capacity octets plus the health columns
+// a network technician troubleshoots with. The numbers live in
+// src/snmp/oids.js, where the RFC that defines each one is named.
 const OID = {
-  ifName: '1.3.6.1.2.1.31.1.1.1.1',
-  ifHCInOctets: '1.3.6.1.2.1.31.1.1.1.6',
-  ifHCOutOctets: '1.3.6.1.2.1.31.1.1.1.10',
-  ifHighSpeed: '1.3.6.1.2.1.31.1.1.1.15', // Mbps
-  ifOperStatus: '1.3.6.1.2.1.2.2.1.8', // 1=up, 2=down, ...
-  ifInDiscards: '1.3.6.1.2.1.2.2.1.13',
-  ifInErrors: '1.3.6.1.2.1.2.2.1.14',
-  ifOutDiscards: '1.3.6.1.2.1.2.2.1.19',
-  ifOutErrors: '1.3.6.1.2.1.2.2.1.20',
-  // EtherLike-MIB (RFC 3635), indexed by the SAME ifIndex as the IF-MIB above,
-  // so it joins straight onto the rest of the row.
-  //
-  // A LATE collision is one detected after the first 64 bytes have gone out —
-  // far too late to be ordinary CSMA/CD contention. On a modern switched link it
-  // means one end is running half duplex while the other runs full: the
-  // full-duplex end transmits whenever it likes, and the half-duplex end sees
-  // that as a collision. Nothing is wrong until traffic flows both ways at once,
-  // and then everything is. It is the one counter that names that fault, and it
-  // is only ever counted on the half-duplex end.
-  dot3StatsLateCollisions: '1.3.6.1.2.1.10.7.2.1.8',
+  ifName: IF_MIB.ifName,
+  ifHCInOctets: IF_MIB.ifHCInOctets,
+  ifHCOutOctets: IF_MIB.ifHCOutOctets,
+  ifHighSpeed: IF_MIB.ifHighSpeed,
+  ifOperStatus: IF_MIB.ifOperStatus,
+  ifInDiscards: IF_MIB.ifInDiscards,
+  ifInErrors: IF_MIB.ifInErrors,
+  ifOutDiscards: IF_MIB.ifOutDiscards,
+  ifOutErrors: IF_MIB.ifOutErrors,
+  dot3StatsLateCollisions: ETHERLIKE.dot3StatsLateCollisions,
 };
 
-const OPER_STATUS = { 1: 'up', 2: 'down', 3: 'testing', 5: 'dormant', 6: 'notPresent', 7: 'lowerLayerDown' };
+const OPER_STATUS = IF_OPER_STATUS;
 
 // Same per-interface cap as the /proc sampler, for the same reason: a big
 // chassis (or a misconfigured walk) must not push one result over the server's
@@ -42,55 +38,16 @@ const { MAX_INTERFACES } = require('./trafficMonitor');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Coerces an SNMP Counter64 value (number or Buffer) to a JS number.
-function toNumber(value) {
-  if (typeof value === 'number') return value;
-  if (Buffer.isBuffer(value)) {
-    try {
-      return Number(value.readBigUInt64BE(value.length - 8));
-    } catch {
-      const hex = value.toString('hex');
-      return hex ? parseInt(hex, 16) : 0;
-    }
-  }
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
-}
+// The shared coercion returns NULL for a value the device did not answer with,
+// which is the distinction the lateCollisions column depends on. Where this
+// file wants a counter it treats a missing one as zero explicitly, at the call
+// site, so the two cases stay visibly different.
+const num = (v) => { const n = toNumber(v); return n == null ? 0 : n; };
 
-// Walks one IF-MIB column and returns { [ifIndex]: value }. The ifIndex is the
-// last component of each returned OID.
-function walkColumn(session, baseOid) {
-  return new Promise((resolve, reject) => {
-    const out = {};
-    session.subtree(
-      baseOid,
-      (varbinds) => {
-        for (const vb of varbinds) {
-          if (vb.type === undefined) continue; // error varbind
-          const idx = vb.oid.slice(baseOid.length + 1);
-          out[idx] = vb.value;
-        }
-      },
-      (err) => (err ? reject(err) : resolve(out))
-    );
-  });
-}
 
 // Default reader: one snapshot of name + in/out octets per interface, via net-snmp.
 async function defaultReadCounters(snmp) {
-  let net;
-  try {
-    net = require('net-snmp');
-  } catch {
-    const err = new Error('SNMP source requested but the optional "net-snmp" dependency is not installed.');
-    err.code = 'SNMP_UNAVAILABLE';
-    throw err;
-  }
-  const version = snmp.version === '1' ? net.Version1 : net.Version2c;
-  const session = net.createSession(snmp.host, snmp.community || 'public', {
-    port: snmp.port || 161,
-    version,
-  });
+  const session = openSession(snmp);
   try {
     // Core columns are required (no traffic sample without name + octets). The
     // health columns are best-effort: a device that doesn't implement one — or a
@@ -110,34 +67,30 @@ async function defaultReadCounters(snmp) {
     ]);
     const result = {};
     for (const idx of Object.keys(rx)) {
-      const sp = toNumber(speed[idx]);
+      const sp = num(speed[idx]);
       result[idx] = {
         name: names[idx] != null ? String(names[idx]) : `if${idx}`,
-        rxBytes: toNumber(rx[idx]),
-        txBytes: toNumber(tx[idx]),
-        rxErrors: toNumber(inErr[idx]),
-        txErrors: toNumber(outErr[idx]),
-        rxDrop: toNumber(inDisc[idx]),
-        txDrop: toNumber(outDisc[idx]),
-        operStatus: OPER_STATUS[toNumber(oper[idx])] || null,
+        rxBytes: num(rx[idx]),
+        txBytes: num(tx[idx]),
+        rxErrors: num(inErr[idx]),
+        txErrors: num(outErr[idx]),
+        rxDrop: num(inDisc[idx]),
+        txDrop: num(outDisc[idx]),
+        operStatus: OPER_STATUS[num(oper[idx])] || null,
         speedMbps: sp > 0 ? sp : null,
         // NULL when the device did not return the column, 0 when it did and the
         // count is zero. The difference is the whole value of this counter:
         // EtherLike-MIB is optional and plenty of devices omit it, and
-        // `toNumber(undefined)` is 0 — so collapsing the two would make a switch
+        // `num(undefined)` is 0 — so collapsing the two would make a switch
         // that cannot report late collisions look exactly like a switch with a
         // clean link, and "zero late collisions" is what RULES OUT a duplex
         // mismatch. Absent is not zero.
-        lateCollisions: Object.prototype.hasOwnProperty.call(lateColl, idx) ? toNumber(lateColl[idx]) : null,
+        lateCollisions: Object.prototype.hasOwnProperty.call(lateColl, idx) ? num(lateColl[idx]) : null,
       };
     }
     return result;
   } finally {
-    try {
-      session.close();
-    } catch {
-      /* ignore */
-    }
+    closeSession(session);
   }
 }
 

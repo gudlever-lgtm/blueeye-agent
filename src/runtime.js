@@ -207,10 +207,12 @@ function createAgentRuntime({
   // waiting for a restart.
   const snmp = snmpPoller || createSnmpPoller({
     submit: (payload) => api.postSnmpTopology(payload),
+    submitCounters: (payload) => api.postSnmpCounters(payload),
     logger,
   });
   let snmpTargetCount = 0;
   let lastSnmpAt = null; // ms epoch of the last successful submit
+  let lastSnmpCounterAt = null;
 
   // Interface names learned by the SNMP topology poll, keyed by the device's
   // address, so a trap saying "ifIndex 1" can be shown as "GigabitEthernet0/1".
@@ -662,6 +664,27 @@ function createAgentRuntime({
     }
   }
 
+  // The counter cycle, on its own schedule. Separate from runSnmpCycle because
+  // the two measure different things at different cadences: a forwarding table
+  // is a snapshot of where things are, and a counter series' interval IS its
+  // resolution.
+  async function runSnmpCounterCycle(opts) {
+    if (fatal || !snmpTargetCount) return { polled: 0, failed: 0 };
+    try {
+      const r = await snmp.runCounterCycle(opts || {});
+      if (r.polled) {
+        lastSnmpCounterAt = Date.now();
+        emitter.emit('snmp-counters', r);
+      }
+      return r;
+    } catch (err) {
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return { polled: 0, failed: 0 }; }
+      logger.warn(`SNMP counter cycle failed (${err.message}).`);
+      reportError('snmp-counters', err);
+      return { polled: 0, failed: 0 };
+    }
+  }
+
   // Binds the trap receiver. Like syslog, a failure here is reported and
   // survived: an agent that cannot bind 1162 must keep reporting traffic,
   // running probes and polling switches.
@@ -832,7 +855,14 @@ function createAgentRuntime({
       // whether anything has been submitted. Answers "why is this switch's
       // port table empty?" from the dashboard, without host access.
       snmp: snmpTargetCount
-        ? { ...snmp.stats(), lastSubmitAt: lastSnmpAt ? new Date(lastSnmpAt).toISOString() : null }
+        ? {
+          ...snmp.stats(),
+          lastSubmitAt: lastSnmpAt ? new Date(lastSnmpAt).toISOString() : null,
+          // Reported separately: a fleet where the topology poll works and the
+          // counter poll does not is a real and very different state from one
+          // where neither does.
+          lastCounterSubmitAt: lastSnmpCounterAt ? new Date(lastSnmpCounterAt).toISOString() : null,
+        }
         : null,
     };
   }
@@ -1337,8 +1367,11 @@ function createAgentRuntime({
     }
     if (isPollSnmpCommand(command)) {
       logger.info('Received poll-snmp command; polling assigned switches now.');
+      // Both cycles, because "poll now" from the dashboard means the whole
+      // device, not the half of it this command happened to be written for.
       const r = await runSnmpCycle({ force: true });
-      client.send({ type: 'command-result', id: command && command.id, ok: true, snmp: r });
+      const c = await runSnmpCounterCycle({ force: true });
+      client.send({ type: 'command-result', id: command && command.id, ok: true, snmp: r, counters: c });
       return;
     }
     if (isRunDiscoveryCommand(command)) {
@@ -1373,6 +1406,10 @@ function createAgentRuntime({
         // The tick only asks which devices are due; the per-device interval
         // decides what is actually polled.
         snmp.start({ tickMs: 30000 });
+        // The counter tick is faster than the topology one, because a counter
+        // series' interval is its resolution: a five-minute sample cannot show
+        // a two-minute error burst at all. It only asks which devices are due.
+        snmp.startCounters({ tickMs: 15000 });
         // Start running any persisted transaction tests (server pushes fresh
         // config on connect, which replaces these).
         try { txManager.start(); } catch (err) { logger.warn(`Transaction manager start failed: ${err.message}`); }
@@ -1395,6 +1432,7 @@ function createAgentRuntime({
     runScheduledProbesNow: () => runScheduledProbes(),
     flushDeviceEventsNow: () => flushDeviceEvents(),
     runSnmpCycleNow: (opts) => runSnmpCycle({ force: true, ...(opts || {}) }),
+    runSnmpCounterCycleNow: (opts) => runSnmpCounterCycle({ force: true, ...(opts || {}) }),
     runBurstNow: (spec) => handleBurst(spec),
     getMonitorConfig: () => monitorConfig,
     getHsflowdState: () => lastHsflowdState,
