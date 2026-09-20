@@ -1,11 +1,18 @@
 # blueeye-agent ↔ blueeye-server protocol
 
-Complete wire contract between the agent and **blueeye-server**, as implemented
-in agent `v0.9.1`. Compiled from the agent source and cross-checked against the
-server's routes/validators (`blueeye-server/src/routes/agentReports.js`,
-`agentEnroll.js`, `enroll.js`, `speedtest.js`, `src/ws/agentSocket.js`,
-`src/validation/*`). Discrepancies found while writing this are catalogued in
+Complete wire contract between the agent and **blueeye-server**. Compiled from
+the agent source and cross-checked against the server's routes/validators
+(`blueeye-server/src/routes/agents/`, `agentReports.js`, `agentEnroll.js`,
+`enroll.js`, `speedtest.js`, `src/ws/agentSocket.js`, `src/validation/*`).
+Discrepancies found while writing this are catalogued in
 [REFACTOR-AUDIT.md](REFACTOR-AUDIT.md).
+
+> **This document is pinned to the code.** It used to carry an "as implemented
+> in agent vX" line, which went twenty-three releases out of date without
+> anything noticing — and it is the only written definition of the contract, so
+> a stale one is worse than none. `test/gate/protocolDoc.test.js` now asserts
+> that the command table below lists exactly the commands `src/command.js`
+> recognises. Add a command without documenting it and the gate says so.
 
 Two transports, one credential:
 
@@ -354,6 +361,12 @@ the canonical names shown):
 | `update` (aliases: self-update, upgrade) | `id`, `auditId?`, `version?`, `sha256?`, `signature?` | systemd only: download+verify+install+restart; docker/unmanaged decline | `ack {id, accepted, runtime, reason?}`, then `action-result`; on failure also `command-result {id, ok:false, error}` |
 | `delete` (aliases: self-delete, uninstall) | `id`, `auditId?` | wipe token + detached `uninstall.sh`; docker declines | `ack {id, accepted, runtime, reason?}`, then `action-result` |
 | `install-tool` | `id`, `auditId?`, `tool` (required string) | install from agent's own allowlist (traceroute/mtr/tcptraceroute); docker declines | `ack {id, accepted, runtime, reason?}`, then `action-result` |
+| `rekey` (aliases: re-key, rotate-key, repin, re-pin) | `id`, `auditId?`, `publicKey` (required PEM) | replace the pinned release trust anchor, in memory and on disk. **Strict by default** — see §2.3 | `ack {id, accepted, runtime}`, `command-result {id, ok, fingerprint?}`, `action-result` |
+| `evidence` (alias: evidence-snapshot) | `id`, `snapshotId`, `clusterId`, `commandSetVersion`, `items[]`, `signature?` | collect READ-ONLY items from the agent's own allowlist (`iface.counters`, `arp.table`, `snmp.reads`, `agent.state`); anything else is refused per item | `command-result {id, ok:true, evidence:{commandSetVersion, items[]}}` |
+| `run-discovery` (aliases: discovery-sweep, sweep) | `discovery: { cidrs?, ports?, rateLimit?, addressCap?, requestId? }` (required object) | sweep the scope from THIS agent's vantage (empty scope ⇒ its own subnets), POST `/agents/discovery-results` | — (REST only); a scope refusal posts `refused:true` with a reason |
+| `poll-snmp` | `deviceId?` | run an SNMP topology cycle now instead of waiting out the per-device interval; read-only on the device | `command-result {id, ok:true, snmp}` |
+| `burst` (alias: burst-mode) | `id`, `target` (required), `seconds?`, `hz?`, `probe?`, `size?`, `df?` | measure ONE target up to once a second for at most two minutes, streaming every sample | `command-result` per sample + a final one |
+| `stop-burst` (alias: burst-stop) | `id` | cancel a running burst at the next tick | `command-result {id, ok:true, stopped:bool}` |
 
 Probe `spec` (built by the server's `validateProbeSpec`): `{ type, host,
 count?, port? (tcp, tcptraceroute — the latter defaults to 443),
@@ -362,7 +375,11 @@ method?/expectStatus?/expectBody?/expectHeader?/minBytes?/maxBytes? (curl),
 steps?/name? (transaction) }`. The agent reads the target from
 `spec.host || spec.target` (http-family probes get the URL in `host`).
 
-Anything unrecognised is logged and dropped (`command-ignored`).
+Anything unrecognised is logged and dropped (`command-ignored`). A handler that
+THROWS is caught by the dispatcher: the agent replies `command-result
+{ok:false, error:'handler failed: …'}` (and `action-result` when an `auditId`
+was given) and keeps running — an async handler's rejection must never be able
+to take a monitoring agent off a host nobody is watching.
 
 ### 2.2 Agent → server frames
 
@@ -377,10 +394,45 @@ Anything unrecognised is logged and dropped (`command-ignored`).
 | `agent.error` | `{ type:'agent.error', category, code\|null, message }` | recorded as a recurring `agent.error` audit event, deduped per `(agent, category, code)`; `category` ≤ 48, `code` ≤ 48, `message` → `reason` ≤ 300; pushed to the dashboard |
 
 `agent.error` categories currently emitted (`src/runtime.js reportError`):
-`traffic-report`, `probe`, `capabilities`, `config`, `probe-targets`,
-`scheduled-probes`, `speedtest`. Best-effort: sent only when the socket is
-open; a closed socket drops the frame (the server infers offline anyway). A 401
-is never reported this way (it is fatal instead).
+`capabilities`, `config`, `device-events`, `discovery`, `probe`,
+`probe-targets`, `scheduled-probes`, `snmp-topology`, `speedtest`,
+`syslog-bind`, `traffic-report`, `trap-bind`. Best-effort: sent only when the
+socket is open; a closed socket drops the frame (the server infers offline
+anyway). A 401 is never reported this way (it is fatal instead).
+
+The list above is pinned to `reportError()` by
+`test/gate/protocolDoc.test.js` — the server dedupes audit rows per
+`(agent, category, code)`, so the vocabulary is part of the contract.
+
+### 2.3 Command authenticity
+
+By default a command is trusted because it arrived on the authenticated
+WebSocket. For the commands that change the HOST rather than measure it
+(`update`, `delete`, `install-tool`, `rekey`) the server also signs, when it
+can, and the agent verifies (`src/commandAuth.js`).
+
+| field | meaning |
+| --- | --- |
+| `commandSignature` | base64 Ed25519 over `canonicalize(command minus commandSignature and id)`, made with the **release key** the agent already pins for signed updates. Not `signature`, which on an `update` signs the release manifest — the payload to install, not the instruction to install it. |
+| `agentId` | binds the signature to one agent, so a captured command cannot be replayed across the fleet. Required on any signed command. |
+| `issuedAt` | ISO timestamp; the agent accepts ±5 minutes. Required on any signed command. |
+
+Policy:
+
+| situation | outcome |
+| --- | --- |
+| signed, verifies against the pinned key | accepted |
+| signed, does not verify (or no key pinned) | **refused** — a signature that cannot be checked is worse than none |
+| unsigned, `BLUEEYE_REQUIRE_SIGNED_COMMANDS=1` | refused |
+| unsigned, default, `update`/`delete`/`install-tool` | accepted (backward compatible with a server that cannot sign) |
+| unsigned `rekey`, agent already holds a key | **refused by default.** `rekey` replaces the anchor every later signature is checked against, so accepting an unsigned one turns one moment of socket access into permanent, silent code execution. A legitimate rotation is signed with the key being replaced. |
+| unsigned `rekey`, no key pinned yet | accepted — nothing to downgrade (the anchor arrived by trust-on-first-use anyway) |
+| unsigned `rekey`, `BLUEEYE_ALLOW_UNSIGNED_REKEY=1` | accepted — break-glass for a fleet whose server lost its signing key; setting it needs access to the host, which is the authority re-anchoring trust deserves |
+
+A refusal is reported on every channel the handler would have used (`ack`
+`accepted:false`, `command-result` `ok:false`, and `action-result` when an
+`auditId` was given), so the operator sees a declined action rather than
+silence.
 
 `diagnostic` shape (`src/runtime.js buildDiagnostic()`):
 
