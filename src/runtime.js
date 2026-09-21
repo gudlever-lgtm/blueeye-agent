@@ -412,7 +412,10 @@ function createAgentRuntime({
     let payload = capabilities;
     try {
       const nic = await collectNic();
-      if (Array.isArray(nic) && nic.length) payload = { ...capabilities, nic };
+      // ...payload, not ...capabilities: every block below extends what the one
+      // before it built, and rebuilding from the base here silently dropped
+      // whatever had already been added.
+      if (Array.isArray(nic) && nic.length) payload = { ...payload, nic };
     } catch { /* NIC inventory is best-effort */ }
     try {
       const ips = collectLocalIps();
@@ -431,6 +434,16 @@ function createAgentRuntime({
       const arp = await collectArp();
       if (Array.isArray(arp) && arp.length) payload = { ...payload, arp };
     } catch { /* neighbour table is best-effort */ }
+    // WHICH KEY THIS AGENT TRUSTS. A fingerprint of the PUBLIC release key it
+    // pins — never the key, never a secret, and the one fact that turns
+    // "refused: command signature verification failed" from a mystery into a
+    // sentence: this agent trusts ab12…, this server signs with cd34…, so
+    // re-pin it. Without it the dashboard can see THAT an agent refuses every
+    // signed command and not WHY, and nobody can look: these hosts have no
+    // shell. Added last so a later rekey is reflected on the next report.
+    try {
+      payload = { ...payload, releaseKeyFingerprint: pinnedKey ? keys.fingerprintOf(pinnedKey) : null };
+    } catch { /* a diagnostic is never a reason to fail the report it rides on */ }
     try {
       await api.postCapabilities(payload);
       const nicNote = payload.nic ? ` + ${payload.nic.length} NIC(s)` : '';

@@ -173,6 +173,13 @@ action. `BLUEEYE_REQUIRE_SIGNED_COMMANDS=1` additionally refuses UNSIGNED
 privileged commands. Note `update.signature` is a different thing: it signs the
 release manifest (the payload), not the instruction.
 
+The agent also reports the **fingerprint** of the release key it pins, in its
+capabilities (`releaseKeyFingerprint`, a SHA-256 of the public PEM). That is
+what lets a dashboard say "this agent trusts ab12…, this server signs with
+cd34… — re-pin it" instead of relaying `refused: command signature verification
+failed`, which is true, unactionable, and indistinguishable from a corrupt
+signature. It is a digest of a public key: nothing secret leaves the host.
+
 **`rekey` does not follow that lenient default.** The other three are bounded —
 a `delete` is visible in the fleet list, an `update` still verifies the release
 manifest separately — but a rekey replaces the anchor every LATER signature is
