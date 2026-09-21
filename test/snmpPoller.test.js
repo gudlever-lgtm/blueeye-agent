@@ -379,3 +379,57 @@ test('the diagnose snapshot says which switches this agent polls', async () => {
     await server.close();
   }
 });
+
+// ------------------------------------------------------- the credential gate
+// The server resolves ONE credential per device and an agent may only walk with
+// a community assigned to it. A target with none is still sent — so the
+// dashboard can say "sw-lager-1: no SNMP community assigned" instead of a
+// switch that silently never appears — and the poller must refuse it rather
+// than fall back to 'public'.
+test('a target with no community is refused, and nothing reaches the wire', async () => {
+  const polls = [];
+  const submits = [];
+  const p = createSnmpPoller({
+    submit: async (payload) => { submits.push(payload); },
+    poll: async ({ device }) => { polls.push(device.deviceId); return RESULT(device.deviceId); },
+  });
+  p.setTargets([TARGET({ deviceId: 7, community: null })]);
+
+  assert.deepEqual(await p.runCycle(), { polled: 0, failed: 1 });
+  assert.deepEqual(polls, [], 'no session was opened');
+  const [err] = submits[0].errors;
+  assert.equal(err.deviceId, 7);
+  assert.equal(err.code, 'SNMP_NO_CREDENTIAL');
+});
+
+test('the refusal says WHICH of the two reasons it is', async () => {
+  // "This site has no community" and "this agent is not assigned the one it
+  // has" send an admin to two different screens.
+  const submits = [];
+  const p = createSnmpPoller({
+    submit: async (payload) => { submits.push(payload); },
+    poll: async () => { throw new Error('must not be reached'); },
+  });
+  p.setTargets([
+    TARGET({ deviceId: 7, community: null, credentialBlocked: true }),
+    TARGET({ deviceId: 8, community: null }),
+  ]);
+
+  await p.runCycle();
+  const [blocked, missing] = submits[0].errors;
+  assert.match(blocked.error, /not assigned/);
+  assert.match(missing.error, /no SNMP community is configured/i);
+});
+
+test('a v3 target with a user needs no community', async () => {
+  // v3 authenticates with a user and keys; a community string is a v1/v2c
+  // concept and its absence there is not a missing credential.
+  const polls = [];
+  const p = createSnmpPoller({
+    submit: async () => {},
+    poll: async ({ device }) => { polls.push(device.deviceId); return RESULT(device.deviceId); },
+  });
+  p.setTargets([TARGET({ deviceId: 7, version: '3', community: null, v3: { user: 'blueeye' } })]);
+  assert.deepEqual(await p.runCycle(), { polled: 1, failed: 0 });
+  assert.deepEqual(polls, [7]);
+});

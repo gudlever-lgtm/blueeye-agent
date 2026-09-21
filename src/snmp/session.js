@@ -84,6 +84,13 @@ function toMac(value) {
 // order against an address is credential spraying, it locks v3 accounts, and on
 // v2c a wrong community usually just times out.
 //
+// NO CREDENTIAL IS NOT 'public'. The server sends a target with no community
+// when the device has none it may use — its site has none configured, or this
+// agent is not assigned the one it has. Defaulting to 'public' there would walk
+// a production switch with a guessed community string, which is a scan, and it
+// would do it under a name the customer never configured. So it is refused
+// here, once, at the only place a session is opened.
+//
 // v3's SECURITY LEVEL is derived from which keys are present rather than sent
 // as a field, for the same reason the server derives it: a stated level can
 // disagree with the keys, and the keys are what actually happens on the wire.
@@ -132,8 +139,16 @@ function openSession(device, { snmp = null, timeoutMs = 5000, retries = 1 } = {}
     return net.createV3Session(device.host, user, options);
   }
 
+  if (!device.community) {
+    const err = new Error(
+      `No SNMP community is assigned for ${device.host}. The server resolves one per device`
+      + ' — check that the site has a community and that this agent is assigned it.',
+    );
+    err.code = 'SNMP_NO_CREDENTIAL';
+    throw err;
+  }
   options.version = String(device.version) === '1' ? net.Version1 : net.Version2c;
-  return net.createSession(device.host, device.community || 'public', options);
+  return net.createSession(device.host, device.community, options);
 }
 
 // Walks one columnar OID and returns { [indexSuffix]: rawValue }, where the

@@ -143,12 +143,29 @@ test('openSession picks the version the device is configured for', () => {
     createSession: (host, community, opts) => { calls.push({ host, community, opts }); return {}; },
   };
   openSession({ host: '10.14.0.11', community: 'public', version: '2c' }, { snmp: fakeSnmp });
-  openSession({ host: '10.14.0.12', version: '1', port: 1161 }, { snmp: fakeSnmp });
+  openSession({ host: '10.14.0.12', community: 'ro-aarhus', version: '1', port: 1161 }, { snmp: fakeSnmp });
   assert.equal(calls[0].opts.version, 1);
   assert.equal(calls[0].opts.port, 161);
   assert.equal(calls[1].opts.version, 0);
   assert.equal(calls[1].opts.port, 1161);
-  assert.equal(calls[1].community, 'public', 'the protocol default, not an empty string');
+  assert.equal(calls[1].community, 'ro-aarhus', 'the resolved community, verbatim');
+});
+
+test('no community is a REFUSAL, not a walk with "public"', () => {
+  // The server sends a target with no community when the device has none it
+  // may use — its site has none, or this agent is not assigned the one it has.
+  // Defaulting to 'public' there would walk a production switch with a guessed
+  // community string, which is a scan, under a name nobody configured.
+  const calls = [];
+  const fakeSnmp = {
+    Version1: 0, Version2c: 1,
+    createSession: (host, community, opts) => { calls.push({ host, community, opts }); return {}; },
+  };
+  assert.throws(
+    () => openSession({ host: '10.14.0.12', version: '2c' }, { snmp: fakeSnmp }),
+    (err) => err.code === 'SNMP_NO_CREDENTIAL',
+  );
+  assert.deepEqual(calls, [], 'nothing reached the wire');
 });
 
 test('every OID is a dotted number, and none is written twice', () => {
