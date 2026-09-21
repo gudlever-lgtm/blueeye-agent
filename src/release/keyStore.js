@@ -58,7 +58,10 @@ function trustStatePath(pinnedPath) {
 // "nothing accepted yet", which is the safe direction: it can only make the
 // agent ask for MORE proof (the latch defaults off), never less.
 function readTrustState(pinnedPath, { fsImpl = fs } = {}) {
-  const empty = { sequence: null, licenseId: null, customerId: null, fingerprint: null, vendorRooted: false, acceptedAt: null };
+  const empty = {
+    sequence: null, licenseId: null, customerId: null, fingerprint: null,
+    vendorRooted: false, commandsSigned: false, acceptedAt: null,
+  };
   if (!pinnedPath) return empty;
   try {
     const raw = JSON.parse(fsImpl.readFileSync(trustStatePath(pinnedPath), 'utf8'));
@@ -72,6 +75,10 @@ function readTrustState(pinnedPath, { fsImpl = fs } = {}) {
       // Latched by the data, not by a flag a rewrite could drop: having ever
       // accepted a sequence IS having been vendor-rooted.
       vendorRooted: raw.vendorRooted === true || sequence !== null,
+      // Has this server ever proved it can SIGN a privileged command? Once it
+      // has, an unsigned one is refused from then on. See requireSignedCommands
+      // in src/commandAuth.js for why this is a ratchet rather than a policy.
+      commandsSigned: raw.commandsSigned === true,
       acceptedAt: typeof raw.acceptedAt === 'string' ? raw.acceptedAt : null,
     };
   } catch {
@@ -96,7 +103,11 @@ function writeTrustState(pinnedPath, next, { fsImpl = fs } = {}) {
     licenseId: next.licenseId != null ? String(next.licenseId) : current.licenseId,
     customerId: next.customerId != null ? String(next.customerId) : current.customerId,
     fingerprint: isFingerprintLike(next.fingerprint) ? next.fingerprint : current.fingerprint,
-    vendorRooted: true,
+    // Both latches only ever move one way. `vendorRooted` is true here because
+    // this function is only called on an accepted vendor authorisation; the
+    // command ratchet keeps whatever it already had unless this call sets it.
+    vendorRooted: next.vendorRooted === false ? current.vendorRooted : true,
+    commandsSigned: next.commandsSigned === true || current.commandsSigned === true,
     acceptedAt: new Date().toISOString(),
   }, null, 2);
   try {
@@ -108,6 +119,20 @@ function writeTrustState(pinnedPath, next, { fsImpl = fs } = {}) {
   } catch {
     return false;
   }
+}
+
+// Latches "this server can sign commands" after the first signature that
+// verified. Separate from writeTrustState so the hot path (every privileged
+// command) writes nothing once the latch is set.
+function markCommandsSigned(pinnedPath, { fsImpl = fs } = {}) {
+  if (!pinnedPath) return false;
+  const current = readTrustState(pinnedPath, { fsImpl });
+  if (current.commandsSigned) return false;
+  return writeTrustState(pinnedPath, {
+    sequence: current.sequence,
+    vendorRooted: current.vendorRooted === true ? true : false,
+    commandsSigned: true,
+  }, { fsImpl });
 }
 
 // Accepts PEM or base64-of-PEM (the form the systemd unit carries) and returns
@@ -198,7 +223,7 @@ function fingerprintOf(pem) {
 }
 
 module.exports = {
-  FILE_NAME, TRUST_STATE_FILE, pinnedKeyPath, trustStatePath, readTrustState, writeTrustState,
+  FILE_NAME, TRUST_STATE_FILE, pinnedKeyPath, trustStatePath, readTrustState, writeTrustState, markCommandsSigned,
   normalizePem, validatePublicKey, readPinnedKey,
   writePinnedKey, syncSystemdDropIn, fingerprintOf, looksLikePem, tmpdir: os.tmpdir,
 };

@@ -233,14 +233,17 @@ test('an UNSIGNED rekey is refused by default when the agent already trusts a ke
   assert.equal(keyStore.readPinnedKey(sc.pinnedKeyPath), '', 'the anchor must be untouched');
 });
 
-test('an unsigned update is refused too, where a key is pinned to check one against', async (t) => {
+test('an unsigned update is refused once the server has signed something before', async (t) => {
   const sc = scratch(t);
   const current = keyPair();
+  // This server has signed before, so the agent has latched.
+  require('../src/release/keyStore').markCommandsSigned(sc.pinnedKeyPath);
   const { server, runtime } = await runtimeWith(t, { pinnedKey: current.pem, pinnedKeyPath: sc.pinnedKeyPath });
 
-  // This agent pins a key, so its server can sign — and an unsigned update is
-  // now turned away at the gate rather than run on the strength of whoever
-  // holds the socket.
+  // The ratchet has latched, so an
+  // unsigned update is turned away at the gate rather than run on the strength
+  // of whoever holds the socket. Before the first signed command it would be
+  // accepted — that is the migration window, not a fallback.
   const refused = server.waitForWsMessage((m) => m.type === 'ack' && m.id === 'u9' && m.accepted === false);
   runtime.start();
   await withTimeout(onceEvent(runtime, 'config'), 4000, 'no config');

@@ -48,27 +48,35 @@ const FALSY = /^(0|false|no|off)$/i;
 
 // Does this agent REQUIRE signed privileged commands?
 //
-// The answer is now "yes, wherever it can be": an agent that pins a release key
-// has, by definition, a key to check a signature against, and its server signs
-// with that key whenever it holds the private half. Leaving those agents lenient
-// meant the WebSocket session alone was enough to update, delete or install on
-// the host — which is the whole thing the signature exists to prevent.
+// It is a RATCHET, not a fixed policy: leniency is dropped the first time this
+// server proves it can sign, and never returns.
 //
-// The default is therefore derived rather than off:
+//   the server has signed before -> require signatures from now on
+//   the vendor chain is in force -> require signatures (same latch)
+//   neither, yet                 -> accept unsigned, as older agents always did
 //
-//   a key is pinned      -> require signatures (the server can produce them)
-//   no key pinned at all -> stay lenient (nothing could verify a signature, and
-//                           refusing would brick a host mid-provisioning)
+// The first version of this derived the answer from "is a key pinned", and that
+// was wrong in a way worth writing down. Pinning a key says the agent can CHECK
+// a signature; it says nothing about whether its server can MAKE one. A server
+// whose signing key was lost or cannot be decrypted pins a key on every agent it
+// installed and can sign nothing — so the rule turned "updates are refused"
+// into "update, delete and install-tool are ALL refused", on the entire fleet,
+// with the only fix behind the host access these hosts do not have. A security
+// default that bricks the recovery path is not a security default.
 //
-// Both directions stay overridable, because a deployment whose server genuinely
-// cannot sign yet needs a way to keep managing its fleet while it fixes that:
-// BLUEEYE_REQUIRE_SIGNED_COMMANDS=0 turns it off, =1 forces it on even with no
-// key (which fails every privileged command closed, deliberately).
-function requireSignedCommands(env = process.env, { publicKey = '' } = {}) {
+// What the ratchet gives instead: in a healthy deployment the very first signed
+// command latches the agent, and an unsigned one is refused from then on — an
+// attacker holding the socket cannot un-ring that bell. In a deployment that
+// cannot sign yet, management keeps working while the operator fixes the key,
+// which is the only state from which it CAN be fixed.
+//
+// Both directions stay overridable: BLUEEYE_REQUIRE_SIGNED_COMMANDS=1 forces it
+// on (failing closed even where nothing can sign), =0 turns it off.
+function requireSignedCommands(env = process.env, { signedBefore = false } = {}) {
   const raw = String(env.BLUEEYE_REQUIRE_SIGNED_COMMANDS || '').trim();
   if (TRUTHY.test(raw)) return true;
   if (FALSY.test(raw)) return false;
-  return !!publicKey;
+  return !!signedBefore;
 }
 
 // REKEY IS DIFFERENT, and is strict by default.

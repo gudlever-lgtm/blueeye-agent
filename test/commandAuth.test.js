@@ -198,23 +198,25 @@ test('an update signed for a DIFFERENT agent is refused without touching the upd
   }
 });
 
-test('signatures are required wherever a key is pinned, and only there', () => {
-  // The default is derived, not fixed: an agent that pins a key can check a
-  // signature and its server can make one, so an unsigned privileged command is
-  // refused. An agent with no key could not verify anything, so refusing there
-  // would only brick provisioning.
-  assert.equal(requireSignedCommands({}, { publicKey: 'pem' }), true);
-  assert.equal(requireSignedCommands({}, { publicKey: '' }), false);
+test('signatures are required once the server has proved it can make one', () => {
+  // A ratchet, not a fixed policy. The first version derived this from "is a key
+  // pinned", which conflated "this agent can CHECK a signature" with "its server
+  // can MAKE one" — and a server that had lost its signing key pins a key on
+  // every agent it installed. That turned "updates are refused" into "update,
+  // delete and install-tool are all refused", fleet-wide, with the fix behind
+  // host access these hosts do not have.
+  assert.equal(requireSignedCommands({}, { signedBefore: true }), true);
+  assert.equal(requireSignedCommands({}, { signedBefore: false }), false);
   assert.equal(requireSignedCommands({}), false);
 
   // Both directions stay overridable — a deployment whose server genuinely
   // cannot sign yet needs a way to keep managing its fleet while it fixes that.
-  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: '0' }, { publicKey: 'pem' }), false);
-  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: 'off' }, { publicKey: 'pem' }), false);
-  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: '1' }, { publicKey: '' }), true);
+  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: '0' }, { signedBefore: true }), false);
+  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: 'off' }, { signedBefore: true }), false);
+  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: '1' }, { signedBefore: false }), true);
   // Anything unrecognised falls back to the derived default rather than
   // guessing — a typo in a unit file must not quietly disable a check.
-  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: 'maybe' }, { publicKey: 'pem' }), true);
+  assert.equal(requireSignedCommands({ BLUEEYE_REQUIRE_SIGNED_COMMANDS: 'maybe' }, { signedBefore: true }), true);
 });
 
 test('the host-side rekey break-glass survives strict mode', () => {

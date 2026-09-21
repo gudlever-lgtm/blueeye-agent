@@ -132,7 +132,13 @@ function createAgentRuntime({
   // command would mean the WebSocket session alone is enough to reconfigure the
   // host. An agent with no key pinned stays lenient (nothing could verify
   // anything), and BLUEEYE_REQUIRE_SIGNED_COMMANDS overrides either way.
-  strictCommands = requireSignedCommands(process.env, { publicKey: releasePublicKey }),
+  // A RATCHET, not a fixed policy: leniency is dropped the first time this
+  // server proves it can sign a command, and never comes back. Deriving it from
+  // "a key is pinned" instead bricked every privileged command on a fleet whose
+  // server had lost its signing key — see requireSignedCommands.
+  strictCommands = requireSignedCommands(process.env, {
+    signedBefore: keys.readTrustState(pinnedKeyPath).commandsSigned,
+  }),
   // Break-glass: allow an UNSIGNED rekey to replace a trust anchor this host
   // already holds. Off by default — see the long note in src/commandAuth.js for
   // why rekey does not follow strictCommands' lenient default. Setting it needs
@@ -908,7 +914,17 @@ function createAgentRuntime({
       isRekey: names.log === 'rekey',
       allowUnsignedRekeyOverride: allowUnsignedRekey,
     });
-    if (verdict.ok) return true;
+    if (verdict.ok) {
+      // The server just proved it can sign. Latch it: from now on an unsigned
+      // privileged command is refused, on this run and every later one. An
+      // attacker holding the socket cannot un-ring that bell.
+      if (verdict.signed && !strictCommands && keys.markCommandsSigned(pinnedKeyPath)) {
+        strictCommands = true;
+        logger.info('This server signs privileged commands — unsigned ones are refused from now on.');
+        actions.log('commands.signature-required', {});
+      }
+      return true;
+    }
     const auditId = command && command.auditId;
     actions.log(`${names.log}.refused`, { reason: verdict.reason });
     logger.error(`Refusing ${names.log} command: ${verdict.reason}`);
