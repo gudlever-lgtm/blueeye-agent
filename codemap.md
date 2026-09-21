@@ -273,7 +273,7 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | `BLUEEYE_REPORT_INTERVAL_MS` | `60000` | continuous-report cadence (`0` disables) |
 | `BLUEEYE_REPORT_SAMPLE_MS` | `1000` | sampling window per measurement |
 | `BLUEEYE_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` ([`logger.js`](src/logger.js)) |
-| `BLUEEYE_REQUIRE_SIGNED_COMMANDS` | **on where a key is pinned** | refuse an unsigned `update`/`delete`/`install-tool`. Derived, not fixed: an agent with a key can verify and its server can sign, so leniency is left only where nothing could be checked. `=0` opts out ([`commandAuth.js`](src/commandAuth.js)) |
+| `BLUEEYE_REQUIRE_SIGNED_COMMANDS` | **on once the server has signed one** | refuse an unsigned `update`/`delete`/`install-tool`. A RATCHET: the first command whose signature verifies latches it on for good (recorded in `release-trust.json`). Deriving it from "a key is pinned" instead bricked every privileged command on a fleet whose server had lost its signing key — pinning says the agent can CHECK a signature, not that its server can MAKE one. `=0` opts out ([`commandAuth.js`](src/commandAuth.js)) |
 | `BLUEEYE_VENDOR_ROOT_PUBLIC_KEY` | (embedded) | the vendor trust anchor. Dev/test override only — production ignores it without `BLUEEYE_TRUST_ANCHOR_OVERRIDE_ACK` ([`license/vendorRoot.js`](src/license/vendorRoot.js)) |
 | `BLUEEYE_REQUIRE_SIGNED_UPDATES` | off | refuse an unsigned release ([`selfUpdate.js`](src/selfUpdate.js)) |
 | `BLUEEYE_ALLOW_UNSIGNED_REKEY` | off | break-glass: let an UNSIGNED `rekey` replace an anchor this host already holds. Needed only to recover a fleet whose server lost its signing key ([`commandAuth.js`](src/commandAuth.js)) |
