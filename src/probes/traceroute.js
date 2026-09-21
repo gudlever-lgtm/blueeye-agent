@@ -2,7 +2,7 @@
 
 const { execFile } = require('child_process');
 const { round, safeHost } = require('./stats');
-const { findAddress, resolveFamily, tracerouteCommands } = require('./ipFamily');
+const { findAddress, resolveFamily, tracerouteCommands, TRACE_WAIT_MS } = require('./ipFamily');
 
 // Path probe via the system `traceroute` (Linux/macOS) / `tracert` (Windows).
 // MTR-style: sends several probes per hop (`-q queries`) so every hop carries not
@@ -26,7 +26,15 @@ async function traceroute(spec, { exec = execFile, platform = process.platform }
   const family = resolveFamily(spec && (spec.ip_version ?? spec.ipVersion), host);
   const candidates = tracerouteCommands({ platform, family, host, maxHops, queries });
 
-  const run = await runFirstAvailable(exec, candidates);
+  // THE RUN GETS AS LONG AS IT CAN HONESTLY NEED. A flat 60s killed traces that
+  // were working: every silent hop costs queries x TRACE_WAIT_MS, so 20 hops
+  // with a few black holes is well past a minute, and a killed run produces no
+  // output — reported as "no hops", which reads as a missing tool rather than
+  // an impatient timeout. Derived from the same numbers the command is built
+  // with, plus headroom for DNS and process start, and capped so a probe can
+  // never hold the runtime for an unbounded time.
+  const budgetMs = Math.min(180000, maxHops * queries * TRACE_WAIT_MS + 15000);
+  const run = await runFirstAvailable(exec, candidates, budgetMs);
   const hops = parseTraceroute(run.stdout, queries);
   const base = { type: 'traceroute', target: host, ipVersion: family, queries };
   // Surface *why* a run came back empty so the server/dashboard can explain it
@@ -48,20 +56,20 @@ async function traceroute(spec, { exec = execFile, platform = process.platform }
 //
 // When none is installed the reason names the FIRST candidate, the one the
 // server's auto-install offers.
-async function runFirstAvailable(exec, candidates) {
+async function runFirstAvailable(exec, candidates, timeoutMs) {
   let last = null;
   for (const c of candidates) {
     // eslint-disable-next-line no-await-in-loop
-    const run = await runOnce(exec, c);
+    const run = await runOnce(exec, c, timeoutMs);
     if (run.err && run.err.code === 'ENOENT') { last = run; continue; }
     return run;
   }
   return { ...last, bin: candidates[0].bin, missing: true };
 }
 
-function runOnce(exec, { bin, args }) {
+function runOnce(exec, { bin, args }, timeoutMs = 60000) {
   return new Promise((resolve) => {
-    exec(bin, args, { timeout: 60000 }, (err, stdout) => {
+    exec(bin, args, { timeout: timeoutMs }, (err, stdout) => {
       resolve({ bin, err: err || null, missing: false, stdout: String(stdout || '') });
     });
   });
@@ -99,7 +107,17 @@ function hopStats(hop, ip, samples, sent) {
 // indistinguishable from a router that declines to answer.
 function parseTraceroute(text, queries = 3) {
   const hops = [];
-  for (const line of String(text).split('\n')) {
+  // SPLIT ON EITHER LINE ENDING. This is why a Windows agent reported "no hops"
+  // from a tracert that worked: splitting on \n alone leaves a trailing \r on
+  // every line but the last, and in JavaScript `.` does not match \r — so
+  // `(.*)$` could not reach the end of the string and the line matched nothing.
+  // Every hop was dropped except the one before "Trace complete.", which has no
+  // \r of its own. Zero hops then reads as a missing traceroute binary, so the
+  // dashboard told operators to install a tool that was already there.
+  //
+  // All three endings, not just CRLF: a lone \r breaks the match the same way,
+  // and the cost of handling it is one alternation.
+  for (const line of String(text).split(/\r\n|\r|\n/)) {
     const m = line.match(/^\s*(\d+)\s+(.*)$/);
     if (!m) continue;
     const rest = m[2];
