@@ -166,10 +166,27 @@ function pingCommand({ platform, family, payload, timeoutMs, ttl = null, host })
 // Trying both is the difference between "IPv6 paths work" and "IPv6 paths work
 // on the machines the author happened to have". IPv4 returns a single candidate,
 // so nothing about the existing path changes.
+// How long to wait for one probe of one hop, in milliseconds. Windows takes it
+// directly (`-w`); the unix tools take seconds (`-w 2`). Exported so the caller
+// can size its own timeout from the same number rather than guessing.
+const TRACE_WAIT_MS = 2000;
+
 function tracerouteCommands({ platform, family, host, maxHops, queries }) {
   const v6 = family === 6;
   if (platform === 'win32') {
-    return [{ bin: 'tracert', args: [...(v6 ? ['-6'] : ['-4']), '-d', '-h', String(maxHops), host] }];
+    // -w BOUNDS THE RUN, and without it this probe reported nothing at all.
+    // Windows tracert waits its default (about 4s) for each of 3 probes per
+    // hop, so a 20-hop trace across a few silent routers takes minutes — past
+    // the exec timeout, which kills it and leaves no output to parse. The
+    // dashboard then said "the agent is likely missing the traceroute command",
+    // which was wrong on a host where tracert was working perfectly.
+    //
+    // 2000ms matches the `-w 2` the unix branch below already passes, so both
+    // platforms wait the same amount for a hop that will never answer.
+    return [{
+      bin: 'tracert',
+      args: [...(v6 ? ['-6'] : ['-4']), '-d', '-w', String(TRACE_WAIT_MS), '-h', String(maxHops), host],
+    }];
   }
   const unix = (bin, extra) => ({
     bin,
@@ -192,4 +209,5 @@ module.exports = {
   findAddress,
   pingCommand,
   tracerouteCommands,
+  TRACE_WAIT_MS,
 };

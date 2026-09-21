@@ -192,8 +192,11 @@ test('tracerouteCommands offers both IPv6 binaries, because distributions disagr
   assert.equal(v4.length, 1);
   assert.deepEqual(v4[0], { bin: 'traceroute', args: ['-n', '-m', '20', '-q', '3', '-w', '2', '--', 'h'] });
 
+  // tracert carries -w for the same reason the unix line above does: without a
+  // bound, a silent hop costs its default ~4s x 3 probes and the whole run
+  // outlives the timeout that was supposed to contain it.
   const win6 = tracerouteCommands({ platform: 'win32', family: 6, host: 'h', maxHops: 20, queries: 3 });
-  assert.deepEqual(win6, [{ bin: 'tracert', args: ['-6', '-d', '-h', '20', 'h'] }]);
+  assert.deepEqual(win6, [{ bin: 'tracert', args: ['-6', '-d', '-w', '2000', '-h', '20', 'h'] }]);
 });
 
 // --------------------------------------------------- traceroute integration
