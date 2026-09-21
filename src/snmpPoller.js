@@ -74,6 +74,28 @@ function withTimeout(promise, ms, host) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// A target the server sent WITHOUT a credential, and why.
+//
+// The server resolves one credential per device — the device's own, the
+// community it names, its site's communities in order, the global default —
+// and an agent may only walk with a community assigned to it. When none of
+// that lands, the device is still sent, because "sw-lager-1: no SNMP
+// community assigned" on the dashboard is worth far more than a switch that
+// silently never appears.
+//
+// It is checked HERE rather than left to the session: this cycle knows which
+// of the two reasons it is, and "this agent is not assigned it" sends an admin
+// to a different screen than "this site has none configured". Nothing is sent
+// on the wire either way — a walk with a guessed community string is a scan.
+function credentialError(device) {
+  if (device.community || (device.v3 && device.v3.user)) return null;
+  const err = new Error(device.credentialBlocked
+    ? `No SNMP community: this agent is not assigned one that covers ${device.host}.`
+    : `No SNMP community is configured for ${device.host}.`);
+  err.code = 'SNMP_NO_CREDENTIAL';
+  return err;
+}
+
 function createSnmpPoller({
   submit,
   // Counters go to their own endpoint at their own cadence. Null disables the
@@ -147,6 +169,8 @@ function createSnmpPoller({
       for (const device of batch) {
         lastAttempt.set(device.deviceId, now());
         try {
+          const missing = credentialError(device);
+          if (missing) throw missing;
           const result = await withTimeout(poll({ device }), timeoutMs, device.host);
           devices.push(result);
           // Best-effort: a consumer that throws must not cost the poll that
@@ -239,6 +263,8 @@ function createSnmpPoller({
       await inBatches(batch, counterConcurrency, async (device) => {
         lastCounterAttempt.set(device.deviceId, now());
         try {
+          const missing = credentialError(device);
+          if (missing) throw missing;
           const result = await withTimeout(pollCounters({ device }), timeoutMs, device.host);
           devices.push(result);
         } catch (err) {
@@ -320,6 +346,7 @@ function createSnmpPoller({
 
 module.exports = {
   createSnmpPoller,
+  credentialError,
   MIN_INTERVAL_SEC,
   DEFAULT_TIMEOUT_MS,
   COUNTER_MIN_INTERVAL_SEC,

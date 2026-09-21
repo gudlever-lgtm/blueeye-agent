@@ -52,7 +52,7 @@ const HC_TABLE = {
 
 // ================================================================= the read
 test('a snapshot carries the RAW counters, not a rate', async () => {
-  const out = await defaultReadCounters({ host: '10.14.0.11' }, { snmp: fakeSnmp(HC_TABLE) });
+  const out = await defaultReadCounters({ host: '10.14.0.11', community: 'public' }, { snmp: fakeSnmp(HC_TABLE) });
   assert.equal(out.interfaces.length, 2);
   const [a, b] = out.interfaces;
   assert.equal(a.ifIndex, 1);
@@ -65,7 +65,7 @@ test('a snapshot carries the RAW counters, not a rate', async () => {
 test('the device clock rides along on every read', async () => {
   // Every delta the server computes from this snapshot is only valid if the
   // device did not restart since the last one. This is the field that says.
-  const out = await defaultReadCounters({ host: '10.14.0.11' }, { snmp: fakeSnmp(HC_TABLE, { uptime: 987654 }) });
+  const out = await defaultReadCounters({ host: '10.14.0.11', community: 'public' }, { snmp: fakeSnmp(HC_TABLE, { uptime: 987654 }) });
   assert.equal(out.sysUpTimeTicks, 987654);
 });
 
@@ -75,7 +75,7 @@ test('a device with no ifXTable falls back to the 32-bit columns, and says so', 
     [IF_MIB.ifOutOctets]: { 1: 20 },
     [IF_MIB.ifInErrors]: { 1: 1 },
   };
-  const out = await defaultReadCounters({ host: '10.14.0.11' }, { snmp: fakeSnmp(narrow) });
+  const out = await defaultReadCounters({ host: '10.14.0.11', community: 'public' }, { snmp: fakeSnmp(narrow) });
   assert.equal(out.hc, false, 'the server needs to know a wrap cannot be reasoned about');
   assert.equal(out.interfaces[0].inOctets, 10);
 });
@@ -98,26 +98,26 @@ test('a device with BOTH is read once, not twice', async () => {
       close() {},
     }),
   };
-  await defaultReadCounters({ host: '10.14.0.11' }, { snmp });
+  await defaultReadCounters({ host: '10.14.0.11', community: 'public' }, { snmp });
   assert.ok(!oids.includes(IF_MIB.ifInOctets), 'the narrow octet column was never walked');
 });
 
 test('an EtherLike column the device lacks is NULL, never zero', async () => {
   // Zero FCS errors is what RULES OUT a bad cable. A device that cannot count
   // them has ruled out nothing, and the two must not read the same.
-  const out = await defaultReadCounters({ host: '10.14.0.11' }, { snmp: fakeSnmp(HC_TABLE) });
+  const out = await defaultReadCounters({ host: '10.14.0.11', community: 'public' }, { snmp: fakeSnmp(HC_TABLE) });
   assert.equal(out.interfaces[0].fcsErrors, null);
   assert.equal(out.interfaces[0].lateCollisions, null);
 
   const withEther = { ...HC_TABLE, [ETHERLIKE.dot3StatsFCSErrors]: { 1: 0, 2: 12 } };
-  const out2 = await defaultReadCounters({ host: '10.14.0.11' }, { snmp: fakeSnmp(withEther) });
+  const out2 = await defaultReadCounters({ host: '10.14.0.11', community: 'public' }, { snmp: fakeSnmp(withEther) });
   assert.equal(out2.interfaces[0].fcsErrors, 0, 'a measured zero is a measurement');
   assert.equal(out2.interfaces[1].fcsErrors, 12);
 });
 
 test('one failed column does not cost the other thirty-nine', async () => {
   const snmp = fakeSnmp(HC_TABLE, { failOids: [ETHERLIKE.dot3StatsFCSErrors, IF_MIB.ifInErrors] });
-  const out = await defaultReadCounters({ host: '10.14.0.11' }, { snmp });
+  const out = await defaultReadCounters({ host: '10.14.0.11', community: 'public' }, { snmp });
   assert.equal(out.interfaces.length, 2);
   assert.equal(out.interfaces[0].inOctets, 1000);
   assert.equal(out.interfaces[0].inErrors, null);
@@ -125,7 +125,7 @@ test('one failed column does not cost the other thirty-nine', async () => {
 
 test('duplex is named, because half against full is the fault it describes', async () => {
   const table = { ...HC_TABLE, [ETHERLIKE.dot3StatsDuplexStatus]: { 1: 3, 2: 2 } };
-  const out = await defaultReadCounters({ host: '10.14.0.11' }, { snmp: fakeSnmp(table) });
+  const out = await defaultReadCounters({ host: '10.14.0.11', community: 'public' }, { snmp: fakeSnmp(table) });
   assert.equal(out.interfaces[0].duplex, 'full');
   assert.equal(out.interfaces[1].duplex, 'half');
 });
@@ -133,7 +133,7 @@ test('duplex is named, because half against full is the fault it describes', asy
 test('a runaway walk is capped, and the count of what was dropped travels', async () => {
   const big = { [IF_MIB.ifHCInOctets]: {}, [IF_MIB.ifName]: {} };
   for (let i = 1; i <= 50; i += 1) { big[IF_MIB.ifHCInOctets][i] = i; big[IF_MIB.ifName][i] = `Gi0/${i}`; }
-  const out = await defaultReadCounters({ host: '10.14.0.11' }, { snmp: fakeSnmp(big), maxInterfaces: 10 });
+  const out = await defaultReadCounters({ host: '10.14.0.11', community: 'public' }, { snmp: fakeSnmp(big), maxInterfaces: 10 });
   assert.equal(out.interfaces.length, 10);
   assert.equal(out.truncated, 40);
 });
