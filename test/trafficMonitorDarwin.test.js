@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseNetstatIb, sampleTraffic } = require('../src/trafficMonitorDarwin');
+const { parseNetstatIb, parseIfconfig, parseAirportJson, createMetaReader, sampleTraffic } = require('../src/trafficMonitorDarwin');
 
 // Realistic netstat -ib output (macOS): Link lines + IPv4/IPv6 lines follow
 const NETSTAT_SNAP1 = `
@@ -46,6 +46,7 @@ test('sampleTraffic computes deltas and rates, excludes lo0 by default', async (
   let call = 0;
   const result = await sampleTraffic({
     runNetstatFn: () => Promise.resolve(parseNetstatIb(snaps[call++])),
+    readMetaFn: async () => ({}),
     sleepFn: async () => {},
     intervalMs: 1000,
     now: (() => { const v = [1000, 2000]; let i = 0; return () => v[i++]; })(),
@@ -77,6 +78,7 @@ test('sampleTraffic includes lo0 when includeLoopback is true', async () => {
   let call = 0;
   const result = await sampleTraffic({
     runNetstatFn: () => Promise.resolve(parseNetstatIb(snaps[call++])),
+    readMetaFn: async () => ({}),
     sleepFn: async () => {},
     intervalMs: 1000,
     now: (() => { const v = [1000, 2000]; let i = 0; return () => v[i++]; })(),
@@ -89,6 +91,7 @@ test('sampleTraffic includes lo0 when includeLoopback is true', async () => {
 test('sampleTraffic returns empty snapshot when netstat fails', async () => {
   const result = await sampleTraffic({
     runNetstatFn: () => Promise.resolve({}),
+    readMetaFn: async () => ({}),
     sleepFn: async () => {},
     intervalMs: 1000,
     now: (() => { const v = [1000, 2000]; let i = 0; return () => v[i++]; })(),
@@ -104,6 +107,7 @@ test('sampleTraffic delta clamps negative counters (wrap-around) to zero', async
   const fns = [first, second];
   const result = await sampleTraffic({
     runNetstatFn: () => fns[call++](),
+    readMetaFn: async () => ({}),
     sleepFn: async () => {},
     intervalMs: 1000,
     now: (() => { const v = [1000, 2000]; let i = 0; return () => v[i++]; })(),
@@ -125,6 +129,7 @@ test('sampleTraffic caps interface list and keeps totals over all interfaces', a
   let call = 0;
   const result = await sampleTraffic({
     runNetstatFn: () => Promise.resolve(snaps[call++]),
+    readMetaFn: async () => ({}),
     sleepFn: async () => {},
     intervalMs: 1000,
     now: (() => { const v = [1000, 2000]; let i = 0; return () => v[i++]; })(),
@@ -138,4 +143,108 @@ test('sampleTraffic caps interface list and keeps totals over all interfaces', a
   // totals = (100+200+300+400+500)*2 = 3000 rx + 3000 tx
   assert.equal(result.totals.rxBytes, 1500);
   assert.equal(result.totals.txBytes, 1500);
+});
+
+const IFCONFIG = [
+  'lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384',
+  '\tinet 127.0.0.1 netmask 0xff000000',
+  'en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500',
+  '\tether 3c:22:fb:00:00:01',
+  '\tmedia: autoselect',
+  '\tstatus: active',
+  'en1: flags=8963<UP,BROADCAST,SMART,RUNNING,PROMISC,SIMPLEX,MULTICAST> mtu 1500',
+  '\tmedia: autoselect <full-duplex>',
+  '\tstatus: inactive',
+  'en5: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500',
+  '\tmedia: autoselect (1000baseT <full-duplex,flow-control>)',
+  '\tstatus: active',
+  'en6: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500',
+  '\tmedia: autoselect (2.5GBase-T <full-duplex>)',
+  '\tstatus: active',
+  'en7: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500',
+  '\tmedia: autoselect (none)',
+  '\tstatus: inactive',
+  'en8: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500',
+  '\tmedia: autoselect (1000baseT <full-duplex>)',
+  '\tstatus: inactive',
+  'bridge0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500',
+  '\tmember: en1 flags=3<LEARNING,DISCOVER>',
+  '\tmedia: <unknown type>',
+  '\tstatus: inactive',
+  'utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380',
+  '',
+].join('\n');
+
+test('parseIfconfig maps status/flags to operstate words and reads wired speed', () => {
+  const m = parseIfconfig(IFCONFIG);
+  assert.deepEqual(m.en0, { operStatus: 'up', speedMbps: null });     // Wi-Fi: no rate in media
+  assert.deepEqual(m.en5, { operStatus: 'up', speedMbps: 1000 });
+  assert.deepEqual(m.en6, { operStatus: 'up', speedMbps: 2500 });
+  assert.deepEqual(m.en7, { operStatus: 'down', speedMbps: null });   // unplugged
+  assert.deepEqual(m.en8, { operStatus: 'down', speedMbps: null });   // admin down; stale media ignored
+  assert.deepEqual(m.en1, { operStatus: null, speedMbps: null });     // Thunderbolt Bridge member
+  assert.equal(m.bridge0.operStatus, 'down');
+  assert.equal(m.utun0.operStatus, 'up');                             // no status line, RUNNING
+  assert.equal(m.lo0.operStatus, 'up');
+});
+
+test('parseIfconfig tolerates empty or junk input', () => {
+  assert.deepEqual(parseIfconfig(''), {});
+  assert.deepEqual(parseIfconfig('garbage\n\tstatus: active\n'), {});
+});
+
+const AIRPORT = JSON.stringify({ SPAirPortDataType: [{ spairport_airport_interfaces: [
+  { _name: 'en0', spairport_current_network_information: { spairport_network_rate: 866 } },
+  { _name: 'awdl0' },
+] }] });
+
+test('parseAirportJson returns the current Wi-Fi rate per BSD name', () => {
+  assert.deepEqual(parseAirportJson(AIRPORT), { en0: 866 });
+  assert.deepEqual(parseAirportJson('not json'), {});
+  assert.deepEqual(parseAirportJson('{}'), {});
+});
+
+test('createMetaReader fills Wi-Fi speed from a cached system_profiler call', async () => {
+  const calls = [];
+  let t = 0;
+  const run = async (cmd) => { calls.push(cmd); return cmd === 'ifconfig' ? IFCONFIG : AIRPORT; };
+  const read = createMetaReader({ run, now: () => t, wifiTtlMs: 60000 });
+  await read();                       // first sample: Wi-Fi rate not known yet
+  await new Promise((r) => setImmediate(r));
+  const m = await read();
+  assert.deepEqual(m.en0, { operStatus: 'up', speedMbps: 866 });
+  assert.equal(m.en5.speedMbps, 1000); // ifconfig rate is not overridden
+  assert.equal(calls.filter((c) => c === 'system_profiler').length, 1); // cached
+  t = 61000;
+  await read();
+  assert.equal(calls.filter((c) => c === 'system_profiler').length, 2); // refreshed after TTL
+});
+
+test('createMetaReader survives failing commands', async () => {
+  const read = createMetaReader({ run: async () => { throw new Error('boom'); } });
+  assert.deepEqual(await read(), {});
+});
+
+test('sampleTraffic attaches operStatus/speedMbps from the meta reader', async () => {
+  const snaps = [NETSTAT_SNAP1, NETSTAT_SNAP2];
+  let call = 0;
+  const result = await sampleTraffic({
+    runNetstatFn: () => Promise.resolve(parseNetstatIb(snaps[call++])),
+    readMetaFn: async () => ({ en0: { operStatus: 'up', speedMbps: 866 } }),
+    sleepFn: async () => {},
+  });
+  assert.equal(result.interfaces[0].operStatus, 'up');
+  assert.equal(result.interfaces[0].speedMbps, 866);
+});
+
+test('sampleTraffic keeps counters when the meta reader throws', async () => {
+  const snaps = [NETSTAT_SNAP1, NETSTAT_SNAP2];
+  let call = 0;
+  const result = await sampleTraffic({
+    runNetstatFn: () => Promise.resolve(parseNetstatIb(snaps[call++])),
+    readMetaFn: async () => { throw new Error('no ifconfig'); },
+    sleepFn: async () => {},
+  });
+  assert.equal(result.interfaces[0].rxBytes, 3000);
+  assert.equal(result.interfaces[0].operStatus, null);
 });
