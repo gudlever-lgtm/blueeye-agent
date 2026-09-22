@@ -48,6 +48,7 @@ function startFakeServer(options = {}) {
   const receivedResults = [];
   const receivedCapabilities = [];
   const receivedDiscovery = [];
+  const receivedProbeResults = [];
   const receivedDeviceEvents = [];
   const receivedSnmpTopology = [];
   const receivedSnmpCounters = [];
@@ -207,6 +208,20 @@ function startFakeServer(options = {}) {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/agents/probe-results') {
+      const token = bearer(req);
+      if (!token || !validTokens.has(token)) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid agent token' }));
+        return;
+      }
+      const body = await readJson(req);
+      receivedProbeResults.push({ token, body });
+      res.writeHead(201, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ inserted: Array.isArray(body.results) ? body.results.length : 0 }));
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/agents/discovery-results') {
       const token = bearer(req);
       if (!token || !validTokens.has(token)) {
@@ -307,6 +322,7 @@ function startFakeServer(options = {}) {
         receivedResults,
         receivedCapabilities,
         receivedDiscovery,
+        receivedProbeResults,
         receivedDeviceEvents,
         receivedSnmpTopology,
         receivedSnmpCounters,

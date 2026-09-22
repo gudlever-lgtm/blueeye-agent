@@ -2,7 +2,7 @@
 
 const { execFile } = require('child_process');
 const { clampInt, safeHost } = require('./stats');
-const { parseTraceroute } = require('./traceroute');
+const { parseTraceroute, streamHops } = require('./traceroute');
 
 // TCP path probe: traces the route to host:port with TCP SYN packets instead of
 // the ICMP/UDP probes plain `traceroute` sends.
@@ -29,7 +29,7 @@ const { parseTraceroute } = require('./traceroute');
 // Result shape matches the traceroute probe — `target` is `host:port` so a TCP
 // trace and an ICMP trace to the same host stay separate series on the server.
 // `exec` is injectable for tests.
-function tcptraceroute(spec, { exec = execFile } = {}) {
+function tcptraceroute(spec, { exec = execFile, onHop = null } = {}) {
   const rawHost = String((spec && (spec.host || spec.target)) || '').trim();
   const host = safeHost(rawHost);
   const port = Number(spec && spec.port !== undefined ? spec.port : 443);
@@ -51,7 +51,7 @@ function tcptraceroute(spec, { exec = execFile } = {}) {
     { bin: 'traceroute', args: ['-n', '-T', '-p', String(port), '-m', String(maxHops), '-q', String(queries), '-w', '2', '--', host] },
   ];
 
-  return runFirstAvailable(exec, attempts).then((run) => {
+  return runFirstAvailable(exec, attempts, onHop, queries).then((run) => {
     const hops = parseTraceroute(run.stdout, queries);
     if (hops.length > 0) return { type: 'tcptraceroute', target, port, ok: true, hopCount: hops.length, queries, hops };
     return {
@@ -65,11 +65,11 @@ function tcptraceroute(spec, { exec = execFile } = {}) {
 // binary (ENOENT) falls through to the next; every other outcome — including a
 // non-zero exit — belongs to the binary that ran and is returned as-is, since
 // only the caller can tell "no route" from "no permission".
-async function runFirstAvailable(exec, attempts) {
+async function runFirstAvailable(exec, attempts, onHop = null, queries = 3) {
   let last = null;
   for (const attempt of attempts) {
     // eslint-disable-next-line no-await-in-loop
-    const run = await runOnce(exec, attempt);
+    const run = await runOnce(exec, attempt, onHop, queries);
     if (run.err && run.err.code === 'ENOENT') { last = run; continue; }
     return run;
   }
@@ -78,11 +78,12 @@ async function runFirstAvailable(exec, attempts) {
   return { ...last, bin: attempts[0].bin, missing: true };
 }
 
-function runOnce(exec, { bin, args }) {
+function runOnce(exec, { bin, args }, onHop = null, queries = 3) {
   return new Promise((resolve) => {
-    exec(bin, args, { timeout: 60000 }, (err, stdout, stderr) => {
+    const child = exec(bin, args, { timeout: 60000 }, (err, stdout, stderr) => {
       resolve({ bin, err: err || null, stdout: String(stdout || ''), stderr: String(stderr || '') });
     });
+    streamHops(child, queries, onHop);
   });
 }
 

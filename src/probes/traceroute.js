@@ -14,8 +14,12 @@ const { findAddress, resolveFamily, tracerouteCommands, TRACE_WAIT_MS } = requir
 // [`ipFamily`](./ipFamily.js), and a literal IPv6 target selects it on its own,
 // so `traceroute({ host: '2001:db8::1' })` needs no extra parameter.
 //
+// `onHop(hop)` (optional) is called for every hop the moment the binary prints
+// its line, so the server can draw the path while the trace is still running.
+// The returned result is unchanged and stays the record.
+//
 // `exec`/`platform` are injectable for tests.
-async function traceroute(spec, { exec = execFile, platform = process.platform } = {}) {
+async function traceroute(spec, { exec = execFile, platform = process.platform, onHop = null } = {}) {
   const rawHost = String((spec && (spec.host || spec.target)) || '').trim();
   const host = safeHost(rawHost);
   if (!host) return { type: 'traceroute', target: rawHost, ok: false, error: 'invalid host', hops: [] };
@@ -34,7 +38,7 @@ async function traceroute(spec, { exec = execFile, platform = process.platform }
   // with, plus headroom for DNS and process start, and capped so a probe can
   // never hold the runtime for an unbounded time.
   const budgetMs = Math.min(180000, maxHops * queries * TRACE_WAIT_MS + 15000);
-  const run = await runFirstAvailable(exec, candidates, budgetMs);
+  const run = await runFirstAvailable(exec, candidates, budgetMs, onHop, queries);
   const hops = parseTraceroute(run.stdout, queries);
   const base = { type: 'traceroute', target: host, ipVersion: family, queries };
   // Surface *why* a run came back empty so the server/dashboard can explain it
@@ -56,22 +60,42 @@ async function traceroute(spec, { exec = execFile, platform = process.platform }
 //
 // When none is installed the reason names the FIRST candidate, the one the
 // server's auto-install offers.
-async function runFirstAvailable(exec, candidates, timeoutMs) {
+async function runFirstAvailable(exec, candidates, timeoutMs, onHop = null, queries = 3) {
   let last = null;
   for (const c of candidates) {
     // eslint-disable-next-line no-await-in-loop
-    const run = await runOnce(exec, c, timeoutMs);
+    const run = await runOnce(exec, c, timeoutMs, onHop, queries);
     if (run.err && run.err.code === 'ENOENT') { last = run; continue; }
     return run;
   }
   return { ...last, bin: candidates[0].bin, missing: true };
 }
 
-function runOnce(exec, { bin, args }, timeoutMs = 60000) {
+function runOnce(exec, { bin, args }, timeoutMs = 60000, onHop = null, queries = 3) {
   return new Promise((resolve) => {
-    exec(bin, args, { timeout: timeoutMs }, (err, stdout) => {
+    const child = exec(bin, args, { timeout: timeoutMs }, (err, stdout) => {
       resolve({ bin, err: err || null, missing: false, stdout: String(stdout || '') });
     });
+    streamHops(child, queries, onHop);
+  });
+}
+
+// Calls onHop(hop) for each complete hop line as the child prints it. execFile
+// still buffers the whole output for its callback, so this only listens in; a
+// fake exec without a stdout stream simply streams nothing. A listener that
+// throws must not take the trace down with it.
+function streamHops(child, queries, onHop) {
+  if (typeof onHop !== 'function' || !child || !child.stdout || typeof child.stdout.on !== 'function') return;
+  let buf = '';
+  child.stdout.on('data', (chunk) => {
+    buf += String(chunk);
+    const lines = buf.split(/\r\n|\r|\n/);
+    buf = lines.pop();
+    for (const line of lines) {
+      const hop = parseTraceroute(line, queries)[0];
+      if (!hop) continue;
+      try { onHop(hop); } catch { /* the live view is a courtesy */ }
+    }
   });
 }
 
@@ -134,4 +158,4 @@ function parseTraceroute(text, queries = 3) {
   return hops;
 }
 
-module.exports = { traceroute, parseTraceroute };
+module.exports = { traceroute, parseTraceroute, streamHops };
