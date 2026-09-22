@@ -335,9 +335,14 @@ function createAgentRuntime({
 
   // Runs one active probe (ping/tcp/dns/traceroute) and submits the result. A
   // 401 is fatal; other errors are surfaced but non-terminal.
+  //
+  // A traceroute streams each hop over the WebSocket as the binary prints it
+  // (`trace_hop`), so the dashboard draws the path while the trace runs. Only
+  // for on-demand runs — scheduled traces have nobody watching. A dropped
+  // frame costs one hop on the live view; the submitted result is the record.
   async function runProbeAndSubmit(probeSpec) {
     try {
-      const result = await probeRunner(probeSpec);
+      const result = await probeRunner(probeSpec, liveTraceDeps(probeSpec));
       const response = await api.postProbeResults([result]);
       const outcome = describeProbeOutcome(result);
       logger.info(`Probe ${result.type} → ${result.target}: ${outcome}.`);
@@ -350,6 +355,19 @@ function createAgentRuntime({
       emitter.emit('command-error', err);
       return false;
     }
+  }
+
+  function liveTraceDeps(spec) {
+    const probeType = String((spec && spec.type) || '').toLowerCase();
+    if (probeType !== 'traceroute' && probeType !== 'tcptraceroute') return undefined;
+    const host = String((spec && (spec.host || spec.target)) || '').trim();
+    // The same target string the finished result carries, so the dashboard
+    // can match a hop to the trace it is waiting on.
+    const target = probeType === 'tcptraceroute' ? `${host}:${spec.port !== undefined ? spec.port : 443}` : host;
+    const onHop = (hop) => {
+      try { client.send({ type: 'trace_hop', probeType, target, hop }); } catch { /* not connected */ }
+    };
+    return { [probeType]: { onHop } };
   }
 
   // Runs an active-discovery sweep from THIS agent's vantage and reports the
