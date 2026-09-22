@@ -40,15 +40,112 @@ function runNetstat() {
   });
 }
 
+// Link state + wired speed from `ifconfig` (all interfaces, one call).
+//   flags=8863<UP,BROADCAST,SMART,RUNNING,...>  -> admin state
+//   status: active | inactive                   -> carrier (NICs only)
+//   media: autoselect (1000baseT <full-duplex>) -> negotiated rate
+// Interfaces with no status line (lo0, utun*, gif0) report 'up' while RUNNING,
+// like Linux reports 'unknown' for a tun device. A bridge's `member:` ports
+// (the Thunderbolt Bridge's en1/en2… on almost every Mac) are left null: an
+// unused Thunderbolt port is not a link fault, and the bridge itself carries
+// the state.
+function parseIfconfig(text) {
+  const result = {};
+  const members = new Set();
+  let cur = null;
+  for (const line of String(text).split('\n')) {
+    const head = /^([A-Za-z0-9_.-]+): flags=[0-9a-fA-F]+<([^>]*)>/.exec(line);
+    if (head) {
+      const flags = head[2].split(',');
+      cur = { up: flags.includes('UP'), running: flags.includes('RUNNING'), status: null, speedMbps: null };
+      result[head[1]] = cur;
+      continue;
+    }
+    if (!cur) continue;
+    const t = line.trim();
+    let m;
+    if ((m = /^status: (\w+)/.exec(t))) cur.status = m[1].toLowerCase();
+    else if ((m = /^media: .*\((\d+(?:\.\d+)?)(G?)base/i.exec(t))) {
+      const n = Number(m[1]) * (m[2] ? 1000 : 1);
+      if (n > 0) cur.speedMbps = n;
+    } else if ((m = /^member: (\S+)/.exec(t))) members.add(m[1]);
+  }
+  const meta = {};
+  for (const [iface, v] of Object.entries(result)) {
+    let operStatus;
+    if (members.has(iface)) operStatus = null;
+    else if (!v.up) operStatus = 'down';
+    else if (v.status === 'active') operStatus = 'up';
+    else if (v.status === 'inactive') operStatus = 'down';
+    else operStatus = v.running ? 'up' : 'unknown';
+    meta[iface] = { operStatus, speedMbps: operStatus === 'up' ? v.speedMbps : null };
+  }
+  return meta;
+}
+
+// Wi-Fi reports `media: autoselect` with no rate; the current transmit rate
+// (Mbit/s) is in system_profiler's AirPort data, keyed by BSD name (en0).
+function parseAirportJson(text) {
+  const out = {};
+  let data;
+  try { data = JSON.parse(text); } catch { return out; }
+  const top = data && Array.isArray(data.SPAirPortDataType) ? data.SPAirPortDataType : [];
+  for (const entry of top) {
+    for (const i of (entry && Array.isArray(entry.spairport_airport_interfaces) ? entry.spairport_airport_interfaces : [])) {
+      const rate = Number(i && i.spairport_current_network_information && i.spairport_current_network_information.spairport_network_rate);
+      if (i && typeof i._name === 'string' && Number.isFinite(rate) && rate > 0) out[i._name] = rate;
+    }
+  }
+  return out;
+}
+
+function runCmd(cmd, args, timeout) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { timeout, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => resolve(err ? '' : stdout));
+  });
+}
+
+// system_profiler takes a second or more, so its answer is cached and refreshed
+// in the background; a sample never waits on it.
+const WIFI_TTL_MS = 60 * 1000;
+
+function createMetaReader({ run = runCmd, now = () => Date.now(), wifiTtlMs = WIFI_TTL_MS } = {}) {
+  let wifi = {};
+  let wifiAt = -Infinity;
+  let wifiPending = null;
+
+  function refreshWifi() {
+    if (wifiPending || now() - wifiAt < wifiTtlMs) return wifiPending;
+    wifiPending = run('system_profiler', ['SPAirPortDataType', '-json'], 15000)
+      .then((out) => { wifi = parseAirportJson(out); })
+      .catch(() => {})
+      .finally(() => { wifiAt = now(); wifiPending = null; });
+    return wifiPending;
+  }
+
+  return async function readMeta() {
+    refreshWifi();
+    let meta = {};
+    try { meta = parseIfconfig(await run('ifconfig', [], 5000)); } catch { /* no meta */ }
+    for (const [iface, rate] of Object.entries(wifi)) {
+      if (meta[iface] && meta[iface].operStatus === 'up' && !meta[iface].speedMbps) meta[iface].speedMbps = rate;
+    }
+    return meta;
+  };
+}
+
+const defaultReadMeta = createMetaReader();
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const MAX_INTERFACES = 64;
 
 // Same contract as trafficMonitor.sampleTraffic — reads cumulative counters
 // twice, computes per-interface deltas and rates, returns the same snapshot
-// shape. operStatus/speedMbps are always null on macOS (no sysfs equivalent).
+// shape. operStatus/speedMbps come from ifconfig (+ system_profiler for Wi-Fi).
 async function sampleTraffic({
   runNetstatFn = runNetstat,
+  readMetaFn = defaultReadMeta,
   intervalMs = 1000,
   sleepFn = sleep,
   now = () => Date.now(),
@@ -95,7 +192,13 @@ async function sampleTraffic({
     entries.length = maxInterfaces;
   }
 
-  const interfaces = entries.map((e) => ({ ...e, operStatus: null, speedMbps: null }));
+  let meta = {};
+  try { meta = (await readMetaFn()) || {}; } catch { /* link state is best-effort */ }
+  const interfaces = entries.map((e) => ({
+    ...e,
+    operStatus: (meta[e.iface] && meta[e.iface].operStatus) || null,
+    speedMbps: (meta[e.iface] && meta[e.iface].speedMbps) || null,
+  }));
 
   return {
     intervalMs,
@@ -110,4 +213,4 @@ async function sampleTraffic({
   };
 }
 
-module.exports = { parseNetstatIb, sampleTraffic, MAX_INTERFACES };
+module.exports = { parseNetstatIb, parseIfconfig, parseAirportJson, createMetaReader, sampleTraffic, MAX_INTERFACES };
