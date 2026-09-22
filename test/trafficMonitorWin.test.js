@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
 
-const { createWinTrafficSampler, buildScript, parseLine } = require('../src/trafficMonitorWin');
+const { createWinTrafficSampler, buildScript, parseLine, normalizeOperStatus, normalizeSpeedMbps } = require('../src/trafficMonitorWin');
 
 function makeFakeChild() {
   const child = new EventEmitter();
@@ -91,7 +91,7 @@ test('sample() computes the same delta/rate shape as the Linux sampler from two 
   assert.equal(eth0.txBytes, 4000); // 6000 - 2000
   assert.equal(eth0.rxPackets, 10);
   assert.equal(eth0.txPackets, 12);
-  assert.equal(eth0.operStatus, 'Up');
+  assert.equal(eth0.operStatus, 'up'); // Windows "Up" normalised to the operstate vocabulary
   assert.equal(eth0.speedMbps, 1000);
   assert.equal(snap.totals.rxBytes, 2000);
   assert.equal(snap.totals.txBytes, 4000);
@@ -159,4 +159,30 @@ test('stop() kills the running child process', () => {
   const sampler = createWinTrafficSampler({ spawnFn });
   sampler.stop();
   assert.equal(children[0].killed, true);
+});
+
+test('normalizeOperStatus maps Get-NetAdapter Status to operstate words', () => {
+  assert.equal(normalizeOperStatus('Up'), 'up');
+  assert.equal(normalizeOperStatus('Disconnected'), 'down');
+  assert.equal(normalizeOperStatus('Disabled'), 'down');
+  assert.equal(normalizeOperStatus('Not Present'), 'notpresent');
+  assert.equal(normalizeOperStatus('LowerLayerDown'), 'lowerlayerdown');
+  assert.equal(normalizeOperStatus('Something New'), 'unknown');
+  assert.equal(normalizeOperStatus(''), null);
+  assert.equal(normalizeOperStatus(null), null);
+  assert.equal(normalizeOperStatus(3), null);
+});
+
+test('normalizeSpeedMbps drops driver placeholders', () => {
+  assert.equal(normalizeSpeedMbps(1000), 1000);
+  assert.equal(normalizeSpeedMbps(0), null);
+  assert.equal(normalizeSpeedMbps(null), null);
+  assert.equal(normalizeSpeedMbps(Math.round(18446744073709551615 / 1e6)), null);
+  assert.equal(normalizeSpeedMbps('1 Gbps'), null);
+});
+
+test('buildScript reads the numeric Speed, not the LinkSpeed display string', () => {
+  const script = buildScript(1000);
+  assert.match(script, /\$a\.Speed/);
+  assert.doesNotMatch(script, /LinkSpeed/);
 });

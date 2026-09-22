@@ -16,7 +16,8 @@ const { silentLogger } = require('./logger');
 // Get-NetAdapterStatistics exposes exactly those eight cumulative counters
 // (Received/Sent Bytes, Unicast+Multicast+Broadcast packets, PacketErrors,
 // DiscardedPackets), and Get-NetAdapter supplies best-effort link state
-// (Status) + speed (LinkSpeed) for the operStatus/speedMbps meta fields.
+// (Status) + speed (Speed, bits/s) for the operStatus/speedMbps meta fields.
+// NOT LinkSpeed: that is a display string ("1 Gbps") and never casts to a number.
 //
 // Inline script (no separate .ps1 file) so a server self-update that ships a
 // new trafficMonitorWin.js carries the tick logic with it automatically.
@@ -32,7 +33,7 @@ function buildScript(tickMs) {
     'foreach ($s in Get-NetAdapterStatistics) { ' +
     '$a = $adapters[$s.Name]; ' +
     '$speed = $null; ' +
-    'if ($a -and $a.LinkSpeed) { try { $speed = [math]::Round([double]$a.LinkSpeed / 1000000) } catch {} } ' +
+    'if ($a -and $a.Speed) { try { $speed = [math]::Round([double]$a.Speed / 1000000) } catch {} } ' +
     '$ifaces[$s.Name] = @{ ' +
     'rxBytes = [int64]$s.ReceivedBytes; ' +
     'rxPackets = [int64]($s.ReceivedUnicastPackets + $s.ReceivedMulticastPackets + $s.ReceivedBroadcastPackets); ' +
@@ -60,6 +61,34 @@ const MAX_READINGS = 120;
 // instead of hanging the report loop forever (e.g. powershell.exe crash-loop).
 const READING_GRACE_MS = 5000;
 const POLL_STEP_MS = 50;
+
+// Get-NetAdapter's Status vocabulary -> the lowercase ifOperStatus words
+// /sys/class/net/<if>/operstate uses, so the server reads every platform the
+// same way. Windows says "Up"/"Disconnected"/"Disabled"/"Not Present"; left
+// raw, the server's case-sensitive 'up' check flagged every link as DOWN.
+const WIN_OPER_STATUS = {
+  up: 'up',
+  disconnected: 'down',
+  disabled: 'down',
+  notpresent: 'notpresent',
+  lowerlayerdown: 'lowerlayerdown',
+  testing: 'testing',
+  dormant: 'dormant',
+  unknown: 'unknown',
+};
+
+function normalizeOperStatus(status) {
+  if (typeof status !== 'string') return null;
+  const key = status.replace(/[\s_-]/g, '').toLowerCase();
+  return WIN_OPER_STATUS[key] || (key ? 'unknown' : null);
+}
+
+// Speed outside 1 Mbit/s..10 Tbit/s is a driver placeholder (a disconnected
+// adapter can report 0 or UInt64.MaxValue), not a link rate.
+function normalizeSpeedMbps(speed) {
+  const n = Number(speed);
+  return Number.isFinite(n) && n >= 1 && n <= 1e7 ? n : null;
+}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -184,7 +213,7 @@ function createWinTrafficSampler({
 
     const meta = {};
     for (const [iface, v] of Object.entries(second.ifaces)) {
-      meta[iface] = { operStatus: (v && v.operStatus) ?? null, speedMbps: (v && v.speedMbps) ?? null };
+      meta[iface] = { operStatus: normalizeOperStatus(v && v.operStatus), speedMbps: normalizeSpeedMbps(v && v.speedMbps) };
     }
     const elapsedSec = Math.max((second.ts - first.ts) / 1000, 0.001);
     return buildSnapshot(first.ifaces, second.ifaces, {
@@ -215,4 +244,4 @@ function createWinTrafficSampler({
   return sample;
 }
 
-module.exports = { createWinTrafficSampler, buildScript, parseLine };
+module.exports = { createWinTrafficSampler, buildScript, parseLine, normalizeOperStatus, normalizeSpeedMbps };
