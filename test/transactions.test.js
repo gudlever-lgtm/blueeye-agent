@@ -168,6 +168,19 @@ test('dns: NXDOMAIN → fail with phase dns', async () => {
   assert.equal(r.detail.phase, 'dns');
 });
 
+test("dns: Node's resolver timeout code (ETIMEOUT) → timeout, not error", async () => {
+  // dns.promises reports a resolver timeout as 'ETIMEOUT' (dns.TIMEOUT). The
+  // executor used to check only the socket dialect 'ETIMEDOUT', so every real
+  // DNS timeout was filed under 'error'.
+  for (const code of ['ETIMEOUT', 'ETIMEDOUT']) {
+    // eslint-disable-next-line no-await-in-loop
+    const r = await dnsExecutor({ id: 1, type: 'dns', target: 'slow.example', config: { record: 'A' } }, { resolver: { resolve: async () => { const e = new Error('queryA ETIMEOUT'); e.code = code; throw e; } }, now: () => 0 });
+    assert.equal(r.status, 'timeout', code);
+    assert.equal(r.detail.phase, 'timeout', code);
+    assert.equal(r.detail.errno, code);
+  }
+});
+
 // ---- icmp executor (canned ping output) ----
 
 const LINUX_PING = 'PING x (1.2.3.4) 56(84) bytes.\n64 bytes from 1.2.3.4: icmp_seq=1 ttl=52 time=12.3 ms\n\n--- x ping statistics ---\n1 packets transmitted, 1 received, 0% packet loss, time 0ms\nrtt min/avg/max/mdev = 12.3/12.3/12.3/0.0 ms';

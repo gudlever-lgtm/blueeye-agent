@@ -147,3 +147,71 @@ test('a non-trace probe gets no live deps and sends no trace_hop frames', async 
     await server.close();
   }
 });
+
+// ---- ECMP: more than one router answers the same TTL ----------------------
+
+// Linux traceroute prints every NEW address inline when the probes of one TTL
+// come back from different routers (equal-cost multipath / load balancing).
+const ECMP_OUT = [
+  'traceroute to 93.184.216.34 (93.184.216.34), 20 hops max, 60 byte packets',
+  ' 1  192.168.1.1  0.5 ms  0.4 ms  0.4 ms',
+  ' 2  10.1.0.1  1.2 ms 10.2.0.1  1.5 ms  10.1.0.1  1.3 ms',
+  ' 3  10.3.0.1  4.0 ms *  10.4.0.1  4.4 ms',
+  ' 4  edge-a.example.net (198.51.100.1)  9.0 ms  edge-b.example.net (198.51.100.2)  9.2 ms  9.1 ms',
+  ' 5  2001:db8::1  11.0 ms 2001:db8::2  11.2 ms  2001:db8::1  11.1 ms',
+  ' 6  * * *',
+  '',
+].join('\n');
+
+test('a hop answered by several routers keeps ip = the first and lists every distinct one in ips', async () => {
+  const res = await traceroute({ host: '93.184.216.34' }, { exec: chunkedExec(ECMP_OUT), platform: 'linux' });
+  assert.equal(res.hops.length, 6);
+  const [h1, h2, h3, h4, h5, h6] = res.hops;
+  assert.deepEqual(h1.ips, ['192.168.1.1']);
+  // Backward compatible: `ip` is still the first responder.
+  assert.equal(h2.ip, '10.1.0.1');
+  // Distinct, in the order they answered — the repeat of 10.1.0.1 is not a third router.
+  assert.deepEqual(h2.ips, ['10.1.0.1', '10.2.0.1']);
+  assert.equal(h2.recv, 3, 'all three probes answered, whichever router sent them');
+  assert.deepEqual(h3.ips, ['10.3.0.1', '10.4.0.1']);
+  assert.equal(h3.recv, 2);
+  // Without -n the hostname is printed beside the address; only the address counts.
+  assert.equal(h4.ip, '198.51.100.1');
+  assert.deepEqual(h4.ips, ['198.51.100.1', '198.51.100.2']);
+  assert.deepEqual(h5.ips, ['2001:db8::1', '2001:db8::2']);
+  assert.equal(h6.ip, null);
+  assert.deepEqual(h6.ips, []);
+});
+
+test('tcptraceroute hops carry ips too (same parser)', async () => {
+  const res = await tcptraceroute({ host: '93.184.216.34', port: 443 }, { exec: chunkedExec(ECMP_OUT) });
+  assert.deepEqual(res.hops[1].ips, ['10.1.0.1', '10.2.0.1']);
+  assert.equal(res.hops[1].ip, '10.1.0.1');
+});
+
+test('the live trace_hop frames carry ips as well', async () => {
+  const server = await startFakeServer({ validTokens: ['valid'] });
+  const probeRunner = async (spec, deps = {}) => ({
+    ts: new Date().toISOString(),
+    ...(await traceroute(spec, { exec: chunkedExec(ECMP_OUT), platform: 'linux', ...(deps.traceroute || {}) })),
+  });
+  const runtime = createAgentRuntime({
+    config: makeConfig(server), token: 'valid', agentId: 1, logger: silentLogger, hsflowdManager: noopHsflowd, probeRunner,
+  });
+  try {
+    runtime.start();
+    await withTimeout(onceEvent(runtime, 'config'), 4000, 'no config loaded');
+    const submitted = onceEvent(runtime, 'probe-submitted');
+    server.sendCommandToAll({ name: 'run-probe', probe: { type: 'traceroute', host: '93.184.216.34' } });
+    await withTimeout(submitted, 4000, 'probe not submitted');
+    const frame = await withTimeout(server.waitForWsMessage((m) => m.type === 'trace_hop' && m.hop && m.hop.hop === 2), 4000, 'hop 2 not streamed');
+    assert.deepEqual(frame.hop.ips, ['10.1.0.1', '10.2.0.1']);
+    assert.equal(frame.hop.ip, '10.1.0.1');
+    // And the submitted record says the same.
+    const posted = server.receivedProbeResults[0].body.results[0];
+    assert.deepEqual(posted.hops[1].ips, ['10.1.0.1', '10.2.0.1']);
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});

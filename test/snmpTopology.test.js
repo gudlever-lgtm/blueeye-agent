@@ -305,6 +305,21 @@ test('an empty collect list falls back to everything rather than nothing', async
   assert.deepEqual(seenOpts.collect, ['if', 'fdb', 'lldp', 'vlan']);
 });
 
+test('sysDescr is carried into the per-device payload, trimmed and bounded', async () => {
+  const banner = '  Cisco IOS Software, C2960 Software (C2960-LANBASEK9-M), Version 15.0(2)SE11\r\nCopyright (c) 1986-2017 by Cisco Systems, Inc.  ';
+  const r = await pollSnmpTopology({
+    device: { deviceId: 7, host: '10.14.0.11', community: 'public' },
+    readTables: async () => qbridge({ sysName: 'sw-core-1', sysDescr: banner }),
+  });
+  assert.equal(r.sysName, 'sw-core-1');
+  assert.equal(r.sysDescr, banner.trim());
+
+  assert.equal(buildTopology(qbridge({ sysDescr: 'x'.repeat(400) })).sysDescr.length, 255);
+  // Not answered and answered-blank are both "unknown", never an empty string.
+  assert.equal(buildTopology(qbridge()).sysDescr, null);
+  assert.equal(buildTopology(qbridge({ sysDescr: '   ' })).sysDescr, null);
+});
+
 test('a device with no host is refused with a coded error', async () => {
   await assert.rejects(
     () => pollSnmpTopology({ device: { deviceId: 1 } }),

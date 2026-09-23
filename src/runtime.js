@@ -28,6 +28,9 @@ const { detectCapabilities } = require('./capabilities');
 const { collectNicInfo } = require('./nicInfo');
 const { collectConnections } = require('./connTable');
 const { collectArpTable } = require('./arpTable');
+const { collectLldp: collectLldpDefault } = require('./lldp');
+const dns = require('dns');
+const net = require('net');
 const { collectLocalIps: collectLocalIpsDefault } = require('./localIps');
 const { makePinnedFetch } = require('./httpsClient');
 const path = require('path');
@@ -94,6 +97,12 @@ function createAgentRuntime({
   collectLocalIps = collectLocalIpsDefault,
   collectConns = collectConnections,
   collectArp = collectArpTable,
+  // This host's own LLDP neighbours, via lldpd when it is installed. Resolves
+  // { neighbours, chassisId } or { unavailable }. Injectable for tests.
+  collectLldp = collectLldpDefault,
+  // Resolves an SNMP target's hostname to the addresses its traps will come
+  // from. dns.lookup-shaped ({ all: true } → [{ address, family }]).
+  lookupHost = (host) => dns.promises.lookup(host, { all: true }),
   discoveryScanner = createScanner(),
   collectCidrs = collectLocalCidrs,
   selfUpdater = null,
@@ -111,6 +120,9 @@ function createAgentRuntime({
   // Receives SNMP traps from those same switches. Injectable so tests drive
   // ingestDatagram() without binding a port or needing net-snmp.
   trapReceiver = null,
+  // Builds the real trap receiver when traps are enabled. Injectable so a test
+  // can see the sender allowlist and ifName resolver the runtime hands it.
+  trapReceiverFactory = createTrapReceiver,
   // One-target, once-a-second measurement on command. Injectable so tests run
   // a two-minute burst against a fake clock.
   burstRunner = null,
@@ -204,7 +216,9 @@ function createAgentRuntime({
       logger,
     })
     : null);
-  let syslogTimer = null;
+  // ONE flush timer for syslog AND traps — they drain into the same batch. It
+  // starts when EITHER receiver binds, so a trap-only agent flushes too.
+  let deviceEventTimer = null;
   let syslogBound = null; // what start() actually managed to bind, or null
   let lastDeviceEventAt = null; // ms epoch of the last successful flush
 
@@ -220,25 +234,39 @@ function createAgentRuntime({
   let lastSnmpAt = null; // ms epoch of the last successful submit
   let lastSnmpCounterAt = null;
 
-  // Interface names learned by the SNMP topology poll, keyed by the device's
-  // address, so a trap saying "ifIndex 1" can be shown as "GigabitEthernet0/1".
-  // Populated from the poll results the agent already submits; a device not in
-  // here resolves to null and the trap shows the index, which is honest.
-  const ifNamesByHost = new Map(); // host -> Map(ifIndex -> ifName)
+  // Interface names learned by the SNMP topology poll, keyed by device, so a
+  // trap saying "ifIndex 1" can be shown as "GigabitEthernet0/1". Populated
+  // from the poll results the agent already submits — scheduled cycles and a
+  // forced poll-snmp alike; a device not in here resolves to null and the trap
+  // shows the index, which is honest.
+  const ifNamesByDeviceId = new Map(); // deviceId -> Map(ifIndex -> ifName)
   const hostByDeviceId = new Map();
+  // The ADDRESSES each polled device is reached at. A trap arrives from an IP,
+  // and a switch configured by hostname ("sw-core-1.lan") never matched the
+  // string compare this used to be. A literal IP is its own entry; a hostname
+  // is resolved when the targets are applied (and again on every re-apply).
+  const addressesByDeviceId = new Map(); // deviceId -> Set(address)
+  let targetResolveGeneration = 0;
 
   function rememberInterfaces(result) {
-    const host = hostByDeviceId.get(result.deviceId);
-    if (!host || !Array.isArray(result.interfaces)) return;
+    if (!result || !hostByDeviceId.has(result.deviceId) || !Array.isArray(result.interfaces)) return;
     const names = new Map();
     for (const i of result.interfaces) {
       if (Number.isInteger(i.ifIndex) && i.ifName) names.set(i.ifIndex, i.ifName);
     }
-    if (names.size) ifNamesByHost.set(host, names);
+    if (names.size) ifNamesByDeviceId.set(result.deviceId, names);
+  }
+
+  function deviceIdForAddress(sourceIp) {
+    for (const [deviceId, addrs] of addressesByDeviceId) {
+      if (addrs.has(sourceIp)) return deviceId;
+    }
+    return undefined;
   }
 
   function resolveTrapIfName(sourceIp, ifIndex) {
-    const names = ifNamesByHost.get(sourceIp);
+    const deviceId = deviceIdForAddress(sourceIp);
+    const names = deviceId === undefined ? null : ifNamesByDeviceId.get(deviceId);
     return names ? (names.get(ifIndex) || null) : null;
   }
 
@@ -247,13 +275,13 @@ function createAgentRuntime({
   // only from an address this agent actually polls. Weak, and the strongest
   // check v2c permits.
   function isPolledSender(sourceIp) {
-    return hostByDeviceId.size > 0 && [...hostByDeviceId.values()].includes(sourceIp);
+    return deviceIdForAddress(sourceIp) !== undefined;
   }
 
   // Traps: built only when enabled, like syslog. Shares the device-event flush,
   // because a trap and a syslog line are the same thing over a different socket.
   const traps = trapReceiver || (config.trapsEnabled
-    ? createTrapReceiver({
+    ? trapReceiverFactory({
       port: config.trapPort,
       bindAddress: config.trapBindAddress,
       maxEvents: config.trapMaxEvents,
@@ -271,6 +299,7 @@ function createAgentRuntime({
   const burst = burstRunner || createBurstRunner({ probeRunner, logger });
 
   let reportTimer = null;
+  let capabilitiesTimer = null;
   let reportingStarted = false; // true once the bootstrap called startReporting()
   let probeTimer = null;
   let fatal = false;
@@ -289,6 +318,7 @@ function createAgentRuntime({
     if (fatal) return;
     fatal = true;
     stopReporting();
+    stopCapabilitiesReporting();
     logger.error('Token rejected (HTTP 401); stopping. Will NOT re-enroll automatically.');
     client.stop();
     emitter.emit('fatal', reason);
@@ -452,6 +482,20 @@ function createAgentRuntime({
       const arp = await collectArp();
       if (Array.isArray(arp) && arp.length) payload = { ...payload, arp };
     } catch { /* neighbour table is best-effort */ }
+    try {
+      // This host's own LLDP neighbours (lldpd) → the server's lldp_neighbors
+      // + topology-change detection: which switch port this machine is on.
+      // Sent only when lldpd ANSWERED — an empty list is a snapshot ("nobody
+      // there any more") the server diffs against, so a host that merely
+      // cannot ask must omit the field, and says why under `unavailable`.
+      const lldp = await collectLldp();
+      if (lldp && Array.isArray(lldp.neighbours)) {
+        payload = { ...payload, lldp: lldp.neighbours };
+        if (lldp.chassisId) payload = { ...payload, lldpChassisId: lldp.chassisId };
+      } else if (lldp && lldp.unavailable) {
+        payload = { ...payload, unavailable: { ...(payload.unavailable || {}), lldp: String(lldp.unavailable) } };
+      }
+    } catch { /* LLDP is best-effort */ }
     // WHICH KEY THIS AGENT TRUSTS. A fingerprint of the PUBLIC release key it
     // pins — never the key, never a secret, and the one fact that turns
     // "refused: command signature verification failed" from a mystery into a
@@ -467,7 +511,9 @@ function createAgentRuntime({
       const nicNote = payload.nic ? ` + ${payload.nic.length} NIC(s)` : '';
       const connNote = payload.connections ? ` + ${payload.connections.length} conn edge(s)` : '';
       const arpNote = payload.arp ? ` + ${payload.arp.length} ARP entr(ies)` : '';
-      logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}${nicNote}${connNote}${arpNote}`);
+      const lldpNote = payload.lldp ? ` + ${payload.lldp.length} LLDP neighbour(s)` : '';
+      logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}${nicNote}${connNote}${arpNote}${lldpNote}`);
+      emitter.emit('capabilities-reported', payload);
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
       logger.warn(`Could not report capabilities (${err.message}).`);
@@ -580,6 +626,33 @@ function createAgentRuntime({
     }
   }
 
+  // Re-reports capabilities on a fixed cadence. The ARP table, the connection
+  // table, the NIC inventory and the LLDP neighbours are all in that report,
+  // and they used to be sent only at start and on a WS reconnect — so on an
+  // agent whose connection simply held, the server's IP↔MAC map and service
+  // graph froze at the moment it connected. Skipped while disconnected (the
+  // reconnect reports anyway) and after a fatal; unref'd, so it never holds
+  // the process open. 0 disables it.
+  function startCapabilitiesReporting() {
+    stopCapabilitiesReporting();
+    const intervalMs = config.capabilitiesIntervalMs;
+    if (fatal || !Number.isFinite(intervalMs) || intervalMs <= 0) return;
+    let running = false;
+    capabilitiesTimer = setInterval(async () => {
+      if (fatal || running || !client.isConnected()) return;
+      running = true;
+      try { await reportCapabilities(); } finally { running = false; }
+    }, intervalMs);
+    if (capabilitiesTimer.unref) capabilitiesTimer.unref();
+  }
+
+  function stopCapabilitiesReporting() {
+    if (capabilitiesTimer) {
+      clearInterval(capabilitiesTimer);
+      capabilitiesTimer = null;
+    }
+  }
+
   // Drains the syslog buffer and ships one batch. A 401 is fatal; anything else
   // is non-terminal — but the drained events are NOT put back. A server that is
   // down for an hour would otherwise have the agent hold an hour of log lines in
@@ -616,6 +689,35 @@ function createAgentRuntime({
     }
   }
 
+  // Starts the ONE device-event flush timer. Called by whichever receiver binds
+  // first; the second call is a no-op, so an agent with both syslog and traps
+  // runs one timer, not two racing each other over the same drain. It used to
+  // live inside startSyslog, which left a trap-only agent buffering traps that
+  // were never sent. The interval is syslogFlushIntervalMs for both.
+  function startDeviceEventFlush() {
+    if (deviceEventTimer || fatal) return;
+    const intervalMs = config.syslogFlushIntervalMs;
+    if (!intervalMs || intervalMs <= 0) return;
+    let running = false;
+    deviceEventTimer = setInterval(async () => {
+      if (fatal || running) return;
+      running = true;
+      try {
+        await flushDeviceEvents();
+      } finally {
+        running = false;
+      }
+    }, intervalMs);
+    if (deviceEventTimer.unref) deviceEventTimer.unref();
+  }
+
+  function stopDeviceEventFlush() {
+    if (deviceEventTimer) {
+      clearInterval(deviceEventTimer);
+      deviceEventTimer = null;
+    }
+  }
+
   // Binds the receiver and starts the flush timer. A bind failure is reported
   // and survived: the agent's traffic reporting and probes must keep working on
   // a host where something else already holds the port.
@@ -630,19 +732,7 @@ function createAgentRuntime({
       emitter.emit('syslog', null);
       return;
     }
-    const intervalMs = config.syslogFlushIntervalMs;
-    if (!intervalMs || intervalMs <= 0) return;
-    let running = false;
-    syslogTimer = setInterval(async () => {
-      if (fatal || running) return;
-      running = true;
-      try {
-        await flushDeviceEvents();
-      } finally {
-        running = false;
-      }
-    }, intervalMs);
-    if (syslogTimer.unref) syslogTimer.unref();
+    startDeviceEventFlush();
   }
 
   // Applies the server's switch assignment. An agent whose server is too old to
@@ -651,16 +741,61 @@ function createAgentRuntime({
     try {
       snmpTargetCount = snmp.setTargets(list);
       // The trap allowlist and the ifIndex resolver both key on the device's
-      // address, so they are rebuilt from the same assignment.
+      // ADDRESS, so they are rebuilt from the same assignment. A literal IP is
+      // in force immediately; a hostname keeps the addresses it resolved to
+      // last time (if its name did not change) until the fresh lookup lands.
+      const prevHosts = new Map(hostByDeviceId);
+      const prevAddrs = new Map(addressesByDeviceId);
       hostByDeviceId.clear();
+      addressesByDeviceId.clear();
+      const toResolve = [];
       for (const d of Array.isArray(list) ? list : []) {
-        if (d && d.deviceId != null && typeof d.host === 'string') hostByDeviceId.set(d.deviceId, d.host);
+        if (!d || d.deviceId == null || typeof d.host !== 'string' || !d.host.trim()) continue;
+        const host = d.host.trim();
+        hostByDeviceId.set(d.deviceId, host);
+        if (net.isIP(host)) {
+          addressesByDeviceId.set(d.deviceId, new Set([host]));
+        } else {
+          const kept = prevHosts.get(d.deviceId) === host ? prevAddrs.get(d.deviceId) : null;
+          addressesByDeviceId.set(d.deviceId, new Set(kept || []));
+          toResolve.push({ deviceId: d.deviceId, host });
+        }
+      }
+      for (const id of [...ifNamesByDeviceId.keys()]) {
+        if (!hostByDeviceId.has(id)) ifNamesByDeviceId.delete(id);
       }
       if (snmpTargetCount) logger.info(`SNMP topology: polling ${snmpTargetCount} device(s).`);
+      resolveTargetHosts(toResolve);
     } catch (err) {
       logger.warn(`Could not apply SNMP targets (${err.message}).`);
       snmpTargetCount = 0;
     }
+  }
+
+  // Resolves the hostname targets to addresses, off the config path: a slow
+  // resolver must not hold up the monitor config. A later re-apply supersedes
+  // an earlier lookup still in flight (the generation check), and a failed
+  // lookup keeps what the device had, so a DNS blip does not start refusing a
+  // switch's traps. Never throws; emits 'snmp-targets-resolved' when done.
+  function resolveTargetHosts(items) {
+    const generation = ++targetResolveGeneration;
+    if (!items.length) return;
+    Promise.all(items.map(async ({ deviceId, host }) => {
+      try {
+        const res = await lookupHost(host);
+        const addrs = (Array.isArray(res) ? res : [res])
+          .map((a) => (a && typeof a === 'object' ? a.address : a))
+          .filter((a) => typeof a === 'string' && net.isIP(a))
+          .map((a) => (a.startsWith('::ffff:') && net.isIPv4(a.slice(7)) ? a.slice(7) : a));
+        if (!addrs.length) return;
+        if (generation !== targetResolveGeneration || hostByDeviceId.get(deviceId) !== host) return;
+        addressesByDeviceId.set(deviceId, new Set(addrs));
+      } catch (err) {
+        logger.warn(`Could not resolve SNMP target ${host} (${(err && err.code) || (err && err.message)}); its traps are matched on the last known address, if any.`);
+      }
+    })).then(() => {
+      if (generation === targetResolveGeneration) emitter.emit('snmp-targets-resolved', items.length);
+    }).catch(() => { /* never unhandled */ });
   }
 
   // Runs one poll cycle. A 401 is fatal like everywhere else; anything else is
@@ -729,12 +864,15 @@ function createAgentRuntime({
     if (!traps || fatal) return;
     try {
       trapsBound = typeof traps.start === 'function' ? await traps.start() : { injected: true };
-      emitter.emit('traps', trapsBound);
     } catch (err) {
       logger.warn(`SNMP trap receiver did not start (${err.message}).`);
       reportError('trap-bind', err);
       emitter.emit('traps', null);
+      return;
     }
+    // The shared flush — a no-op when syslog already started it.
+    startDeviceEventFlush();
+    emitter.emit('traps', trapsBound);
   }
 
   function stopTraps() {
@@ -745,10 +883,6 @@ function createAgentRuntime({
   }
 
   function stopSyslog() {
-    if (syslogTimer) {
-      clearInterval(syslogTimer);
-      syslogTimer = null;
-    }
     if (syslog && typeof syslog.stop === 'function') {
       try { syslog.stop(); } catch { /* shutdown must not throw */ }
     }
@@ -1286,7 +1420,7 @@ function createAgentRuntime({
   // its own live state. No writes, no new SNMP OID scope. Best-effort per item.
   const evidenceCollectors = {
     'agent.state': async () => [
-      `connected: ${client && typeof client.isConnected === 'function' ? (client.isConnected() ? 'yes' : 'no') : 'unknown'}`,
+      `connected: ${client.isConnected() ? 'yes' : 'no'}`,
       `lastReportAt: ${lastReportAt ? new Date(lastReportAt).toISOString() : 'never'}`,
       `sources: ${(capabilities.sources || []).join(', ') || 'none'}`,
       `monitorSource: ${monitorConfig && monitorConfig.source ? monitorConfig.source : 'unknown'}`,
@@ -1451,12 +1585,16 @@ function createAgentRuntime({
         await startSyslog();
         await startTraps();
         // The tick only asks which devices are due; the per-device interval
-        // decides what is actually polled.
-        snmp.start({ tickMs: 30000 });
+        // decides what is actually polled. Each tick runs the runtime's own
+        // cycle wrapper — the same one poll-snmp uses — so a scheduled cycle
+        // feeds the interface-name hook and a 401 on its submit is fatal here
+        // like on every other REST call.
+        snmp.start({ tickMs: 30000, cycle: () => runSnmpCycle() });
         // The counter tick is faster than the topology one, because a counter
         // series' interval is its resolution: a five-minute sample cannot show
         // a two-minute error burst at all. It only asks which devices are due.
-        snmp.startCounters({ tickMs: 15000 });
+        snmp.startCounters({ tickMs: 15000, cycle: () => runSnmpCounterCycle() });
+        startCapabilitiesReporting();
         // Start running any persisted transaction tests (server pushes fresh
         // config on connect, which replaces these).
         try { txManager.start(); } catch (err) { logger.warn(`Transaction manager start failed: ${err.message}`); }
@@ -1465,7 +1603,9 @@ function createAgentRuntime({
     stop() {
       if (confirmTimer) { clearTimeout(confirmTimer); confirmTimer = null; }
       stopReporting();
+      stopCapabilitiesReporting();
       stopScheduledProbes();
+      stopDeviceEventFlush();
       stopSyslog();
       stopTraps();
       burst.cancel();

@@ -88,6 +88,12 @@ function loadConfig({ env = process.env } = {}) {
   const probeAutoDns = toBool(env.BLUEEYE_PROBE_DNS, file.probeDns, true);
   const probeTargets = parseConfiguredTargets(env.BLUEEYE_PROBE_TARGETS ?? file.probeTargets);
 
+  // Periodic capabilities re-report. The ARP table, connection table, NIC
+  // inventory and LLDP neighbours ride on that report; without a cadence they
+  // were only refreshed at start and on a WS reconnect. 0 disables it (default
+  // 300 s — the server upserts, so a repeat costs a few rows, not duplicates).
+  const capabilitiesIntervalMs = toInt(env.BLUEEYE_CAPABILITIES_INTERVAL_MS, file.capabilitiesIntervalMs ?? 300000);
+
   // Syslog receiver: the agent listens for the log messages switches, firewalls
   // and APs already emit, and forwards them to the server. Off by default — a
   // listening port is opt-in, never something an upgrade starts on its own.
@@ -131,6 +137,7 @@ function loadConfig({ env = process.env } = {}) {
     probeAutoGateway,
     probeAutoDns,
     probeTargets,
+    capabilitiesIntervalMs,
     syslogEnabled,
     syslogPort,
     syslogBindAddress,

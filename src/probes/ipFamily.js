@@ -102,6 +102,25 @@ function findAddress(line) {
   return embedded ? embedded[1] : null;
 }
 
+// Every DISTINCT address — v4 or v6 — in one line of tool output, in the order
+// they appear. Same token rules as findAddress (exact `net.isIP`, zone dropped,
+// wrappers stripped), so a hostname printed beside its address is never
+// mistaken for a second hop. Used for traceroute's ECMP lines, where one TTL is
+// answered by more than one router.
+function findAllAddresses(line) {
+  const out = [];
+  for (const token of String(line == null ? '' : line).split(/\s+/)) {
+    const bare = unwrap(token);
+    if (!bare) continue;
+    const zoneless = bare.includes('%') ? bare.slice(0, bare.indexOf('%')) : bare;
+    let addr = null;
+    if (net.isIP(zoneless)) addr = zoneless;
+    else if (zoneless.endsWith(':') && net.isIP(zoneless.slice(0, -1))) addr = zoneless.slice(0, -1);
+    if (addr && !out.includes(addr)) out.push(addr);
+  }
+  return out;
+}
+
 // argv for one sized ping, optionally limited to `ttl` hops.
 //
 // The flags differ by more than spelling, which is the entire reason this is one
@@ -207,6 +226,7 @@ module.exports = {
   familyOf,
   resolveFamily,
   findAddress,
+  findAllAddresses,
   pingCommand,
   tracerouteCommands,
   TRACE_WAIT_MS,

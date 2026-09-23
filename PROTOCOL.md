@@ -93,8 +93,14 @@ the key (the agent then uses the default).
 
 ### 1.4 `POST /agents/me/capabilities` — report capabilities + NIC inventory
 
-`src/apiClient.js postCapabilities()`. Sent once at startup and again on every
-WS (re)connect (converges the stored agent version after a self-update).
+`src/apiClient.js postCapabilities()`. Sent once at startup, again on every
+WS (re)connect (converges the stored agent version after a self-update), and
+every `capabilitiesIntervalMs` (default 300 s; skipped while the WebSocket is
+down; `0` disables) so the ARP/connection/NIC/LLDP data does not freeze at the
+moment the agent connected. A repeat is safe on the server: the agent row is
+UPDATEd, the connection table REPLACEd, ARP rows UPSERTed, and the LLDP set is
+diffed against the previous snapshot — only a real change writes a
+`topology_changes` row / audit entry.
 
 ```jsonc
 // request
@@ -106,10 +112,19 @@ WS (re)connect (converges the stored agent version after a self-update).
       "iface": "eth0", "driver": "e1000e", "driverVersion": "...",
       "firmwareVersion": "...", "busInfo": "0000:00:1f.6", "pciId": "8086:15b8"
     } ],
-    "ips": ["10.0.0.5", "2001:db8::1"]                 // optional; this host's own non-loopback IPs
-} }                                                     //   (src/localIps.js) — lets the server resolve a
+    "ips": ["10.0.0.5", "2001:db8::1"],                // optional; this host's own non-loopback IPs
+                                                        //   (src/localIps.js) — lets the server resolve a
                                                         //   flow IP back to the host for the service
                                                         //   dependency graph. Additive + metadata only.
+    "unavailable": { "snmp": "...", "lldp": "..." },   // why an optional capability is absent
+    "lldp": [ {                                        // optional (src/lldp.js, lldpd's `lldpctl -f json`);
+      "localPort": "eth0",                             //   OMITTED when lldpd is missing / not running
+      "remoteChassisId": "00:1b:44:11:3a:b7",          //   (see unavailable.lldp) — never [] then, because
+      "remotePort": "Gi1/0/24",                        //   [] is a snapshot the server diffs into
+      "linkState": "up" | null                         //   "every neighbour removed". ≤ 64 entries,
+    } ],                                               //   fields ≤ 190 chars; MACs lowercased.
+    "lldpChassisId": "52:54:00:ab:cd:ef"               // optional; this host's own chassis id (lldpcli)
+} }
 // 200 response
 { "agentId": 42, "capabilities": { ...echoed, nic normalised... } }
 ```
@@ -238,9 +253,9 @@ Per-type extras:
 | type | extra fields sent | notes |
 | --- | --- | --- |
 | `ping` | — | `jitterMs` = ping's `mdev` |
-| `tcp` | — | |
-| `dns` | `detail` = first resolved address | |
-| `traceroute` | `hops: [{hop, ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs}]`, `hopCount`, `queries` | `hopCount`/`queries` not persisted; `hops` capped server-side at 64 |
+| `tcp` | `failure`: `"refused"`\|`"timeout"`\|`"unreachable"`\|`"error"`\|`null`, `errorCode` (e.g. `ECONNREFUSED`, `ETIMEDOUT`, `EHOSTUNREACH`) \| `null` | the LAST failing attempt; both `null` when no attempt failed. `refused` = RST (host up, port closed), `timeout` = nothing came back |
+| `dns` | `detail` = first resolved address, `errorCode` (e.g. `ENOTFOUND`, `ETIMEOUT`, `ESERVFAIL`, `ECONNREFUSED`, `EAI_AGAIN`) \| `null` | `errorCode` is the LAST failing lookup's code; `null` when none failed |
+| `traceroute` | `hops: [{hop, ip, ips, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs}]`, `hopCount`, `queries` | `ip` = first responder (unchanged); `ips: string[]` = every DISTINCT responder on that hop line, in order (ECMP), `[]` for a silent hop. The live `trace_hop` frame's `hop` carries the same record. `hopCount`/`queries` not persisted; `hops` capped server-side at 64 |
 | `tcptraceroute` | the same `hops`/`hopCount`/`queries`, plus `port` | identical hop record — the path is traced with TCP SYNs instead of ICMP/UDP. `target` is `host:port`, which is what keeps a TCP trace and an ICMP trace to the same host as separate series. `port` is not persisted (it is already in `target`) |
 | `http` | `status`, `certExpiryDays` (https), `detail` (cert detail) | |
 | `curl` | `status`, `bytes`, `contentType`, `detail` (assertion summary) | metadata only, never the body |
@@ -471,6 +486,7 @@ survives release swaps).
 | `BLUEEYE_PROBE_GATEWAY` | `probeGateway` | `true` | auto-probe the default gateway |
 | `BLUEEYE_PROBE_DNS` | `probeDns` | `true` | auto-probe resolv.conf nameservers |
 | `BLUEEYE_PROBE_TARGETS` | `probeTargets` | `[]` | extra targets (`"ping:1.1.1.1,tcp:host:443,dns:example.com"`) |
+| `BLUEEYE_CAPABILITIES_INTERVAL_MS` | `capabilitiesIntervalMs` | `300000` | periodic capabilities re-report (§1.4); `0` disables |
 | `BLUEEYE_LOG_LEVEL` | — | `info` | logger (`src/index.js`) |
 | `BLUEEYE_ACTION_LOG` | — | — (no-op) | local append-only action trail (`src/runtime.js`, `src/selfDelete.js`) |
 | `BLUEEYE_SERVICE_NAME` | — | `blueeye-agent` | systemd unit for restart/uninstall (`src/selfUpdate.js`, `src/selfDelete.js`) |

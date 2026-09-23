@@ -220,6 +220,12 @@ function createAgentClient({
       }
       return false;
     },
+    // Is the socket open right now? What send() checks before it writes, so a
+    // caller can skip work whose only output would be dropped (and so the
+    // evidence snapshot can say "connected: yes" instead of "unknown").
+    isConnected() {
+      return !!(ws && ws.readyState === ws.OPEN);
+    },
     on: emitter.on.bind(emitter),
     once: emitter.once.bind(emitter),
     get isFatal() {

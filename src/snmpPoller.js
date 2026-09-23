@@ -293,23 +293,33 @@ function createSnmpPoller({
 
   // The tick is deliberately short and cheap: it only asks which devices are
   // due. The per-device interval decides what actually gets polled.
-  function start({ tickMs = 30000 } = {}) {
+  //
+  // `cycle` is what a tick runs. The runtime passes its own wrapper, so a
+  // SCHEDULED cycle gets the same treatment as a forced poll-snmp: the
+  // per-device onResult hook (interface names for the trap resolver), the
+  // last-submit time on the diagnose snapshot, and — the one that mattered — a
+  // 401 on the submit reaching the runtime's fatal handling instead of being
+  // swallowed here on every tick for ever. Without one, a tick runs a bare
+  // cycle, as it always did.
+  function start({ tickMs = 30000, cycle = null } = {}) {
     stop();
     if (!tickMs || tickMs <= 0) return;
+    const run = typeof cycle === 'function' ? cycle : () => runCycle();
     timer = setInterval(() => {
-      runCycle().catch(() => { /* runCycle already logged; never unhandled */ });
+      Promise.resolve().then(run).catch(() => { /* the cycle already logged; never unhandled */ });
     }, tickMs);
     if (timer.unref) timer.unref();
   }
 
   // The counter tick, on its own timer. Separate from the topology one because
   // the two cadences are different by design and a slow bridge-table walk must
-  // not delay a counter read.
-  function startCounters({ tickMs = 15000 } = {}) {
+  // not delay a counter read. `cycle` as for start().
+  function startCounters({ tickMs = 15000, cycle = null } = {}) {
     stopCounters();
     if (!submitCounters || !tickMs || tickMs <= 0) return;
+    const run = typeof cycle === 'function' ? cycle : () => runCounterCycle();
     counterTimer = setInterval(() => {
-      runCounterCycle().catch(() => { /* runCounterCycle already logged */ });
+      Promise.resolve().then(run).catch(() => { /* the cycle already logged */ });
     }, tickMs);
     if (counterTimer.unref) counterTimer.unref();
   }

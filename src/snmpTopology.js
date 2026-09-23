@@ -417,6 +417,10 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
     // clock did, which is the case everybody forgets.
     sysUpTimeTicks: t.sysUpTimeTicks ?? null,
     sysName: t.sysName ?? null,
+    // What the device says it is (vendor, model, OS version). Already read in
+    // the same GET as sysName; bounded because some vendors put a multi-line
+    // banner here, and trimmed so "no answer" and "blank" both come out null.
+    sysDescr: cleanSysDescr(t.sysDescr),
     interfaces,
     fdb,
     fdbTruncated,
@@ -426,6 +430,13 @@ function buildTopology(tables, { maxFdb = MAX_FDB_ENTRIES, maxNeighbours = MAX_N
     // Counted before the cap, so the server can show "5 000 of 21 480".
     fdbTotal: rows.length,
   };
+}
+
+const SYS_DESCR_MAX = 255;
+function cleanSysDescr(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s ? s.slice(0, SYS_DESCR_MAX) : null;
 }
 
 // Polls one device. Returns { deviceId, ...topology } or throws with a coded

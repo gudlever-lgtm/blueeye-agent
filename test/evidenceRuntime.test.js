@@ -33,6 +33,9 @@ test('an "evidence" command collects allowlisted read-only items and refuses a w
     const byName = Object.fromEntries(msg.evidence.items.map((i) => [i.name, i]));
     assert.equal(byName['agent.state'].status, 'ok');       // read-only, collected
     assert.match(byName['agent.state'].payload, /agentVersion/);
+    // The client exposes isConnected() now, so the snapshot states it rather
+    // than printing "unknown" on every agent.
+    assert.match(byName['agent.state'].payload, /^connected: yes$/m);
     assert.equal(byName.reboot.status, 'refused');           // write-class hard-refused agent-side
   } finally {
     runtime.stop();

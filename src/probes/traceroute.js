@@ -2,13 +2,16 @@
 
 const { execFile } = require('child_process');
 const { round, safeHost } = require('./stats');
-const { findAddress, resolveFamily, tracerouteCommands, TRACE_WAIT_MS } = require('./ipFamily');
+const { findAddress, findAllAddresses, resolveFamily, tracerouteCommands, TRACE_WAIT_MS } = require('./ipFamily');
 
 // Path probe via the system `traceroute` (Linux/macOS) / `tracert` (Windows).
 // MTR-style: sends several probes per hop (`-q queries`) so every hop carries not
 // just latency but *loss* and *jitter* — the per-hop metrics the server overlays
 // on its path-visualisation graph. Returns hops:
-//   [{ hop, ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs }]
+//   [{ hop, ip, ips, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs }]
+// `ip` is the first router that answered (the historical field); `ips` is
+// every DISTINCT router that answered on that hop, in order — more than one
+// means ECMP / load-balanced paths, which a single `ip` silently hid.
 //
 // IPv6 is traced by the same code: which binary and flags to use lives in
 // [`ipFamily`](./ipFamily.js), and a literal IPv6 target selects it on its own,
@@ -102,7 +105,7 @@ function streamHops(child, queries, onHop) {
 // Aggregates the RTT samples + timeouts seen for one hop into a normalized hop
 // record. loss% comes from the probes that didn't answer; jitter = mean absolute
 // difference of consecutive RTT samples (RFC3550-style inter-packet variation).
-function hopStats(hop, ip, samples, sent) {
+function hopStats(hop, ip, samples, sent, ips = ip ? [ip] : []) {
   const recv = Math.min(samples.length, sent);
   const lossPct = sent > 0 ? round(((sent - recv) / sent) * 100) : 0;
   let rttMs = null;
@@ -117,13 +120,19 @@ function hopStats(hop, ip, samples, sent) {
     for (let i = 1; i < samples.length; i += 1) jsum += Math.abs(samples[i] - samples[i - 1]);
     jitterMs = samples.length > 1 ? round(jsum / (samples.length - 1)) : 0;
   }
-  return { hop, ip, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs };
+  return { hop, ip, ips, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs };
 }
 
 // Parses a traceroute/tracert report into per-hop stats. Each hop line carries up
 // to `queries` probes; a probe is either an RTT ("12.3 ms" / Windows "<1 ms") or
 // a timeout ("*"). The hop address is the first one on the line, which works for
 // both layouts: Linux prints it before the times, Windows after them.
+//
+// A hop line can name SEVERAL routers: with equal-cost multipath each probe of
+// the same TTL may take a different path, and Linux traceroute prints every
+// new address inline (` 2  10.1.0.1  1.2 ms 10.2.0.1  1.5 ms  10.1.0.1  1.3 ms`).
+// `ip` stays the first (older servers read only that); `ips` lists each
+// distinct one, in the order they answered.
 //
 // Address extraction is [`findAddress`](./ipFamily.js), which reads IPv4 and
 // IPv6 alike. It used to be an IPv4-only regex, and that one line was the reason
@@ -146,6 +155,10 @@ function parseTraceroute(text, queries = 3) {
     if (!m) continue;
     const rest = m[2];
     const ip = findAddress(rest);
+    const ips = findAllAddresses(rest);
+    // findAddress has a glued-IPv4 fallback the token scan does not; the
+    // headline address is always in the list, and always first.
+    if (ip && !ips.includes(ip)) ips.unshift(ip);
     const samples = [];
     const re = /(<\s*1|\d+(?:\.\d+)?)\s*ms/gi;
     let mm;
@@ -153,7 +166,7 @@ function parseTraceroute(text, queries = 3) {
       const tok = mm[1].replace(/\s+/g, '');
       samples.push(tok[0] === '<' ? 0.5 : Number(tok));
     }
-    hops.push(hopStats(Number(m[1]), ip, samples, queries));
+    hops.push(hopStats(Number(m[1]), ip, samples, queries, ips));
   }
   return hops;
 }

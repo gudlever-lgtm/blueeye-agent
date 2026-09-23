@@ -127,9 +127,11 @@ test('parseTraceroute aggregates multi-sample hops into loss + jitter (MTR-style
   const hops = parseTraceroute(out, 3);
   assert.equal(hops.length, 3);
   // hop 1: 3/3 answered, avg 2, jitter = mean|Δ| of (1,1) = 1, no loss.
-  assert.deepEqual(hops[0], { hop: 1, ip: '10.0.0.1', sent: 3, recv: 3, lossPct: 0, rttMs: 2, minMs: 1, maxMs: 3, jitterMs: 1 });
+  // (`ips` added deliberately: every distinct responder on the hop line.)
+  assert.deepEqual(hops[0], { hop: 1, ip: '10.0.0.1', ips: ['10.0.0.1'], sent: 3, recv: 3, lossPct: 0, rttMs: 2, minMs: 1, maxMs: 3, jitterMs: 1 });
   // hop 2: silent router — 0/3, 100% loss, null IP, null timings.
   assert.equal(hops[1].ip, null);
+  assert.deepEqual(hops[1].ips, []);
   assert.equal(hops[1].recv, 0);
   assert.equal(hops[1].lossPct, 100);
   assert.equal(hops[1].rttMs, null);

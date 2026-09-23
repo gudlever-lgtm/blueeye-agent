@@ -2,6 +2,8 @@
 
 const dns = require('dns');
 
+const TIMEOUT_CODES = new Set(['ETIMEOUT', 'ETIMEDOUT']);
+
 // DNS-resolution test: resolves target with the configured record type and
 // (optionally) checks the answer contains an expected substring. `resolver` is
 // injectable (dns.promises-shaped) so tests don't hit a real resolver.
@@ -20,7 +22,11 @@ async function dnsExecutor(test, { resolver = dns.promises, now = () => Date.now
     return { status: 'ok', latency_ms: now() - t0 };
   } catch (err) {
     const code = err && err.code ? String(err.code) : '';
-    const status = code === 'ETIMEDOUT' ? 'timeout' : (code === 'ENOTFOUND' || code === 'ENODATA' ? 'fail' : 'error');
+    // Node's resolver reports a timeout as 'ETIMEOUT' (dns.TIMEOUT), not the
+    // socket-level 'ETIMEDOUT' — checking only the latter filed every DNS
+    // timeout under 'error'. Both are accepted, so an injected resolver that
+    // speaks the socket dialect is classified the same way.
+    const status = TIMEOUT_CODES.has(code) ? 'timeout' : (code === 'ENOTFOUND' || code === 'ENODATA' ? 'fail' : 'error');
     return { status, latency_ms: now() - t0, detail: { phase: status === 'timeout' ? 'timeout' : 'dns', errno: code || 'EDNS' } };
   }
 }
