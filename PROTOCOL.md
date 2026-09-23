@@ -266,6 +266,11 @@ Server persistence (`validation/probeValidation.js`): keeps `ts, type, target,
 ok, rttMs, minMs, maxMs, jitterMs, lossPct, hops, status, certExpiryDays,
 bytes, contentType, elements, detail, execError`; strings length-capped
 (target 255, detail 255, contentType 120, hop ip 45, element url 255).
+From server 0.188.0 it also keeps why a probe failed: `errorCode` (dns + tcp,
+errno-shaped `[A-Z0-9_]{1,32}`, else dropped), `failure` (tcp only: `refused`,
+`timeout`, `unreachable`, `error`) and `resolver` (dns only, the first system
+nameserver), plus each hop's `ips` (deduplicated, at most 8, first == `ip`)
+inside the hops JSON — the ECMP members the path graph and diagnose count.
 Everything else (`attempts`, `success`, `hopCount`, `queries`, `role`) is
 silently discarded. `error` is mapped to `execError` (and into `detail` when no
 `detail` was sent) — `execError` drives the server's `agent.probe-failed`

@@ -13,7 +13,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
 
 const { tcpProbe, classifyConnectError } = require('../src/probes/tcp');
-const { dnsProbe } = require('../src/probes/dns');
+const { dnsProbe, firstServer } = require('../src/probes/dns');
 const { runProbe } = require('../src/probes');
 const { startFakeServer } = require('../test-support/fakeServer');
 const { createAgentRuntime } = require('../src/runtime');
@@ -133,6 +133,29 @@ test('dns: a thrown value without a code still reports a failure code', async ()
 });
 
 // ---------------------------------------------------------------- on the wire
+test('dns: the first configured nameserver is reported as the resolver', async () => {
+  const r = await dnsProbe({ host: 'plc.example', count: 1 }, {
+    resolver: async () => { throw coded('ETIMEOUT'); },
+    servers: () => ['10.0.0.53', '10.0.0.54'],
+    now: clock(),
+  });
+  assert.equal(r.errorCode, 'ETIMEOUT');
+  assert.equal(r.resolver, '10.0.0.53');
+});
+
+test('dns: an injected lookup with no server list names no resolver', async () => {
+  const r = await dnsProbe({ host: 'plc.example', count: 1 }, { resolver: async () => ({ address: '10.0.0.9' }), now: clock() });
+  assert.equal(r.resolver, null);
+});
+
+test('firstServer strips a non-default port and IPv6 brackets, and survives a throwing list', () => {
+  assert.equal(firstServer(() => ['192.0.2.1:5353']), '192.0.2.1');
+  assert.equal(firstServer(() => ['[2001:db8::1]:5353']), '2001:db8::1');
+  assert.equal(firstServer(() => ['2001:db8::53']), '2001:db8::53');
+  assert.equal(firstServer(() => []), null);
+  assert.equal(firstServer(() => { throw new Error('no resolv.conf'); }), null);
+});
+
 test('failure + errorCode survive runProbe and reach POST /agents/probe-results', async () => {
   const server = await startFakeServer({ validTokens: ['valid'] });
   const probeRunner = (spec) => runProbe(spec, {

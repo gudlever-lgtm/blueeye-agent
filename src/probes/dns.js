@@ -20,7 +20,15 @@ function errorCodeOf(err) {
 // did. Loss alone cannot tell "the name does not exist" (ENOTFOUND) from "the
 // resolver did not answer" (ETIMEOUT) or "it answered SERVFAIL" — three faults
 // with three different owners.
-async function dnsProbe(spec, { resolver = dns.promises.lookup, now = () => Date.now() } = {}) {
+//
+// `resolver` in the result names the nameserver the system resolver asks first
+// (dns.getServers()), so a finding can say WHICH resolver failed. It is only
+// reported for the system resolver: an injected lookup has no server to name.
+async function dnsProbe(spec, {
+  resolver = dns.promises.lookup,
+  servers = resolver === dns.promises.lookup ? () => dns.getServers() : () => [],
+  now = () => Date.now(),
+} = {}) {
   const host = String((spec && (spec.host || spec.target)) || '').trim();
   if (!host) return { ...fail('dns', host, 'invalid host'), errorCode: null };
   const count = clampInt(spec.count, 3, 1, 20);
@@ -39,7 +47,25 @@ async function dnsProbe(spec, { resolver = dns.promises.lookup, now = () => Date
       errorCode = errorCodeOf(err);
     }
   }
-  return summarize('dns', host, rtts, count, { ...(address ? { detail: String(address) } : {}), errorCode });
+  return summarize('dns', host, rtts, count, {
+    ...(address ? { detail: String(address) } : {}),
+    errorCode,
+    resolver: firstServer(servers),
+  });
 }
 
-module.exports = { dnsProbe, errorCodeOf };
+// The first configured nameserver as a bare address. dns.getServers() writes a
+// non-default port as "1.2.3.4:5353" or "[2001:db8::1]:5353"; the port is not
+// part of the name. Null when none is configured or the list cannot be read.
+function firstServer(servers) {
+  let list;
+  try { list = servers(); } catch { return null; }
+  const first = Array.isArray(list) && list.length ? String(list[0]).trim() : '';
+  if (!first) return null;
+  const bracketed = first.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (bracketed) return bracketed[1];
+  const v4port = first.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/);
+  return v4port ? v4port[1] : first;
+}
+
+module.exports = { dnsProbe, errorCodeOf, firstServer };
