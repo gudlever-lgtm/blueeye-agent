@@ -317,6 +317,21 @@ function startFakeServer(options = {}) {
     return sent;
   }
 
+  // Sends a raw frame to every connected agent. `sendCommandToAll` wraps its
+  // argument in { type:'command' }; this one sends the frame verbatim, which is
+  // what the channels that are not commands need — `transaction_config` is
+  // pushed, not commanded.
+  function sendToAll(frame) {
+    let sent = 0;
+    for (const ws of sockets) {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify(frame));
+        sent += 1;
+      }
+    }
+    return sent;
+  }
+
   function dropAllSockets() {
     for (const ws of sockets) ws.terminate();
   }
@@ -348,6 +363,7 @@ function startFakeServer(options = {}) {
         receivedSpeedtests,
         socketCount: () => sockets.size,
         sendCommandToAll,
+        sendToAll,
         dropAllSockets,
         receivedWsMessages,
         waitForWsMessage,

@@ -120,6 +120,11 @@ test('command recognisers: canonical + spelling variants are recognised; wrong v
     // to me"), so unlike run-probe or install-tool the bare verb IS the command.
     ['isPollSnmpCommand', ['poll-snmp', 'poll snmp', 'POLL_SNMP', { name: 'poll-snmp' }, { name: 'poll-snmp', deviceId: 7 }], ['poll', 'snmp', 'polls-nmp']],
     ['isRekeyCommand', [{ name: 'rekey', publicKey: 'pem' }, { name: 're-key', publicKey: 'pem' }, { name: 'rotate-key', publicKey: 'pem' }, { name: 're-pin', publicKey: 'pem' }], ['rekey', { name: 'rekey' }, { name: 'rekey', publicKey: '' }, { name: 'rekey', publicKey: 42 }, { name: 'key' }]],
+    // run-transaction REQUIRES a testId, and a positive integer one: the bare
+    // verb would be "run something", and a test the agent is not assigned is
+    // refused again in the manager. Both spellings of the field are accepted
+    // because the server's own columns are snake_case.
+    ['isRunTransactionCommand', [{ name: 'run-transaction', testId: 4 }, { name: 'run_transaction', test_id: 4 }, { name: 'transaction-now', testId: 1 }, { name: 'run-test-now', testId: 9 }], ['run-transaction', { name: 'run-transaction' }, { name: 'run-transaction', testId: 0 }, { name: 'run-transaction', testId: -1 }, { name: 'run-transaction', testId: 1.5 }, { name: 'run-transaction', testId: 'x' }, { name: 'run-test', testId: 4 }]],
   ];
   for (const [fn, yes, no] of cases) {
     assert.equal(typeof command[fn], 'function', fn);
@@ -128,15 +133,20 @@ test('command recognisers: canonical + spelling variants are recognised; wrong v
     for (const g of GARBAGE) assert.doesNotThrow(() => command[fn](g), `${fn} throws on ${String(typeof g)}`);
     for (const g of [undefined, null, '', 0, [], {}, () => {}]) assert.equal(command[fn](g), false, `${fn} accepted ${JSON.stringify(g)}`);
   }
-  const exported = Object.keys(command).sort();
+  // `transactionIdOf` is a field reader, not a recogniser, so it is named here
+  // rather than given a case above. Everything else this module exports must be
+  // a recogniser with a case — that is what keeps the sweep a sweep.
+  const HELPERS = ['transactionIdOf'];
+  const exported = Object.keys(command).filter((k) => !HELPERS.includes(k)).sort();
   assert.deepEqual(exported, cases.map((c) => c[0]).sort(), 'a new recogniser needs a gate case');
 });
 
 test('no verb is recognised by two different recognisers', () => {
-  const verbs = ['run-test', 'run-probe', 'ping', 'update', 'speedtest', 'diagnose', 'delete', 'install-tool', 'evidence', 'run-discovery', 'rekey', 'poll-snmp', 'burst', 'stop-burst'];
+  const verbs = ['run-test', 'run-probe', 'ping', 'update', 'speedtest', 'diagnose', 'delete', 'install-tool', 'evidence', 'run-discovery', 'rekey', 'poll-snmp', 'burst', 'stop-burst', 'run-transaction'];
+  const HELPERS = ['transactionIdOf'];
   for (const v of verbs) {
-    const full = { name: v, probe: { type: 'ping' }, tool: 't', discovery: {}, publicKey: 'pem', target: '10.0.0.1' };
-    const hits = Object.entries(command).filter(([, fn]) => fn(full)).map(([n]) => n);
+    const full = { name: v, probe: { type: 'ping' }, tool: 't', discovery: {}, publicKey: 'pem', target: '10.0.0.1', testId: 4 };
+    const hits = Object.entries(command).filter(([n, fn]) => !HELPERS.includes(n) && fn(full)).map(([n]) => n);
     assert.equal(hits.length, 1, `${v} matched ${hits.join(', ')}`);
   }
 });

@@ -124,7 +124,10 @@ diffed against the previous snapshot — only a real change writes a
                                                         //   (src/localIps.js) — lets the server resolve a
                                                         //   flow IP back to the host for the service
                                                         //   dependency graph. Additive + metadata only.
-    "unavailable": { "snmp": "...", "lldp": "..." },   // why an optional capability is absent
+    "capture": true,                                   // optional; header capture is possible here
+                                                        //   (Linux + tcpdump + CAP_NET_RAW). Absent means
+                                                        //   no — and `unavailable.capture` says why.
+    "unavailable": { "snmp": "...", "lldp": "...", "capture": "..." },   // why an optional capability is absent
     "lldp": [ {                                        // optional (src/lldp.js, lldpd's `lldpctl -f json`);
       "localPort": "eth0",                             //   OMITTED when lldpd is missing / not running
       "remoteChassisId": "00:1b:44:11:3a:b7",          //   (see unavailable.lldp) — never [] then, because
@@ -563,6 +566,7 @@ the canonical names shown):
 | `poll-snmp` | `deviceId?` | re-read `GET /agents/me/config` (≤ 5 s, errors tolerated), then run an SNMP topology + counter cycle now instead of waiting out the per-device interval (a cycle already in flight is waited for, then this one runs — never a silent "0 polled"); read-only on the device | `command-result {id, ok:true, devices, polled, failed, configRefreshed, deviceAssigned?, detail?, snmp, counters}` — `devices` = switches assigned to this agent; `detail` says so when that is 0 or when `deviceId` is not one of them |
 | `burst` (alias: burst-mode) | `id`, `target` (required), `seconds?`, `hz?`, `probe?`, `size?`, `df?` | measure ONE target up to once a second for at most two minutes, streaming every sample | `command-result` per sample + a final one |
 | `stop-burst` (alias: burst-stop) | `id` | cancel a running burst at the next tick | `command-result {id, ok:true, stopped:bool}` |
+| `run-transaction` (aliases: run-test-now, transaction-now) | `id`, `testId` (required positive int), `capture?` | run an ALREADY-ASSIGNED transaction test now instead of waiting out its interval; `capture:true` keeps the packet headers of the traffic the run itself generates (§2.5). A `testId` this agent is not assigned is refused | `command-result {id, ok, transaction:{ok, result?, error?}}`; a kept capture also arrives as a `transaction_capture` frame |
 
 Probe `spec` (built by the server's `validateProbeSpec`): `{ type, host,
 count?, port? (tcp, tcptraceroute — the latter defaults to 443),
@@ -589,6 +593,8 @@ to take a monitoring agent off a host nobody is watching.
 | `action-result` | `{ type:'action-result', auditId, action:'upgrade'\|'delete'\|'install-tool', ok:bool, version?, tool?, package?, manager?, detail? }` | completes the `agent_action_audit` row (`completed`/`failed`, detail ≤ 300 chars or `"version X"`); `action:'install-tool'` adds an `agent.install-tool` audit event; `action:'delete', ok:true` **deletes the agent row** (tokens cascade) and notifies the dashboard |
 | `sflow.status` | `{ type:'sflow.status', state, detail\|null }` | `state` validated against `active\|inactive\|failed\|not_installed\|install_failed\|permission_denied\|unknown` (else `unknown`), `detail` ≤ 300; kept in-memory per agent (repopulated on reconnect), shown on the agents list, pushed to the dashboard |
 | `agent.error` | `{ type:'agent.error', category, code\|null, message }` | recorded as a recurring `agent.error` audit event, deduped per `(agent, category, code)`; `category` ≤ 48, `code` ≤ 48, `message` → `reason` ≤ 300; pushed to the dashboard |
+| `transaction_result` | `{ type:'transaction_result', results:[{ test_id, time, status, latency_ms, step_timings?, step_phases?, step_failed?, detail? }] }` | batch-inserted into `transaction_results` after being checked against the agent's assignments. `step_phases[i]` is the dns/tcp/tls/ttfb/transfer split of `step_timings[i]` — see §2.5 |
+| `transaction_capture` | `{ type:'transaction_capture', test_id, time, capture:{ reason, iface, filter, snaplen, duration_ms, observed, dropped, foreign, truncated, packets:[…] } }` | stored in `transaction_captures`, keyed by `(test_id, agent_id, time)` — the same key the result row carries, so neither frame has to arrive first. Headers only; see §2.5 |
 
 `agent.error` categories currently emitted (`src/runtime.js reportError`):
 `capabilities`, `config`, `device-events`, `discovery`, `probe`,
@@ -645,6 +651,57 @@ silence.
 ```
 
 ---
+
+### 2.5 Transaction phases and header capture
+
+Two additions to the transaction channel, both about telling a NETWORK fault
+from an APPLICATION one. That is the question every "the system is slow"
+report turns into, and a single latency number cannot answer it.
+
+**Phases** (`step_phases`) split each step's time into the moments a socket
+already announces:
+
+| phase | measured from → to | what it is |
+| --- | --- | --- |
+| `dns` | request start → `lookup` | name resolution |
+| `tcp` | `lookup` → `connect` | the TCP handshake, i.e. **the network round-trip time** |
+| `tls` | `connect` → `secureConnect` | the TLS handshake (https only) |
+| `ttfb` | `secureConnect` → response headers | the server thinking, plus one RTT |
+| `transfer` | headers → last byte | body size over throughput |
+
+Each is milliseconds or `null`. **`null` is not zero**: it means the moment
+never happened — no TLS on a plain http step, no handshake at all on a step
+that reused a keep-alive socket (`reused: true` says which). A step that never
+received a first byte reports `ttfb: null` AND `transfer: null`, so a body that
+never arrived cannot read as a fast download. A record may also carry
+`address` (what the name actually resolved to), `localPort` and `remotePort`.
+
+`step_phases` rides alongside `step_timings` rather than replacing it: the
+baselines and the deviation detector index on `step_timings`, and a second
+definition of "how long the step took" would be a second thing to keep true.
+A type that cannot observe a handshake (`icmp`) omits the field entirely.
+
+**Header capture** is the layer below. It exists for what timings cannot see:
+retransmissions, duplicate ACKs, resets, zero windows and MSS mismatches.
+
+- The filter is **derived from the test**, never typed. Every address in it has
+  passed `net.isIP` and every port is an integer (`src/capture/filter.js`). A
+  filter that cannot be built is a refusal, not a wider capture.
+- `snaplen` is **96 bytes and fixed**. It is not a parameter.
+- Nothing is written to disk. `tcpdump` writes a pcap stream to a pipe, each
+  frame is decoded into named header fields and the buffer is dropped.
+- A packet record is `{ t, src, dst, proto, sport, dport, len, ttl, flags, seq,
+  ack, win, mss, icmp, payload }` — `payload` is the byte COUNT, never bytes.
+  No DNS question name, no TLS SNI, no HTTP host or path.
+- `capture` on a test is `off` (default) | `on_fault` | `always`. Under
+  `on_fault` the capture runs on every run and is **kept only when the run
+  failed or broke its latency threshold**; otherwise the records are discarded
+  where they were made. `reason` on the stored capture says which it was.
+- Caps: 2000 packets and 30 seconds, enforced in the agent as well as in
+  `tcpdump -c`. One capture per agent at a time.
+- Needs Linux, `tcpdump`, and `CAP_NET_RAW`. A host missing any of them reports
+  `capabilities.unavailable.capture` with the reason and runs its tests as usual
+  — a capture is an extra, never a precondition for measuring.
 
 ## 3. Configuration the agent reads
 

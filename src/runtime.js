@@ -3,7 +3,7 @@
 const { EventEmitter } = require('events');
 const { createAgentClient } = require('./agentClient');
 const { createApiClient } = require('./apiClient');
-const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand, isRekeyCommand, isPollSnmpCommand, isBurstCommand, isStopBurstCommand } = require('./command');
+const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand, isRekeyCommand, isPollSnmpCommand, isBurstCommand, isStopBurstCommand, isRunTransactionCommand, transactionIdOf } = require('./command');
 const { createScanner, DiscoveryScopeError } = require('./discovery/scanner');
 const { collectLocalCidrs } = require('./localIps');
 const { createEvidenceCollector } = require('./evidenceCollector');
@@ -43,6 +43,7 @@ const { createSyslogReceiver, parseSenderAllowlist } = require('./syslog/receive
 const { createSnmpPoller } = require('./snmpPoller');
 const { createTrapReceiver } = require('./traps/receiver');
 const { createBurstRunner } = require('./burst');
+const { createCaptureRunner, detectCaptureSupport } = require('./capture');
 
 // Hard cap on how many targets one scheduled cycle will probe, so a giant
 // configured/nameserver list can't turn into a burst.
@@ -142,6 +143,12 @@ function createAgentRuntime({
   // One-target, once-a-second measurement on command. Injectable so tests run
   // a two-minute burst against a fake clock.
   burstRunner = null,
+  // Injected by tests so a capture is exercised without spawning tcpdump.
+  captureRunner = null,
+  captureSupport = detectCaptureSupport,
+  // Injected into every transaction executor (fake http/connect/resolver), so a
+  // transaction run is exercised without reaching the network.
+  transactionExecutorDeps = {},
   // Where a server-sent rekey stores this host's trust anchor (beside the token —
   // the one directory the agent is guaranteed to be able to write). Injectable.
   pinnedKeyPath = keyStore.pinnedKeyPath(config && config.tokenPath),
@@ -209,11 +216,18 @@ function createAgentRuntime({
   // encrypted with a key derived from the token, and decrypted only in memory.
   const transactionConfigPath = config.transactionConfigPath
     || path.join(path.dirname(config.tokenPath || '.'), 'transactions.json');
+  // Header capture for transaction runs. Built unconditionally: it binds
+  // nothing, spawns nothing and allocates nothing until a run that asks for one
+  // actually starts, and a host where it cannot work refuses per run with a
+  // reason (which `capabilities.unavailable.capture` has already reported).
+  const capture = captureRunner || createCaptureRunner({ logger });
   const txManager = createTransactionManager({
     send: (obj) => client.send(obj),
     configStore: createConfigStore({ filePath: transactionConfigPath, secretStore: createSecretStore(token), logger }),
     buffer: createResultBuffer({ max: 1000 }),
+    executorDeps: transactionExecutorDeps,
     logger,
+    capture,
   });
   client.on('transaction-config', (tests) => {
     try { txManager.applyConfig(tests); } catch (err) { logger.warn(`Failed to apply transaction config: ${err.message}`); }
@@ -527,6 +541,17 @@ function createAgentRuntime({
     }
   }
 
+  // Header-capture support, probed at most once while it keeps saying yes. A
+  // negative answer is not cached: the two things that cause it (no tcpdump, no
+  // CAP_NET_RAW) are both fixable from outside, and an agent that cached "no" at
+  // boot would keep saying it for as long as it ran.
+  let captureSupportMemo = null;
+  async function captureSupportCached() {
+    if (captureSupportMemo && captureSupportMemo.available) return captureSupportMemo;
+    captureSupportMemo = await captureSupport({});
+    return captureSupportMemo;
+  }
+
   // Reports capabilities to the server. Resilient: only a 401 is fatal. NIC
   // inventory (driver/firmware per interface) is collected best-effort and
   // folded in, so the server can spot fleet-wide firmware drift; a failure to
@@ -571,6 +596,17 @@ function createAgentRuntime({
         payload = { ...payload, unavailable: { ...(payload.unavailable || {}), lldp: String(lldp.unavailable) } };
       }
     } catch { /* LLDP is best-effort */ }
+    try {
+      // CAN THIS HOST CAPTURE HEADERS AT ALL? Reported so the dashboard can
+      // offer the option only where it works, and name the reason where it does
+      // not — "tcpdump is not installed" is a thing an operator can fix, while a
+      // capture that silently never happens is not. Probed once and remembered;
+      // an unavailable host is re-probed on each report, so installing tcpdump
+      // (or granting the capability) is picked up without a restart.
+      const support = await captureSupportCached();
+      if (support.available) payload = { ...payload, capture: true };
+      else payload = { ...payload, unavailable: { ...(payload.unavailable || {}), capture: String(support.reason || 'unavailable') } };
+    } catch { /* capture support is best-effort */ }
     // WHICH KEY THIS AGENT TRUSTS. A fingerprint of the PUBLIC release key it
     // pins — never the key, never a secret, and the one fact that turns
     // "refused: command signature verification failed" from a mystery into a
@@ -1720,6 +1756,13 @@ function createAgentRuntime({
       await handleBurst(command);
       return;
     }
+    if (isRunTransactionCommand(command)) {
+      const testId = transactionIdOf(command);
+      logger.info(`Received run-transaction command (test ${testId}${command.capture ? ', with capture' : ''}).`);
+      const out = await txManager.runNow(testId, { capture: command.capture === true });
+      client.send({ type: 'command-result', id: command && command.id, ok: !!out.ok, transaction: out });
+      return;
+    }
     if (isPollSnmpCommand(command)) {
       logger.info('Received poll-snmp command; refreshing the assignment, then polling assigned switches now.');
       // "Poll now" is pressed right after a device was added or moved to this
@@ -1825,6 +1868,7 @@ function createAgentRuntime({
     runSnmpCycleNow: (opts) => runSnmpCycle({ force: true, ...(opts || {}) }),
     runSnmpCounterCycleNow: (opts) => runSnmpCounterCycle({ force: true, ...(opts || {}) }),
     runBurstNow: (spec) => handleBurst(spec),
+    runTransactionNow: (testId, opts) => txManager.runNow(testId, opts || {}),
     refreshConfigNow: () => loadServerConfig({ force: false }),
     getMonitorConfig: () => monitorConfig,
     getHsflowdState: () => lastHsflowdState,

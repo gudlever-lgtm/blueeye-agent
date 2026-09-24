@@ -166,7 +166,11 @@ test('safeRegex: catastrophic and malformed server-supplied patterns are bounded
 
 // ---------------------------------------------------------------- allowlists
 test('toolInstaller: only the fixed allowlist can be installed, and a refused tool never shells out', async () => {
-  assert.deepEqual([...ALLOWED_TOOLS].sort(), ['mtr', 'tcptraceroute', 'traceroute']);
+  // tcpdump is on the list because the transaction header capture runs it.
+  // Installing it grants nothing on its own: opening a capture device still
+  // needs CAP_NET_RAW, and the capture still only ever runs with a filter
+  // derived from an already-assigned test (src/capture/filter.js).
+  assert.deepEqual([...ALLOWED_TOOLS].sort(), ['mtr', 'tcpdump', 'tcptraceroute', 'traceroute']);
   const record = [];
   const installer = createToolInstaller({ exec: async (cmd, args) => { record.push([cmd, ...args]); return { ok: true, stdout: '', stderr: '' }; } });
   for (const tool of ['curl; rm -rf /', 'traceroute && id', '../../bin/sh', 'nmap', '', null, { name: 'traceroute' }]) {
