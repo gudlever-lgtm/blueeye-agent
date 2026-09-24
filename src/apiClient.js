@@ -15,6 +15,7 @@ function assertOk(res, gerund, verb) {
   if (!res.ok) {
     const err = new Error(`Failed to ${verb}: HTTP ${res.status}.`);
     err.code = 'HTTP_ERROR';
+    err.status = res.status;
     throw err;
   }
 }

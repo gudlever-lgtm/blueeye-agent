@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseProcNetDev, sampleTraffic, buildSnapshot } = require('../src/trafficMonitor');
+const { parseProcNetDev, parseDuplex, sampleTraffic, buildSnapshot } = require('../src/trafficMonitor');
 
 const SNAP1 = `Inter-|   Receive                                                |  Transmit
  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
@@ -17,8 +17,11 @@ const SNAP2 = `Inter-|   Receive                                                
 
 test('parseProcNetDev extracts rx/tx bytes, packets, errors and drops per interface', () => {
   const parsed = parseProcNetDev(SNAP1);
-  assert.deepEqual(parsed.eth0, { rxBytes: 1000, rxPackets: 10, rxErrors: 0, rxDrop: 0, txBytes: 2000, txPackets: 12, txErrors: 0, txDrop: 0 });
-  assert.deepEqual(parsed.lo, { rxBytes: 100, rxPackets: 1, rxErrors: 0, rxDrop: 0, txBytes: 100, txPackets: 1, txErrors: 0, txDrop: 0 });
+  // Updated deliberately: the parse now also keeps the fifo/frame/colls/carrier
+  // columns (duplex + cabling detail), so the exact shape grew four keys.
+  const zeroDetail = { rxFifo: 0, rxFrame: 0, txColls: 0, txCarrier: 0 };
+  assert.deepEqual(parsed.eth0, { rxBytes: 1000, rxPackets: 10, rxErrors: 0, rxDrop: 0, txBytes: 2000, txPackets: 12, txErrors: 0, txDrop: 0, ...zeroDetail });
+  assert.deepEqual(parsed.lo, { rxBytes: 100, rxPackets: 1, rxErrors: 0, rxDrop: 0, txBytes: 100, txPackets: 1, txErrors: 0, txDrop: 0, ...zeroDetail });
 });
 
 test('parseProcNetDev reads the error/drop columns', () => {
@@ -145,4 +148,81 @@ test('buildSnapshot (extracted for non-/proc sources, e.g. trafficMonitorWin.js)
   assert.equal(eth0.operStatus, 'Up');
   assert.equal(eth0.speedMbps, 1000);
   assert.equal(traffic.totals.rxBytes, 2000);
+});
+
+// A real /proc/net/dev from a host on a half-duplex 100 Mbit port (header lines
+// verbatim from the kernel, column spacing as printed). eth1 is the damaged
+// one: frame errors on receive, collisions + carrier errors on transmit.
+const PROC_DUPLEX_1 = `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 8123456   81234    0    0    0     0          0         0  8123456   81234    0    0    0     0       0          0
+  eth0: 912345678 1234567    0    3    0     0          0      4521 45678901  234567    0    0    0     0       0          0
+  eth1: 12345678   98765   42    0    7    40          0       120  9876543   87654   11    0    0   300       5          0
+`;
+const PROC_DUPLEX_2 = `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 8123556   81235    0    0    0     0          0         0  8123556   81235    0    0    0     0       0          0
+  eth0: 912445678 1234667    0    3    0     0          0      4521 45688901  234667    0    0    0     0       0          0
+  eth1: 12445678   99765   52    0    9    48          0       120  9976543   88654   14    0    0   360       6          0
+`;
+
+test('parseProcNetDev reads fifo/frame (rx) and colls/carrier (tx) from a real /proc/net/dev', () => {
+  const p = parseProcNetDev(PROC_DUPLEX_1);
+  assert.equal(p.eth1.rxErrors, 42);
+  assert.equal(p.eth1.rxFifo, 7);
+  assert.equal(p.eth1.rxFrame, 40);
+  assert.equal(p.eth1.txErrors, 11);
+  assert.equal(p.eth1.txColls, 300);
+  assert.equal(p.eth1.txCarrier, 5);
+  assert.equal(p.eth0.rxDrop, 3);
+  assert.equal(p.eth0.txColls, 0);
+});
+
+test('sampleTraffic reports duplex + frame/fifo/collision/carrier deltas per interval', async () => {
+  const snaps = [PROC_DUPLEX_1, PROC_DUPLEX_2];
+  let c = 0;
+  const traffic = await sampleTraffic({
+    readProc: () => snaps[c++],
+    sleepFn: async () => {},
+    now: (() => { const v = [0, 2000]; let i = 0; return () => v[i++]; })(),
+    readIfaceMeta: async (iface) => (iface === 'eth1'
+      ? { operStatus: 'up', speedMbps: 100, duplex: 'half' }
+      : { operStatus: 'up', speedMbps: 1000, duplex: 'full' }),
+  });
+  const eth1 = traffic.interfaces.find((i) => i.iface === 'eth1');
+  assert.equal(eth1.duplex, 'half');
+  assert.equal(eth1.rxFrameErrors, 8);
+  assert.equal(eth1.rxFifoErrors, 2);
+  assert.equal(eth1.txCollisions, 60);
+  assert.equal(eth1.txCarrierErrors, 1);
+  const eth0 = traffic.interfaces.find((i) => i.iface === 'eth0');
+  assert.equal(eth0.duplex, 'full');
+  assert.equal(eth0.rxFrameErrors, 0);
+  assert.equal(eth0.txCollisions, 0);
+});
+
+test('buildSnapshot: a source without the detail counters reports null, never 0', async () => {
+  // Windows (trafficMonitorWin) feeds counters without fifo/frame/colls/carrier
+  // and meta without duplex — "not measured" must stay distinguishable from
+  // "measured zero", which is what rules a duplex mismatch out.
+  const first = { eth0: { rxBytes: 1, txBytes: 1, rxPackets: 1, txPackets: 1, rxErrors: 0, txErrors: 0, rxDrop: 0, txDrop: 0 } };
+  const second = { eth0: { rxBytes: 2, txBytes: 2, rxPackets: 2, txPackets: 2, rxErrors: 0, txErrors: 0, rxDrop: 0, txDrop: 0 } };
+  const snap = await buildSnapshot(first, second, {
+    intervalMs: 1000, elapsedSec: 1, readIfaceMeta: async () => ({ operStatus: 'up', speedMbps: 1000 }),
+  });
+  const e = snap.interfaces[0];
+  assert.equal(e.duplex, null);
+  assert.equal(e.rxFrameErrors, null);
+  assert.equal(e.rxFifoErrors, null);
+  assert.equal(e.txCollisions, null);
+  assert.equal(e.txCarrierErrors, null);
+});
+
+test('parseDuplex accepts only the kernel vocabulary', () => {
+  assert.equal(parseDuplex('full\n'), 'full');
+  assert.equal(parseDuplex('half'), 'half');
+  assert.equal(parseDuplex('unknown\n'), 'unknown');
+  assert.equal(parseDuplex(''), null);
+  assert.equal(parseDuplex('Invalid argument'), null);
+  assert.equal(parseDuplex(null), null);
 });

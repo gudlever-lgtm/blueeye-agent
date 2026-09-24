@@ -74,6 +74,51 @@ function withTimeout(promise, ms, host) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// The size one topology POST may reach. The server parses JSON bodies up to
+// 1 MiB and answers 413 above it — and a 413 loses the WHOLE cycle, every
+// switch in it. A router's ARP table (up to 8 192 rows) beside a full
+// forwarding table can pass that on its own, so a cycle is sent in as many
+// POSTs as it takes, each under this, with headroom for the envelope.
+const SUBMIT_MAX_BYTES = 900 * 1024;
+
+const jsonBytes = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
+
+// Splits one cycle into batches that each fit `maxBytes`. Devices are never
+// split across batches — one device's snapshot is one write on the server,
+// and half of one would diff as a switch that lost half its neighbours. A
+// device too big on its own has its ARP table (the newest and the largest
+// optional table) trimmed until it fits, and says so with `arpTruncated`;
+// whatever is left is sent as it is, which is what happened before this
+// existed. The per-device errors travel in the first batch.
+function splitSubmission({ devices = [], errors = [] }, maxBytes = SUBMIT_MAX_BYTES) {
+  const envelope = jsonBytes({ devices: [], errors });
+  const sized = devices.map((d) => {
+    let dev = d;
+    let size = jsonBytes(dev);
+    if (size + envelope > maxBytes && Array.isArray(dev.arp) && dev.arp.length) {
+      let keep = dev.arp.length;
+      while (keep > 0 && size + envelope > maxBytes) {
+        keep = Math.floor(keep / 2);
+        dev = { ...d, arp: d.arp.slice(0, keep), arpTruncated: true };
+        size = jsonBytes(dev);
+      }
+    }
+    return { dev, size };
+  });
+  const batches = [];
+  let current = { devices: [], errors, bytes: envelope };
+  for (const { dev, size } of sized) {
+    if (current.devices.length && current.bytes + size + 1 > maxBytes) {
+      batches.push(current);
+      current = { devices: [], errors: [], bytes: jsonBytes({ devices: [], errors: [] }) };
+    }
+    current.devices.push(dev);
+    current.bytes += size + 1;
+  }
+  batches.push(current);
+  return batches.map(({ devices: ds, errors: es }) => ({ devices: ds, errors: es }));
+}
+
 // A target the server sent WITHOUT a credential, and why.
 //
 // The server resolves one credential per device — the device's own, the
@@ -107,6 +152,7 @@ function createSnmpPoller({
   pollCounters = pollSnmpCounters,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   counterConcurrency = COUNTER_CONCURRENCY,
+  submitMaxBytes = SUBMIT_MAX_BYTES,
   now = () => Date.now(),
 } = {}) {
   let targets = [];
@@ -118,6 +164,9 @@ function createSnmpPoller({
   // bridge-table walk is timing out may well still answer a counter read, and
   // one cycle's bad luck must not stall the other's schedule.
   const lastCounterAttempt = new Map();
+  // deviceId -> the kinds the device's last poll reported as supported. See
+  // keepSupportedHonest().
+  const lastSupported = new Map();
   let timer = null;
   let counterTimer = null;
   let running = false;
@@ -135,7 +184,24 @@ function createSnmpPoller({
     for (const id of [...lastCounterAttempt.keys()]) {
       if (!live.has(id)) lastCounterAttempt.delete(id);
     }
+    for (const id of [...lastSupported.keys()]) {
+      if (!live.has(id)) lastSupported.delete(id);
+    }
     return targets.length;
+  }
+
+  // `supported` is derived from the rows a poll got, and the server stores it
+  // as what the device CAN answer ("cdp ✕ — this device does not support
+  // cdp"). A kind whose walk was cut short this cycle has not said it is
+  // unsupported — it has said nothing — so a kind the device answered last
+  // time is carried over rather than flipped off for one slow cycle.
+  function keepSupportedHonest(deviceId, result) {
+    if (!result || !Array.isArray(result.supported)) return;
+    const before = lastSupported.get(deviceId);
+    for (const p of Array.isArray(result.partial) ? result.partial : []) {
+      if (before && before.has(p.kind) && !result.supported.includes(p.kind)) result.supported.push(p.kind);
+    }
+    lastSupported.set(deviceId, new Set(result.supported));
   }
 
   function due(device, t) {
@@ -171,7 +237,19 @@ function createSnmpPoller({
         try {
           const missing = credentialError(device);
           if (missing) throw missing;
-          const result = await withTimeout(poll({ device }), timeoutMs, device.host);
+          // The poll is TOLD its budget as well as held to it: it runs the
+          // core walks first and fits the optional ones (arp, entity, cdp)
+          // into what is left, so a slow router costs those tables this cycle
+          // rather than its forwarding table and interfaces with them.
+          const result = await withTimeout(poll({ device, timeoutMs }), timeoutMs, device.host);
+          keepSupportedHonest(device.deviceId, result);
+          // A planned per-VLAN rotation is not a fault; only a cut walk is.
+          const cut = result && Array.isArray(result.partial)
+            ? result.partial.filter((x) => x && x.reason !== 'rotating') : [];
+          if (cut.length) {
+            logger.warn(`SNMP poll of ${device.host}: submitted without complete ${cut
+              .map((x) => `${x.kind} (${x.reason})`).join(', ')}.`);
+          }
           devices.push(result);
           // Best-effort: a consumer that throws must not cost the poll that
           // already succeeded.
@@ -190,7 +268,10 @@ function createSnmpPoller({
 
       if (devices.length || errors.length) {
         try {
-          await submit({ devices, errors });
+          // Usually one POST; more only when the cycle would not fit in one.
+          for (const part of splitSubmission({ devices, errors }, submitMaxBytes)) {
+            await submit(part);
+          }
         } catch (err) {
           // A submit failure is the caller's to classify (a 401 is fatal
           // upstream). The poll results are NOT held for a retry: they are a
@@ -357,6 +438,8 @@ function createSnmpPoller({
 module.exports = {
   createSnmpPoller,
   credentialError,
+  splitSubmission,
+  SUBMIT_MAX_BYTES,
   MIN_INTERVAL_SEC,
   DEFAULT_TIMEOUT_MS,
   COUNTER_MIN_INTERVAL_SEC,

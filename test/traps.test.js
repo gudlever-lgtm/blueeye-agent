@@ -440,3 +440,13 @@ test('with traps disabled nothing binds and the snapshot says so', async () => {
     await server.close();
   }
 });
+
+test('an integer varbind delivered as bytes is read in full, not only its first six bytes', () => {
+  // Seven bytes, value 70000. Reading only the first six (the old code) gave
+  // 0x000000000111 = 273 — the same 256x-low bug the SNMP reader had on a real
+  // seven-byte Counter64.
+  const seven = Buffer.from([0, 0, 0, 0, 0x01, 0x11, 0x70]);
+  const varbinds = linkDown().map((v) => (v.oid.startsWith('1.3.6.1.2.1.2.2.1.1.') ? { ...v, value: seven } : v));
+  const r = translateTrap({ varbinds, sourceIp: '10.14.0.11', receivedAt: RECV });
+  assert.match(r.summary, /ifIndex 70000/);
+});

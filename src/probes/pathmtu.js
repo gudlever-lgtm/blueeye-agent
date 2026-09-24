@@ -54,6 +54,13 @@ const {
 const MAX_SIZE_CEILING = 9216; // jumbo frames
 const DEFAULT_MAX_SIZE = 1500;
 const MAX_HOPS_PROBED = 32;
+// Probes per hop for the traceroute that lists the path. ONE per hop numbered
+// the path wrong wherever a router or the target rate-limits its ICMP: the one
+// reply to the target's own TTL was dropped, traceroute kept going, and a
+// target two hops away was stored at hop 17 — the first TTL whose reply got
+// through. Two gives every hop a second chance at the cost of one more probe
+// on a silent one.
+const TRACE_QUERIES = 2;
 // A whole-probe time budget. Without it a 30-hop path against a silent target
 // is minutes of timeouts; hops past the budget are reported as `skipped` rather
 // than silently missing, so the operator can see the run was cut short.
@@ -314,9 +321,12 @@ async function pathMtuProbe(spec, {
     // anything: if the smallest packet gets no answer, this point is silent, and
     // every larger size would "fail" for a reason that has nothing to do with size.
     const control = await probeSize(opts.minSize, ttl);
-    if (!control.pass) return { silent: true, maxMtu: null, ip: control.from, fragSeen: seen(), silentDrop: false, localLimited: false };
+    if (!control.pass) return { silent: true, maxMtu: null, ip: control.from, fragSeen: seen(), silentDrop: false, localLimited: false, reached: false };
+    // An echo REPLY to a TTL-limited ping means the TARGET is within `ttl`
+    // hops — whatever the traceroute numbered it.
+    const reached = control.outcome === OUTCOME.REPLY;
     const hi = Math.max(opts.minSize, Math.min(ceiling, opts.maxSize));
-    const done = (maxMtu, ip) => ({ silent: false, maxMtu, ip, fragSeen: seen(), silentDrop, localLimited });
+    const done = (maxMtu, ip) => ({ silent: false, maxMtu, ip, fragSeen: seen(), silentDrop, localLimited, reached });
     if (hi <= opts.minSize) return done(opts.minSize, control.from);
     const top = await probe(hi);
     if (top.pass) return done(hi, top.from || control.from);
@@ -331,13 +341,27 @@ async function pathMtuProbe(spec, {
   }
 
   // --------------------------------------------------------------- the path
+  //
+  // HOP NUMBERS ARE THE TRACEROUTE'S LINE NUMBERS — the TTL each probe went
+  // out with — and a hop that did not answer the trace STAYS in the list under
+  // its number. It is measured like any other (the TTL-limited ping below may
+  // well get an answer the UDP trace did not), and when that ping is answered
+  // by the target itself the target is at THAT hop: the path ends there, and
+  // any later lines were the trace outliving a rate-limited reply. Silent lines
+  // AFTER the last one that answered are the target not answering the trace
+  // at all, and are left out rather than listed as thirty `no_response` rows.
   let hopList = [];
   if (opts.perHop) {
     const tr = await tracerouteFn(
-      { host, maxHops: MAX_HOPS_PROBED, queries: 1, ip_version: opts.ipVersion },
+      { host, maxHops: MAX_HOPS_PROBED, queries: TRACE_QUERIES, ip_version: opts.ipVersion },
       { exec, platform },
     );
-    hopList = (tr && Array.isArray(tr.hops) ? tr.hops : []).filter((h) => h && h.ip).slice(0, MAX_HOPS_PROBED);
+    const numbered = (tr && Array.isArray(tr.hops) ? tr.hops : [])
+      .filter((h) => h && Number.isInteger(h.hop) && h.hop >= 1 && h.hop <= MAX_HOPS_PROBED)
+      .sort((a, b) => a.hop - b.hop);
+    let lastAnswered = -1;
+    numbered.forEach((h, i) => { if (h.ip) lastAnswered = i; });
+    hopList = numbered.slice(0, lastAnswered + 1);
   }
 
   // End-to-end first: it is the number the operator actually asked for, and the
@@ -368,7 +392,7 @@ async function pathMtuProbe(spec, {
     // eslint-disable-next-line no-await-in-loop
     const m = await measure(h.hop, ceiling);
     if (m.silent) {
-      hops.push({ hop: h.hop, ip: h.ip, max_mtu: null, status: HOP_STATUS.NO_RESPONSE });
+      hops.push({ hop: h.hop, ip: h.ip || null, max_mtu: null, status: HOP_STATUS.NO_RESPONSE });
       continue;
     }
     // A NEW restriction at this hop is this hop's to explain: with an ICMP
@@ -383,9 +407,12 @@ async function pathMtuProbe(spec, {
     const status = m.maxMtu < ceiling
       ? (m.silentDrop && !m.fragSeen ? HOP_STATUS.BLACKHOLE : HOP_STATUS.REDUCED)
       : inherited;
-    hops.push({ hop: h.hop, ip: h.ip, max_mtu: m.maxMtu, status });
+    // The ping names the responder when the trace could not.
+    hops.push({ hop: h.hop, ip: h.ip || m.ip || null, max_mtu: m.maxMtu, status });
     ceiling = m.maxMtu;
     inherited = status;
+    // The target answered at this TTL: the path ends here.
+    if (m.reached) break;
   }
 
   // The first hop that carries less than the hop before it — where the path

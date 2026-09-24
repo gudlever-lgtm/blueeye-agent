@@ -14,7 +14,11 @@
 //   1. RFC 5424   <34>1 2026-09-20T09:41:09.000Z sw-core-1 - - ID47 [sd] msg
 //   2. RFC 3164   <186>Sep 20 09:41:09 sw-core-1 %LINK-3-UPDOWN: Interface ...
 //   3. Cisco 3164 <186>4521: sw-core-1: Sep 20 09:41:09.123 CEST: %LINK-3-...
-//   4. PRI only   <186>anything at all
+//   4. RFC 3339   <78>2026-09-24T01:42:47.794495+00:00 vm CRON[15734]: msg
+//      (BSD layout with a full ISO stamp and no version digit — rsyslog's
+//      RSYSLOG_ForwardFormat, and what `$ActionForwardDefaultTemplate` users
+//      send; captured in test/fixtures/syslog/real-captured.txt)
+//   5. PRI only   <186>anything at all
 //
 // Anything with no PRI at all is NOT syslog and returns null: accepting it would
 // mean inventing a facility and a severity, and a severity nobody measured is
@@ -31,7 +35,9 @@ const PRI_RE = /^<(\d{1,3})>/;
 
 // RFC 3164 stamp: "Sep 20 09:41:09" or "Sep  9 09:41:09" (space-padded day).
 // Cisco appends fractional seconds and often a zone: "Sep 20 09:41:09.123 CEST".
-const BSD_STAMP_RE = /^([A-Za-z]{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?/;
+// With `service timestamps log datetime year` IOS also puts the YEAR between
+// the day and the time ("Apr 19 2018 18:00:06"); that year is used as given.
+const BSD_STAMP_RE = /^([A-Za-z]{3})\s+(\d{1,2})(?:\s+(\d{4}))?\s+(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?/;
 
 // Cisco's leading sequence number ("4521: ") and/or uptime marker ("*" / ".").
 const CISCO_SEQ_RE = /^(?:\d+:\s*)?(?:[*.])?/;
@@ -64,6 +70,11 @@ function resolveBsdYear(month, day, hh, mm, ss, ms, receivedAt) {
 // "sshd[1234]: Failed password" into { tag, message }. The tag is what names the
 // event; classify.js reads it. A line with no tag keeps the whole text.
 function splitTag(text) {
+  // An EMPTY tag (`logger -t ""`, or a relay that blanks it) leaves the bare
+  // colon: "vm : %LINK-3-UPDOWN: …". Drop it so the message starts where the
+  // sender's text starts, rather than keeping ": " as its first two bytes.
+  const empty = /^:\s?(?=\S)/.exec(text);
+  if (empty) return { tag: null, procId: null, message: text.slice(empty[0].length) };
   const m = /^([^\s:[]{1,48})(?:\[(\d{1,10})\])?:\s?(.*)$/s.exec(text);
   if (!m) return { tag: null, procId: null, message: text };
   return { tag: m[1], procId: m[2] || null, message: m[3] };
@@ -76,8 +87,14 @@ function splitTag(text) {
 // Returns null when the line carries no usable PRI. Never throws.
 function parseSyslogLine(line, { receivedAt = 0 } = {}) {
   if (typeof line !== 'string') return null;
-  const raw = line.replace(/\0/g, '').trim();
+  let raw = line.replace(/\0/g, '').trim();
   if (!raw) return null;
+  // An RFC 6587 octet-count frame ("123 <PRI>…") sent over UDP, where no
+  // framing belongs (`logger --octet-count`, some relays). A real line starts
+  // with its PRI, so digits + space + '<' can only be a frame: strip it rather
+  // than drop the message.
+  const frame = /^\d{1,6} (?=<\d{1,3}>)/.exec(raw);
+  if (frame) raw = raw.slice(frame[0].length);
 
   const pri = PRI_RE.exec(raw);
   if (!pri) return null;
@@ -118,14 +135,42 @@ function parseSyslogLine(line, { receivedAt = 0 } = {}) {
   const seq = CISCO_SEQ_RE.exec(rest);
   if (seq && seq[0]) rest = rest.slice(seq[0].length);
 
-  // Cisco also puts the hostname BEFORE the timestamp ("sw-core-1: Sep 20 ...").
-  // Only treat a leading token as the host when a BSD stamp follows it, so an
-  // ordinary tagged message is not mistaken for one.
+  // Cisco also puts the hostname BEFORE the timestamp ("sw-core-1: Sep 20 ...",
+  // `logging origin-id hostname`). Only treat a leading token as the host when
+  // a BSD stamp follows it, so an ordinary tagged message is not mistaken for
+  // one. The stamp may carry the uptime/unsynced marker ("*Sep 24 ...") and the
+  // `datetime year` year ("Apr 19 2018 18:00:06") — without both, the real
+  // `52: sw-core-1: *Sep 24 08:21:50.123: %LINK-3-UPDOWN: …` shape put the
+  // HOSTNAME in the tag and the line came out syslog.raw.
   let host = null;
-  const hostFirst = /^([A-Za-z0-9][A-Za-z0-9._-]{0,62}):\s+(?=[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:)/.exec(rest);
+  const hostFirst = /^([A-Za-z0-9][A-Za-z0-9._-]{0,62}):\s+[*.]?(?=[A-Za-z]{3}\s+\d{1,2}\s+(?:\d{4}\s+)?\d{2}:)/.exec(rest);
   if (hostFirst) {
     host = hostFirst[1];
     rest = rest.slice(hostFirst[0].length);
+  }
+
+  // --- RFC 3339 stamp in the BSD position (dialect 4) ------------------------
+  // Without this the stamp's "2026-09-24T01" was split off as the TAG, the host
+  // was lost and the device time dropped. The Cisco sequence regex above cannot
+  // eat any of it ("2026-" is not "digits:"), so the stamp is intact here.
+  const iso = !host && /^(\S+)\s+/.exec(rest);
+  if (iso && ISO_STAMP_RE.test(iso[1])) {
+    const after = rest.slice(iso[0].length);
+    const h = /^([A-Za-z0-9][A-Za-z0-9._-]{0,62})\s+/.exec(after);
+    const split = splitTag(h ? after.slice(h[0].length) : after);
+    return {
+      raw,
+      facility,
+      severity,
+      severityName: SEVERITY_NAME[severity],
+      deviceTime: new Date(iso[1]),
+      host: h ? h[1] : null,
+      tag: split.tag,
+      procId: split.procId,
+      msgId: null,
+      message: split.message,
+      format: 'rfc3164',
+    };
   }
 
   // --- RFC 3164 timestamp ---------------------------------------------------
@@ -134,10 +179,10 @@ function parseSyslogLine(line, { receivedAt = 0 } = {}) {
   if (bsd) {
     const month = MONTHS[bsd[1].toLowerCase()];
     if (month !== undefined) {
-      const ms = bsd[6] ? Number(String(bsd[6]).padEnd(3, '0').slice(0, 3)) : 0;
-      deviceTime = resolveBsdYear(
-        month, Number(bsd[2]), Number(bsd[3]), Number(bsd[4]), Number(bsd[5]), ms, receivedAt,
-      );
+      const ms = bsd[7] ? Number(String(bsd[7]).padEnd(3, '0').slice(0, 3)) : 0;
+      deviceTime = bsd[3]
+        ? new Date(Date.UTC(Number(bsd[3]), month, Number(bsd[2]), Number(bsd[4]), Number(bsd[5]), Number(bsd[6]), ms))
+        : resolveBsdYear(month, Number(bsd[2]), Number(bsd[4]), Number(bsd[5]), Number(bsd[6]), ms, receivedAt);
     }
     rest = rest.slice(bsd[0].length);
     // A trailing zone name ("CEST:") or the colon Cisco puts after the stamp.

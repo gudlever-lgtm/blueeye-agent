@@ -41,6 +41,49 @@ function foldKey(row) {
   return [row.sourceIp, row.eventType, row.ifname || '', row.summary].join('\u0000');
 }
 
+// Parses the optional sender allowlist (`syslogAllowedSenders`): CIDRs or bare
+// addresses, IPv4 and IPv6, as an array or one comma/space-separated string.
+// Returns { configured, match(ip), entries, invalid }.
+//
+// FAILS CLOSED. `configured` is true whenever the operator wrote ANY entry, even
+// one that did not parse: a typo in the only entry must refuse everything (and
+// say so in the log) rather than quietly fall back to "accept every sender",
+// which is the one outcome the setting exists to prevent.
+function parseSenderAllowlist(input) {
+  const raw = Array.isArray(input)
+    ? input
+    : (typeof input === 'string' ? input.split(/[\s,;]+/) : []);
+  const list = new net.BlockList();
+  const entries = [];
+  const invalid = [];
+  for (const item of raw) {
+    const text = String(item == null ? '' : item).trim();
+    if (!text) continue;
+    const slash = text.indexOf('/');
+    const addr = slash === -1 ? text : text.slice(0, slash);
+    const family = net.isIP(addr);
+    const maxBits = family === 6 ? 128 : 32;
+    const bits = slash === -1 ? maxBits : Number(text.slice(slash + 1));
+    if (!family || !Number.isInteger(bits) || bits < 0 || bits > maxBits || (slash !== -1 && !/^\d+$/.test(text.slice(slash + 1)))) {
+      invalid.push(text);
+      continue;
+    }
+    list.addSubnet(addr, bits, family === 6 ? 'ipv6' : 'ipv4');
+    entries.push(`${addr}/${bits}`);
+  }
+  return {
+    configured: entries.length + invalid.length > 0,
+    entries,
+    invalid,
+    match(ip) {
+      const a = String(ip || '').replace(/^::ffff:/, '');
+      const family = net.isIP(a);
+      if (!family) return false;
+      try { return list.check(a, family === 6 ? 'ipv6' : 'ipv4'); } catch { return false; }
+    },
+  };
+}
+
 function createSyslogReceiver({
   port = 1514,
   bindAddress = '0.0.0.0',
@@ -52,6 +95,10 @@ function createSyslogReceiver({
   logger = silentLogger,
   createSocket = () => dgram.createSocket({ type: 'udp4', reuseAddr: true }),
   createServer = (onConnection) => net.createServer(onConnection),
+  // (sourceIp) => boolean. The optional sender allowlist (syslogAllowedSenders
+  // / syslogOnlyPolled), resolved by the runtime. The default accepts every
+  // sender, which is what the receiver always did.
+  isAllowedSender = () => true,
   now = () => Date.now(),
 } = {}) {
   let socket = null;
@@ -63,6 +110,7 @@ function createSyslogReceiver({
   let dropped = 0; // lines refused by the rate limit (cumulative)
   let unparsed = 0; // lines with no usable PRI (cumulative)
   let overflowed = 0; // lines dropped because the buffer was full (cumulative)
+  let refused = 0; // lines (or TCP connections) from a sender not on the allowlist
   let lastAt = null; // ms epoch of the last line seen
   let boundUdp = false;
   let boundTcp = false;
@@ -90,8 +138,18 @@ function createSyslogReceiver({
 
   // Turns one received line into a buffered row. Never throws: a receiver that
   // dies on a malformed datagram is a receiver an attacker can switch off.
+  function senderAllowed(sourceIp) {
+    try { return isAllowedSender(sourceIp) !== false; } catch { return false; }
+  }
+
   function ingestLine(line, sourceIp) {
     lastAt = now();
+    // The allowlist FIRST, before the rate limiter and any parsing: a refused
+    // sender must neither cost work nor claim a slot in the bucket table.
+    if (!senderAllowed(sourceIp)) {
+      refused += 1;
+      return;
+    }
     if (!allow(sourceIp)) {
       dropped += 1;
       return;
@@ -165,6 +223,13 @@ function createSyslogReceiver({
   // handled too because it is cheap and a relay in the path may re-frame.
   function handleConnection(sock) {
     const sourceIp = sock.remoteAddress ? sock.remoteAddress.replace(/^::ffff:/, '') : 'unknown';
+    // A refused TCP sender is cut off at connect: nothing it sends is read.
+    if (!senderAllowed(sourceIp)) {
+      refused += 1;
+      lastAt = now();
+      try { sock.destroy(); } catch { /* ignore */ }
+      return;
+    }
     connections.add(sock);
     let pending = '';
     sock.setEncoding('utf8');
@@ -276,6 +341,9 @@ function createSyslogReceiver({
       dropped,
       unparsed,
       overflowed,
+      // Counted apart from `dropped`: "a sender nobody allowed" and "an
+      // allowed sender that is too loud" have different fixes.
+      refused,
       senders: buckets.size,
       lastAt: lastAt ? new Date(lastAt).toISOString() : null,
     };
@@ -301,4 +369,4 @@ function createSyslogReceiver({
   return { start, drain, stats, stop, ingestLine };
 }
 
-module.exports = { createSyslogReceiver, MAX_LINE_BYTES };
+module.exports = { createSyslogReceiver, parseSenderAllowlist, MAX_LINE_BYTES };

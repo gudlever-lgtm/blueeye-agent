@@ -1,0 +1,38 @@
+# Cisco %FAC-SEV-MNEMONIC codes OUTSIDE the syslog tag position. Read by
+# test/syslogRealLines.test.js (same "# expect:" format as real-captured.txt).
+# receivedAt for every line is 2026-09-24T02:00:00Z.
+#
+# Origin: the blueeye end-to-end run of 2026-09-24 (real agent + real server,
+# snmpsim Cisco 3750). These shapes came out `syslog.raw` there, because the
+# classifier only looked for the mnemonic in the TAG. The first two are the
+# exact lines from that run's findings; the "logger" lines were captured off
+# the wire from util-linux logger 2.39.3 (Ubuntu 24.04, plain Node dgram socket
+# on 127.0.0.1, byte-exact) with the command above each.
+#
+# ---- IOS with `logging origin-id hostname`: seq, HOSTNAME, *stamp, mnemonic ----
+# expect: format=rfc3164 facility=23 severity=3 host=sw-core-1 tag=%LINK-3-UPDOWN time=2026-09-24T08:21:50.123Z eventType=link.down ifname=GigabitEthernet1/0/11
+<187>52: sw-core-1: *Sep 24 08:21:50.123: %LINK-3-UPDOWN: Interface GigabitEthernet1/0/11, changed state to down
+# ---- RFC 5424 from a switch: APP-NAME in the tag, mnemonic opens the MSG -------
+# expect: format=rfc5424 facility=23 severity=3 host=sw-core-1 tag=switch eventType=link.down ifname=GigabitEthernet1/0/11
+<187>1 2026-09-24T08:21:50.9Z sw-core-1 switch - - - %LINK-3-UPDOWN: Interface GigabitEthernet1/0/11, changed state to down
+# RFC 5424 with a NIL APP-NAME
+# expect: format=rfc5424 host=sw-core-1 tag=null eventType=link.down ifname=GigabitEthernet1/0/11
+<187>1 2026-09-24T08:21:50.9Z sw-core-1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet1/0/11, changed state to down
+#
+# ---- util-linux logger 2.39.3, captured ------------------------------------------
+# logger -n 127.0.0.1 -P 15149 -d --rfc3164 -p local7.err -t "" "%LINK-3-UPDOWN: Interface GigabitEthernet1/0/11, changed state to down"
+# (an empty tag leaves a bare " : " after the host)
+# expect: format=rfc3164 facility=23 severity=3 host=vm tag=null eventType=link.down ifname=GigabitEthernet1/0/11 message="%LINK-3-UPDOWN: Interface GigabitEthernet1/0/11, changed state to down"
+<187>Sep 24 08:37:33 vm : %LINK-3-UPDOWN: Interface GigabitEthernet1/0/11, changed state to down
+# logger -n 127.0.0.1 -P 15149 -d --rfc5424 -p local7.err -t switch "%LINK-3-UPDOWN: Interface GigabitEthernet1/0/11, changed state to up"
+# expect: format=rfc5424 facility=23 severity=3 host=vm tag=switch time=2026-09-24T08:37:33.667Z eventType=link.up ifname=GigabitEthernet1/0/11
+<187>1 2026-09-24T08:37:33.667547+00:00 vm switch - - [timeQuality tzKnown="1" isSynced="0"] %LINK-3-UPDOWN: Interface GigabitEthernet1/0/11, changed state to up
+# logger -n 127.0.0.1 -P 15149 -d --rfc5424 -p local7.warning -t switch "%SPANTREE-2-BLOCK_BPDUGUARD: Received BPDU on port Gi1/0/12 with BPDU Guard enabled. Disabling port."
+# expect: format=rfc5424 facility=23 severity=4 host=vm tag=switch eventType=stp.loop_detected ifname=Gi1/0/12
+<188>1 2026-09-24T08:37:33.670756+00:00 vm switch - - [timeQuality tzKnown="1" isSynced="0"] %SPANTREE-2-BLOCK_BPDUGUARD: Received BPDU on port Gi1/0/12 with BPDU Guard enabled. Disabling port.
+# logger -n 127.0.0.1 -P 15149 -d --rfc5424 -p local7.info -t switch "%SYS-5-CONFIG_I: Configured from console by admin on vty0 (198.51.100.1)"
+# expect: format=rfc5424 facility=23 severity=6 host=vm tag=switch eventType=config.changed keep=198.51.100.1
+<190>1 2026-09-24T08:37:33.673392+00:00 vm switch - - [timeQuality tzKnown="1" isSynced="0"] %SYS-5-CONFIG_I: Configured from console by admin on vty0 (198.51.100.1)
+# logger -n 127.0.0.1 -P 15149 -d --rfc5424=notq -p local7.err -t switch "%LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet1/0/11, changed state to down"
+# expect: format=rfc5424 facility=23 severity=3 host=vm tag=switch eventType=link.down ifname=GigabitEthernet1/0/11
+<187>1 2026-09-24T08:37:33.675652+00:00 vm switch - - - %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet1/0/11, changed state to down

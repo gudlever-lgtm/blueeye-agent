@@ -19,6 +19,14 @@ function toBool(envVal, fileVal, dflt) {
   return !['0', 'false', 'no', 'off'].includes(String(v).toLowerCase());
 }
 
+// A list setting: an array (JSON file) or one comma/space-separated string
+// (env var). Always returns an array of non-empty trimmed strings.
+function toList(v) {
+  if (Array.isArray(v)) return v.map((x) => String(x == null ? '' : x).trim()).filter(Boolean);
+  if (typeof v === 'string') return v.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+  return [];
+}
+
 // Default the config file to the agent's OWN directory (next to package.json),
 // not process.cwd(): the enroll one-shot runs `node <dir>/src/index.js` without
 // cd-ing into the install dir, so cwd must not decide where config lives — and if
@@ -94,6 +102,12 @@ function loadConfig({ env = process.env } = {}) {
   // 300 s — the server upserts, so a repeat costs a few rows, not duplicates).
   const capabilitiesIntervalMs = toInt(env.BLUEEYE_CAPABILITIES_INTERVAL_MS, file.capabilitiesIntervalMs ?? 300000);
 
+  // Periodic re-fetch of GET /agents/me/config. The config used to be read only
+  // at start and on a WS reconnect, so a switch assigned to a running agent, or
+  // a changed traffic source, waited for the connection to drop. An unchanged
+  // config applies as a no-op. 0 disables it (default 300 s).
+  const configRefreshIntervalMs = toInt(env.BLUEEYE_CONFIG_REFRESH_MS, file.configRefreshIntervalMs ?? 300000);
+
   // Syslog receiver: the agent listens for the log messages switches, firewalls
   // and APs already emit, and forwards them to the server. Off by default — a
   // listening port is opt-in, never something an upgrade starts on its own.
@@ -111,6 +125,13 @@ function loadConfig({ env = process.env } = {}) {
   const syslogFlushIntervalMs = toInt(env.BLUEEYE_SYSLOG_FLUSH_MS, file.syslogFlushIntervalMs ?? 30000);
   const syslogMaxEvents = toInt(env.BLUEEYE_SYSLOG_MAX_EVENTS, file.syslogMaxEvents ?? 5000);
   const syslogRatePerSec = toInt(env.BLUEEYE_SYSLOG_RATE, file.syslogRatePerSec ?? 200);
+  // Optional syslog sender allowlist: CIDRs / addresses (array in the file, or a
+  // comma/space-separated env var). Empty = accept every sender, as before.
+  // syslogOnlyPolled accepts the switches this agent polls over SNMP; with both
+  // set, a sender either one vouches for is accepted. Parsed (and an invalid
+  // entry reported) by the syslog receiver, which fails closed on it.
+  const syslogAllowedSenders = toList(env.BLUEEYE_SYSLOG_ALLOWED_SENDERS ?? file.syslogAllowedSenders);
+  const syslogOnlyPolled = toBool(env.BLUEEYE_SYSLOG_ONLY_POLLED, file.syslogOnlyPolled, false);
 
   // SNMP traps. Off by default like syslog, and 1162 rather than 162 for the
   // same reason: binding below 1024 needs root, and a monitoring agent must not
@@ -121,6 +142,12 @@ function loadConfig({ env = process.env } = {}) {
   const trapBindAddress = env.BLUEEYE_TRAP_BIND || file.trapBindAddress || '0.0.0.0';
   const trapMaxEvents = toInt(env.BLUEEYE_TRAP_MAX_EVENTS, file.trapMaxEvents ?? 2000);
   const trapRatePerSec = toInt(env.BLUEEYE_TRAP_RATE, file.trapRatePerSec ?? 50);
+  // Refuse a v1/v2c trap whose community differs from the one the agent polls
+  // that device with (only when that community is known). OFF by default: a
+  // trap community that differs from the read community is a common, valid
+  // setup, and refusing it would drop that device's traps without a trace.
+  // Mismatches are always counted (`communityMismatch` in the trap stats).
+  const trapsCheckCommunity = toBool(env.BLUEEYE_TRAPS_CHECK_COMMUNITY, file.trapsCheckCommunity, false);
 
   return {
     configPath,
@@ -138,6 +165,7 @@ function loadConfig({ env = process.env } = {}) {
     probeAutoDns,
     probeTargets,
     capabilitiesIntervalMs,
+    configRefreshIntervalMs,
     syslogEnabled,
     syslogPort,
     syslogBindAddress,
@@ -146,11 +174,14 @@ function loadConfig({ env = process.env } = {}) {
     syslogFlushIntervalMs,
     syslogMaxEvents,
     syslogRatePerSec,
+    syslogAllowedSenders,
+    syslogOnlyPolled,
     trapsEnabled,
     trapPort,
     trapBindAddress,
     trapMaxEvents,
     trapRatePerSec,
+    trapsCheckCommunity,
   };
 }
 

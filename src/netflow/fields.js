@@ -13,8 +13,12 @@ const FIELD = {
   IPV4_SRC_ADDR: 8,
   L4_DST_PORT: 11,
   IPV4_DST_ADDR: 12,
+  INPUT_SNMP: 10, // ingressInterface (IPFIX) — an ifIndex
+  OUTPUT_SNMP: 14, // egressInterface (IPFIX) — an ifIndex
   IPV6_SRC_ADDR: 27,
   IPV6_DST_ADDR: 28,
+  SRC_VLAN: 58, // vlanId (IPFIX)
+  DOT1Q_VLAN: 243, // dot1qVlanId (IPFIX)
   // IPFIX octet/packet delta counters (aliases of IN_BYTES/IN_PKTS semantics).
   OCTET_DELTA_COUNT: 1,
   PACKET_DELTA_COUNT: 2,
@@ -62,6 +66,20 @@ function applyField(flow, type, buf, off, len) {
     case FIELD.IPV6_DST_ADDR:
       if (len >= 16) flow.dstAddr = ipv6(buf, off);
       break;
+    case FIELD.INPUT_SNMP:
+      flow.inIf = readUInt(buf, off, len);
+      break;
+    case FIELD.OUTPUT_SNMP:
+      flow.outIf = readUInt(buf, off, len);
+      break;
+    case FIELD.SRC_VLAN:
+    case FIELD.DOT1Q_VLAN: {
+      // Either IE names the VLAN; dot1qVlanId (the 802.1Q tag itself) wins
+      // when an exporter sends both, and 0 means "untagged", not VLAN 0.
+      const v = readUInt(buf, off, len) & 0x0fff;
+      if (v >= 1 && v <= 4094 && (type === FIELD.DOT1Q_VLAN || flow.vlan == null)) flow.vlan = v;
+      break;
+    }
     default:
       break; // unknown/uninteresting field — skipped by length
   }
@@ -71,7 +89,7 @@ function applyField(flow, type, buf, off, len) {
 // matches the v5 parser output.
 function finaliseFlow(flow) {
   const protocol = flow.protocol ?? 0;
-  return {
+  const out = {
     srcAddr: flow.srcAddr ?? '0.0.0.0',
     dstAddr: flow.dstAddr ?? '0.0.0.0',
     packets: flow.packets ?? 0,
@@ -81,6 +99,11 @@ function finaliseFlow(flow) {
     protocol,
     protocolName: PROTO_NAMES[protocol] || String(protocol),
   };
+  // Present only when the template carried them (and 0 = "not known").
+  if (flow.vlan != null) out.vlan = flow.vlan;
+  if (flow.inIf) out.inIf = flow.inIf;
+  if (flow.outIf) out.outIf = flow.outIf;
+  return out;
 }
 
 module.exports = { FIELD, PROTO_NAMES, readUInt, applyField, finaliseFlow };

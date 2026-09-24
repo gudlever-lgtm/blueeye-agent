@@ -23,26 +23,54 @@ function add(map, key, bytes, packets) {
   map.set(key, e);
 }
 
+// A VLAN id worth keeping (1..4094), an ifIndex worth keeping (a positive
+// 32-bit integer), or null.
+function vlanOf(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 1 && n <= 4094 ? n : null;
+}
+function ifOf(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 && n <= 0xffffffff ? n : null;
+}
+
 // Folds one flow into the full-5-tuple accumulator keyed by
-// (srcAddr, dstAddr, dstPort, proto). Keeps the endpoints/port/proto so the
-// server can rebuild who-talks-to-whom-on-which-port (the service dependency
-// graph). Metadata only — still no payload, same 5-tuple we already decode.
+// (srcAddr, dstAddr, dstPort, proto, vlan). Keeps the endpoints/port/proto so
+// the server can rebuild who-talks-to-whom-on-which-port (the service
+// dependency graph). Metadata only — still no payload, same 5-tuple we already
+// decode.
+//
+// The VLAN is part of the key: the same pair of addresses on two VLANs is two
+// different conversations (overlapping address plans, or a host that is on the
+// wrong one). The in/out ifIndex is NOT — one conversation can enter by more
+// than one port (ECMP, a LAG member, two exporters), and keying on it would
+// split a flow into fragments; the first port seen is kept, which answers
+// "where does this traffic enter" without inventing a precision it lacks.
+// All three are only present on the record when the exporter reported them,
+// so a NetFlow v5 flow costs the payload nothing extra.
 function addFlow(map, f, bytes, packets) {
   const proto = (f.protocolName || (f.protocol != null ? String(f.protocol) : '') || '').toLowerCase();
   const srcPort = Number(f.srcPort) || null;
   const dstPort = Number(f.dstPort) || null;
-  const key = `${f.srcAddr}|${f.dstAddr}|${dstPort ?? ''}|${proto}`;
+  const vlan = vlanOf(f.vlan);
+  const key = `${f.srcAddr}|${f.dstAddr}|${dstPort ?? ''}|${proto}|${vlan ?? ''}`;
   const e = map.get(key);
   if (e) {
     e.bytes += bytes;
     e.packets += packets;
     e.flows += 1;
+    if (e.inIf == null && ifOf(f.inIf) != null) e.inIf = ifOf(f.inIf);
+    if (e.outIf == null && ifOf(f.outIf) != null) e.outIf = ifOf(f.outIf);
     return;
   }
-  map.set(key, {
+  const rec = {
     srcIp: f.srcAddr, dstIp: f.dstAddr, proto: proto || null,
     srcPort, dstPort, bytes, packets, flows: 1,
-  });
+  };
+  if (vlan != null) rec.vlan = vlan;
+  if (ifOf(f.inIf) != null) rec.inIf = ifOf(f.inIf);
+  if (ifOf(f.outIf) != null) rec.outIf = ifOf(f.outIf);
+  map.set(key, rec);
 }
 
 // Aggregates an array of flow records (as produced by parseV5) into:

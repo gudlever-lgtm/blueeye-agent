@@ -49,7 +49,14 @@ function toNumber(value) {
       // integer precision, but an octet counter would have to run for months at
       // 100 Gbit/s to get there, and the delta is what is stored.
       if (value.length >= 8) return Number(value.readBigUInt64BE(value.length - 8));
-      return value.readUIntBE(0, Math.min(value.length, 6));
+      // SHORTER than eight is a Counter64 too: net-snmp hands back the BER
+      // content minus nothing, so 2^47..2^56 arrives as SEVEN bytes (with
+      // BER's 0x00 sign pad below 2^55). Reading only the first six dropped
+      // the last byte and read the counter 256x low — caught by a real
+      // Catalyst 3750 recording walked through snmpsim (test/snmpRealWalks).
+      let n = 0n;
+      for (const b of value) n = (n << 8n) | BigInt(b);
+      return Number(n);
     } catch {
       const hex = value.toString('hex');
       return hex ? parseInt(hex, 16) : null;
@@ -161,23 +168,63 @@ function openSession(device, { snmp = null, timeoutMs = 5000, retries = 1 } = {}
 // round-trip per row. A 48-port switch's counter column is 48 rows; at the
 // library default that is a dozen round-trips per column and forty columns per
 // device. It is the single biggest lever on how long a poll takes.
-function walkColumn(session, baseOid, { maxRepetitions = 25 } = {}) {
-  return new Promise((resolve, reject) => {
-    const out = {};
-    session.subtree(
-      baseOid,
-      maxRepetitions,
-      (varbinds) => {
-        for (const vb of varbinds || []) {
-          // An error varbind (noSuchInstance/noSuchObject/endOfMibView) carries
-          // no usable value. Skipping it is what lets a device that implements
-          // half a table still answer for the half it has.
-          if (!vb || vb.type === undefined) continue;
-          out[String(vb.oid).slice(baseOid.length + 1)] = vb.value;
-        }
-      },
-      (err) => (err ? reject(err) : resolve(out)),
-    );
+//
+// `maxRows` bounds the walk. A core router's ARP table can run to tens of
+// thousands of rows, and a walk that reads all of them to keep the first eight
+// thousand costs the device every one of the others. Returning true from the
+// feed callback is how net-snmp is told to stop; the caller can tell a cut
+// walk by the row count reaching the bound.
+function walkColumn(session, baseOid, { maxRepetitions = 25, maxRows = 0 } = {}) {
+  return walkColumnWithin(session, baseOid, { maxRepetitions, maxRows })
+    .then((r) => (r.error ? Promise.reject(r.error) : r.rows));
+}
+
+// The same walk, with a TIME bound, and one that never rejects:
+// resolves { rows, timedOut, error }.
+//
+// For the tables a device is polled for on top of its core ones (the router's
+// ARP table, the ENTITY-MIB inventory, CDP). A slow router answering those
+// walks row by row must cost THOSE rows and nothing else — so a walk that runs
+// past `timeoutMs` is abandoned with whatever it had read so far, and the
+// caller decides what a partial answer is worth for its table. The feed
+// callback tells net-snmp to stop asking once the walk has been abandoned, so
+// an abandoned walk does not keep polling the device behind our back.
+// `timeoutMs` 0 means no time bound (the caller's own timeout applies).
+function walkColumnWithin(session, baseOid, { maxRepetitions = 25, maxRows = 0, timeoutMs = 0 } = {}) {
+  return new Promise((resolve) => {
+    const rows = {};
+    let count = 0;
+    let settled = false;
+    let timer = null;
+    const finish = (timedOut, error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ rows, timedOut, error: error || null });
+    };
+    if (timeoutMs > 0) timer = setTimeout(() => finish(true, null), timeoutMs);
+    try {
+      session.subtree(
+        baseOid,
+        maxRepetitions,
+        (varbinds) => {
+          if (settled) return true;
+          for (const vb of varbinds || []) {
+            // An error varbind (noSuchInstance/noSuchObject/endOfMibView) carries
+            // no usable value. Skipping it is what lets a device that implements
+            // half a table still answer for the half it has.
+            if (!vb || vb.type === undefined) continue;
+            rows[String(vb.oid).slice(baseOid.length + 1)] = vb.value;
+            count += 1;
+            if (maxRows > 0 && count >= maxRows) return true;
+          }
+          return false;
+        },
+        (err) => finish(false, err),
+      );
+    } catch (err) {
+      finish(false, err);
+    }
   });
 }
 
@@ -211,6 +258,7 @@ module.exports = {
   openSession,
   closeSession,
   walkColumn,
+  walkColumnWithin,
   getScalars,
   toNumber,
   toText,

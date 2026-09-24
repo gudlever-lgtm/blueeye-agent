@@ -20,6 +20,7 @@ const releaseGuard = require('./release/releaseGuard');
 const { verifyTrustProof } = require('./license/trustProof');
 const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
+const { fitResult, describeTrim } = require('./resultBudget');
 const { runProbe } = require('./probes');
 const { resolveProbeTargets } = require('./probes/targets');
 const { createSampler } = require('./monitor');
@@ -38,7 +39,7 @@ const { createSecretStore } = require('./transactions/secretStore');
 const { createConfigStore } = require('./transactions/configStore');
 const { createResultBuffer } = require('./transactions/buffer');
 const { createTransactionManager } = require('./transactions/manager');
-const { createSyslogReceiver } = require('./syslog/receiver');
+const { createSyslogReceiver, parseSenderAllowlist } = require('./syslog/receiver');
 const { createSnmpPoller } = require('./snmpPoller');
 const { createTrapReceiver } = require('./traps/receiver');
 const { createBurstRunner } = require('./burst');
@@ -46,6 +47,18 @@ const { createBurstRunner } = require('./burst');
 // Hard cap on how many targets one scheduled cycle will probe, so a giant
 // configured/nameserver list can't turn into a burst.
 const MAX_SCHEDULED_TARGETS = 16;
+
+// How long poll-snmp waits for the config re-read before polling with the
+// assignment it already has. `config.pollConfigTimeoutMs` overrides it (tests).
+const POLL_CONFIG_TIMEOUT_MS = 5000;
+
+// JSON with object keys sorted, so two configs that differ only in key order
+// compare equal. Arrays keep their order: a reordered target list is a change.
+function stableKey(value) {
+  return JSON.stringify(value, (k, v) => (v && typeof v === 'object' && !Array.isArray(v)
+    ? Object.keys(v).sort().reduce((o, key) => { o[key] = v[key]; return o; }, {})
+    : v));
+}
 
 // One-line, human-readable summary of a probe result for the info log.
 function describeProbeOutcome(result) {
@@ -114,6 +127,9 @@ function createAgentRuntime({
   // so tests drive it through ingestLine() without binding a port; null means
   // "build the real one if config.syslogEnabled".
   syslogReceiver = null,
+  // Builds the real syslog receiver when syslog is enabled. Injectable so a test
+  // can see the sender filter the runtime hands it.
+  syslogReceiverFactory = createSyslogReceiver,
   // Polls the switches the server assigned to THIS agent, alongside its own
   // traffic sampling. Injectable so tests drive runCycle() without net-snmp.
   snmpPoller = null,
@@ -206,13 +222,16 @@ function createAgentRuntime({
   // Syslog: built only when enabled, so a host that never turned it on binds
   // nothing and allocates nothing. An injected receiver always wins (tests).
   const syslog = syslogReceiver || (config.syslogEnabled
-    ? createSyslogReceiver({
+    ? syslogReceiverFactory({
       port: config.syslogPort,
       bindAddress: config.syslogBindAddress,
       udp: config.syslogUdp,
       tcp: config.syslogTcp,
       maxEvents: config.syslogMaxEvents,
       ratePerSec: config.syslogRatePerSec,
+      // Resolved lazily per line, so a sender added by a re-applied SNMP
+      // target list is accepted without rebuilding the receiver.
+      isAllowedSender: (ip) => isAllowedSyslogSender(ip),
       logger,
     })
     : null);
@@ -246,6 +265,10 @@ function createAgentRuntime({
   // string compare this used to be. A literal IP is its own entry; a hostname
   // is resolved when the targets are applied (and again on every re-apply).
   const addressesByDeviceId = new Map(); // deviceId -> Set(address)
+  // The v1/v2c community each device is polled with, so a trap claiming to be
+  // from it must carry the same one. A v3 target (or none assigned) has no
+  // entry, and its traps are checked on address alone.
+  const communityByDeviceId = new Map(); // deviceId -> community
   let targetResolveGeneration = 0;
 
   function rememberInterfaces(result) {
@@ -278,6 +301,27 @@ function createAgentRuntime({
     return deviceIdForAddress(sourceIp) !== undefined;
   }
 
+  function expectedTrapCommunity(sourceIp) {
+    const deviceId = deviceIdForAddress(sourceIp);
+    return deviceId === undefined ? null : (communityByDeviceId.get(deviceId) || null);
+  }
+
+  // Syslog senders. Empty config = accept every sender, as before. Otherwise a
+  // sender is accepted when EITHER configured source vouches for it: it is in
+  // syslogAllowedSenders, or syslogOnlyPolled is on and it is a switch this
+  // agent polls (the same resolved addresses the trap allowlist uses). A union,
+  // because the firewall that logs is rarely a device anybody polls over SNMP.
+  const syslogSenderList = parseSenderAllowlist(config.syslogAllowedSenders);
+  if (config.syslogEnabled && syslogSenderList.invalid.length) {
+    logger.warn(`syslogAllowedSenders: ignoring invalid entr${syslogSenderList.invalid.length === 1 ? 'y' : 'ies'} ${syslogSenderList.invalid.join(', ')}.`);
+  }
+  const syslogOnlyPolled = config.syslogOnlyPolled === true;
+  function isAllowedSyslogSender(sourceIp) {
+    if (!syslogSenderList.configured && !syslogOnlyPolled) return true;
+    if (syslogSenderList.configured && syslogSenderList.match(sourceIp)) return true;
+    return syslogOnlyPolled && isPolledSender(sourceIp);
+  }
+
   // Traps: built only when enabled, like syslog. Shares the device-event flush,
   // because a trap and a syslog line are the same thing over a different socket.
   const traps = trapReceiver || (config.trapsEnabled
@@ -287,6 +331,8 @@ function createAgentRuntime({
       maxEvents: config.trapMaxEvents,
       ratePerSec: config.trapRatePerSec,
       isKnownSender: isPolledSender,
+      expectedCommunity: expectedTrapCommunity,
+      checkCommunity: config.trapsCheckCommunity === true,
       resolveIfName: resolveTrapIfName,
       logger,
     })
@@ -300,6 +346,15 @@ function createAgentRuntime({
 
   let reportTimer = null;
   let capabilitiesTimer = null;
+  let configRefreshTimer = null;
+  // What the last successful config load APPLIED, as a key-order-independent
+  // string, so a periodic refresh that finds the same config changes nothing.
+  let appliedMonitorKey = null;
+  let appliedTargetsKey = null;
+  // Config loads run one at a time: a reconnect, the periodic refresh and a
+  // poll-snmp can all ask at once, and two interleaved loads would each tear
+  // down the sampler the other just built.
+  let configChain = Promise.resolve();
   let reportingStarted = false; // true once the bootstrap called startReporting()
   let probeTimer = null;
   let fatal = false;
@@ -319,6 +374,7 @@ function createAgentRuntime({
     fatal = true;
     stopReporting();
     stopCapabilitiesReporting();
+    stopConfigRefresh();
     logger.error('Token rejected (HTTP 401); stopping. Will NOT re-enroll automatically.');
     client.stop();
     emitter.emit('fatal', reason);
@@ -345,7 +401,26 @@ function createAgentRuntime({
   // is fatal; other errors are surfaced but non-terminal so the loop continues.
   async function runAndSubmit(command, source) {
     try {
-      const result = await runTest(command, { sampler: currentSampler });
+      const sampler = currentSampler;
+      const measured = await runTest(command, { sampler });
+      // The server refuses a result over 64 KB — the whole report, not the
+      // part that was too big — so an oversize one is trimmed first, in a
+      // fixed order, and says so (resultBudget.js). sFlow counter readings
+      // that had to go are handed back to the collector for next interval.
+      const fitted = fitResult(measured);
+      if (fitted.marker) {
+        logger.warn(`Traffic result was ${fitted.originalBytes} bytes, over the ${fitted.marker.budgetBytes}-byte budget; trimmed ${describeTrim(fitted.marker)}.`);
+        const counters = fitted.removed['traffic.sflowCounters'];
+        if (counters && counters.length && typeof sampler.requeueCounters === 'function') {
+          try { sampler.requeueCounters(counters); } catch { /* best-effort */ }
+        }
+      }
+      if (fitted.oversize) {
+        const err = new Error(`Traffic result is ${fitted.bytes} bytes even after trimming; not sent.`);
+        err.code = 'RESULT_TOO_LARGE';
+        throw err;
+      }
+      const result = fitted.value;
       const response = await api.postResults([result]);
       lastReportAt = Date.now();
       logger.info(`Traffic measured (${source}, ${monitorConfig.source}); results submitted.`);
@@ -521,22 +596,46 @@ function createAgentRuntime({
     }
   }
 
-  // Fetches the server-assigned monitor config and rebuilds the sampler.
-  // Resilient: only a 401 is fatal; otherwise keep the current source.
-  async function loadServerConfig() {
+  // Fetches the server-assigned config (monitorConfig + snmpTargets) and applies
+  // it. Resilient: only a 401 is fatal; otherwise keep the current source.
+  //
+  // `force` (bootstrap, WS reconnect): rebuild the sampler and reconcile hsflowd
+  // even when nothing changed — the reconnect is also when the exporter state is
+  // re-sent to the server. Without it (the periodic refresh, poll-snmp) an
+  // UNCHANGED config is a no-op: no sampler restart (which would drop a
+  // collector's in-flight flows), no hsflowd reconcile, no target re-apply.
+  //
+  // Resolves { ok, changed, devices } — never rejects.
+  function loadServerConfig(opts) {
+    const run = configChain.then(() => applyServerConfig(opts || {}));
+    configChain = run.catch(() => {});
+    return run;
+  }
+
+  async function applyServerConfig({ force = true } = {}) {
     try {
-      // The WHOLE body, not just monitorConfig: the same call now also carries
-      // `snmpTargets`, the switches this agent polls. Reading it here means a
-      // switch assigned to a running agent is picked up on its next reconnect
-      // rather than waiting for a restart.
+      // The WHOLE body, not just monitorConfig: the same call also carries
+      // `snmpTargets`, the switches this agent polls.
       const body = await api.getFullConfig();
+      if (fatal) return { ok: false, changed: false, devices: snmpTargetCount };
       const mc = (body && body.monitorConfig) || { source: 'proc' };
-      applySnmpTargets(body && body.snmpTargets);
+      const targets = body ? body.snmpTargets : undefined;
+      const targetsKey = stableKey(targets === undefined ? null : targets);
+      const targetsChanged = targetsKey !== appliedTargetsKey;
+      if (force || targetsChanged) {
+        applySnmpTargets(targets);
+        appliedTargetsKey = targetsKey;
+      }
+      const monitorKey = stableKey(mc);
+      if (!force && monitorKey === appliedMonitorKey) {
+        return { ok: true, changed: targetsChanged, devices: snmpTargetCount };
+      }
       monitorConfig = mc;
       // Dispose the previous sampler's background lifecycle (e.g. a netflow
       // UDP socket) before swapping in the new source.
       if (currentSampler && typeof currentSampler.stop === 'function') currentSampler.stop();
       currentSampler = samplerFactory(monitorConfig, { logger });
+      appliedMonitorKey = monitorKey;
       const prevIntervalMs = effectiveIntervalMs;
       effectiveIntervalMs =
         Number.isInteger(mc.intervalMs) && mc.intervalMs > 0 ? mc.intervalMs : config.reportIntervalMs;
@@ -551,10 +650,52 @@ function createAgentRuntime({
         startReporting();
       }
       await reconcileHsflowd();
+      return { ok: true, changed: true, devices: snmpTargetCount };
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
+      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return { ok: false, changed: false, devices: 0 }; }
       logger.warn(`Could not fetch monitor config (${err.message}); using ${monitorConfig.source}.`);
       reportError('config', err);
+      return { ok: false, changed: false, devices: snmpTargetCount, error: err.message };
+    }
+  }
+
+  // loadServerConfig with a deadline, for a command that must answer: a slow
+  // or hung server costs poll-snmp at most `ms`, after which it polls with the
+  // targets it already had. The load itself carries on and applies when it
+  // lands. Never rejects.
+  function loadServerConfigWithin(ms, opts) {
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, changed: false, devices: snmpTargetCount, error: 'timeout' }), ms);
+      if (timer.unref) timer.unref();
+    });
+    return Promise.race([loadServerConfig(opts), deadline]).finally(() => clearTimeout(timer));
+  }
+
+  // Re-reads the server config on a cadence, so a switch assigned to a running
+  // agent — or a changed traffic source — applies without waiting for the
+  // connection to drop. Skipped while disconnected (the reconnect loads it
+  // anyway) and after a fatal; unref'd; 0 disables it.
+  function startConfigRefresh() {
+    stopConfigRefresh();
+    const intervalMs = config.configRefreshIntervalMs;
+    if (fatal || !Number.isFinite(intervalMs) || intervalMs <= 0) return;
+    let running = false;
+    configRefreshTimer = setInterval(async () => {
+      if (fatal || running || !client.isConnected()) return;
+      running = true;
+      try {
+        const r = await loadServerConfig({ force: false });
+        emitter.emit('config-refreshed', r);
+      } finally { running = false; }
+    }, intervalMs);
+    if (configRefreshTimer.unref) configRefreshTimer.unref();
+  }
+
+  function stopConfigRefresh() {
+    if (configRefreshTimer) {
+      clearInterval(configRefreshTimer);
+      configRefreshTimer = null;
     }
   }
 
@@ -748,11 +889,15 @@ function createAgentRuntime({
       const prevAddrs = new Map(addressesByDeviceId);
       hostByDeviceId.clear();
       addressesByDeviceId.clear();
+      communityByDeviceId.clear();
       const toResolve = [];
       for (const d of Array.isArray(list) ? list : []) {
         if (!d || d.deviceId == null || typeof d.host !== 'string' || !d.host.trim()) continue;
         const host = d.host.trim();
         hostByDeviceId.set(d.deviceId, host);
+        if (typeof d.community === 'string' && d.community && String(d.version || '2c') !== '3' && !(d.v3 && d.v3.user)) {
+          communityByDeviceId.set(d.deviceId, d.community);
+        }
         if (net.isIP(host)) {
           addressesByDeviceId.set(d.deviceId, new Set([host]));
         } else {
@@ -919,11 +1064,40 @@ function createAgentRuntime({
       return true;
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+      // A 400 refuses the WHOLE batch — typically one result an older server
+      // does not know (a probe type added after it shipped). Resubmit one by
+      // one so the rest of the cycle still lands; only the refused result is
+      // dropped, and it is logged by type so the gap is visible.
+      if (err.status === 400 && results.length > 1) {
+        return submitProbesIndividually(results);
+      }
       logger.error(`Failed to submit scheduled probes: ${err.message}`);
       reportError('scheduled-probes', err);
       emitter.emit('command-error', err);
       return false;
     }
+  }
+
+  async function submitProbesIndividually(results) {
+    const accepted = [];
+    const refused = [];
+    for (const result of results) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await api.postProbeResults([result]);
+        accepted.push(result);
+      } catch (err) {
+        if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+        refused.push({ type: result && result.type, target: result && result.target, error: err.message });
+      }
+    }
+    if (refused.length) {
+      const what = refused.map((r) => `${r.type}:${r.target}`).join(', ');
+      logger.warn(`Scheduled probes: the server refused ${refused.length} result(s) (${what}); ${accepted.length} submitted one by one.`);
+      reportError('scheduled-probes', new Error(`server refused ${refused.length} probe result(s): ${what}`));
+    }
+    emitter.emit('scheduled-probes-submitted', { results: accepted, refused, response: null });
+    return accepted.length > 0;
   }
 
   function startScheduledProbes() {
@@ -1547,12 +1721,38 @@ function createAgentRuntime({
       return;
     }
     if (isPollSnmpCommand(command)) {
-      logger.info('Received poll-snmp command; polling assigned switches now.');
+      logger.info('Received poll-snmp command; refreshing the assignment, then polling assigned switches now.');
+      // "Poll now" is pressed right after a device was added or moved to this
+      // agent, and the assignment used to be read only on (re)connect — so it
+      // polled the OLD list, often nothing, while the server had already said
+      // 202. Re-read it first, bounded, and poll with what we have if that fails.
+      const refreshed = await loadServerConfigWithin(
+        config.pollConfigTimeoutMs > 0 ? config.pollConfigTimeoutMs : POLL_CONFIG_TIMEOUT_MS, { force: false });
+      if (fatal) return;
       // Both cycles, because "poll now" from the dashboard means the whole
       // device, not the half of it this command happened to be written for.
       const r = await runSnmpCycle({ force: true });
       const c = await runSnmpCounterCycle({ force: true });
-      client.send({ type: 'command-result', id: command && command.id, ok: true, snmp: r, counters: c });
+      const requested = command && command.deviceId != null ? command.deviceId : null;
+      const result = {
+        type: 'command-result',
+        id: command && command.id,
+        ok: true,
+        // How many devices this agent is assigned and how many answered, so an
+        // empty assignment is visible instead of a silent success.
+        devices: snmpTargetCount,
+        polled: r.polled || 0,
+        failed: r.failed || 0,
+        configRefreshed: !!refreshed.ok,
+        snmp: r,
+        counters: c,
+      };
+      if (requested != null) result.deviceAssigned = hostByDeviceId.has(requested);
+      if (!snmpTargetCount) result.detail = 'no SNMP devices are assigned to this agent';
+      else if (requested != null && !result.deviceAssigned) result.detail = `device ${requested} is not assigned to this agent`;
+      if (result.detail) logger.warn(`poll-snmp: ${result.detail}.`);
+      client.send(result);
+      emitter.emit('poll-snmp', result);
       return;
     }
     if (isRunDiscoveryCommand(command)) {
@@ -1595,6 +1795,7 @@ function createAgentRuntime({
         // a two-minute error burst at all. It only asks which devices are due.
         snmp.startCounters({ tickMs: 15000, cycle: () => runSnmpCounterCycle() });
         startCapabilitiesReporting();
+        startConfigRefresh();
         // Start running any persisted transaction tests (server pushes fresh
         // config on connect, which replaces these).
         try { txManager.start(); } catch (err) { logger.warn(`Transaction manager start failed: ${err.message}`); }
@@ -1604,6 +1805,7 @@ function createAgentRuntime({
       if (confirmTimer) { clearTimeout(confirmTimer); confirmTimer = null; }
       stopReporting();
       stopCapabilitiesReporting();
+      stopConfigRefresh();
       stopScheduledProbes();
       stopDeviceEventFlush();
       stopSyslog();
@@ -1621,6 +1823,7 @@ function createAgentRuntime({
     runSnmpCycleNow: (opts) => runSnmpCycle({ force: true, ...(opts || {}) }),
     runSnmpCounterCycleNow: (opts) => runSnmpCounterCycle({ force: true, ...(opts || {}) }),
     runBurstNow: (spec) => handleBurst(spec),
+    refreshConfigNow: () => loadServerConfig({ force: false }),
     getMonitorConfig: () => monitorConfig,
     getHsflowdState: () => lastHsflowdState,
     getDiagnostic: () => buildDiagnostic(),

@@ -59,7 +59,10 @@ const SYSTEM = {
   sysDescr: '1.3.6.1.2.1.1.1.0',
   sysObjectID: '1.3.6.1.2.1.1.2.0',
   sysUpTime: '1.3.6.1.2.1.1.3.0', // TimeTicks: hundredths of a second since boot
+  sysContact: '1.3.6.1.2.1.1.4.0',
   sysName: '1.3.6.1.2.1.1.5.0',
+  // Free text an admin typed into the switch — "Bygning 3, rum 2.14, rack B".
+  // The only place a device says where it PHYSICALLY is, below the site.
   sysLocation: '1.3.6.1.2.1.1.6.0',
 };
 
@@ -126,6 +129,68 @@ const LLDP = {
   lldpRemSysName: '1.0.8802.1.1.2.1.4.1.1.9',
 };
 
+// CISCO-CDP-MIB cdpCacheTable — Cisco's own neighbour protocol, which plenty
+// of Cisco estates run INSTEAD of LLDP (it is on by default, LLDP is not). The
+// index is <cdpCacheIfIndex>.<cdpCacheDeviceIndex>: unlike LLDP's local port
+// number, the first component IS the ifIndex.
+//
+// cdpCacheAddress is a CiscoNetworkAddress — raw bytes whose meaning is given
+// by cdpCacheAddressType (1 = ip, four bytes; 20 = ipv6, sixteen). Read as text
+// it is four bytes of garbage, which is why the type column is walked too.
+const CDP = {
+  cdpCacheAddressType: '1.3.6.1.4.1.9.9.23.1.2.1.1.3',
+  cdpCacheAddress: '1.3.6.1.4.1.9.9.23.1.2.1.1.4',
+  cdpCacheDeviceId: '1.3.6.1.4.1.9.9.23.1.2.1.1.6',
+  cdpCacheDevicePort: '1.3.6.1.4.1.9.9.23.1.2.1.1.7',
+  cdpCachePlatform: '1.3.6.1.4.1.9.9.23.1.2.1.1.8',
+};
+
+// CISCO-VTP-MIB vtpVlanTable — where Catalyst IOS publishes its VLANs. IOS
+// implements no Q-BRIDGE-MIB, so dot1qVlanStaticName is empty there and this
+// table is the only place the VLAN names are. Index <managementDomain>.<vlanId>.
+// vtpVlanState 1 = operational. VLANs 1002-1005 are the reserved FDDI/Token
+// Ring defaults every IOS switch lists; they carry no Ethernet traffic.
+//
+// The same list is what the per-VLAN forwarding table walk iterates: IOS keeps
+// one BRIDGE-MIB table per VLAN and serves it only under community string
+// indexing ("community@vlanId"; SNMPv3 context "vlan-<id>").
+const CISCO_VTP = {
+  vtpVlanState: '1.3.6.1.4.1.9.9.46.1.3.1.1.2',
+  vtpVlanName: '1.3.6.1.4.1.9.9.46.1.3.1.1.4',
+};
+
+// IP-MIB (RFC 4293) — the ARP table of a router or an L3 switch. In a flat OT
+// network the router's table sees every device on the segment, including the
+// PLC nobody installed an agent next to.
+//
+// ipNetToPhysicalTable is the current table (IPv4 and IPv6), indexed
+// <ifIndex>.<addressType>.<addressLength>.<address bytes…> — the address is a
+// variable-length InetAddress, so its length is part of the index.
+// ipNetToMediaTable is the deprecated IPv4-only one, indexed
+// <ifIndex>.<a>.<b>.<c>.<d>, and still the only one plenty of gear implements.
+const IP_MIB = {
+  ipNetToPhysicalPhysAddress: '1.3.6.1.2.1.4.35.1.4',
+  ipNetToPhysicalState: '1.3.6.1.2.1.4.35.1.7', // 5 = invalid, 7 = incomplete
+  ipNetToMediaPhysAddress: '1.3.6.1.2.1.4.22.1.2',
+  ipNetToMediaType: '1.3.6.1.2.1.4.22.1.4', // 2 = invalid
+};
+
+// ENTITY-MIB (RFC 6933) entPhysicalTable — what the box IS: model, serial,
+// firmware. sysDescr says roughly the same thing as one vendor-formatted
+// string; this says it as fields, per chassis, which is what an RMA or a
+// warranty lookup needs. Indexed by entPhysicalIndex.
+const ENTITY = {
+  entPhysicalDescr: '1.3.6.1.2.1.47.1.1.1.1.2',
+  entPhysicalClass: '1.3.6.1.2.1.47.1.1.1.1.5', // 3 = chassis, 9 = module
+  entPhysicalName: '1.3.6.1.2.1.47.1.1.1.1.7',
+  entPhysicalHardwareRev: '1.3.6.1.2.1.47.1.1.1.1.8',
+  entPhysicalFirmwareRev: '1.3.6.1.2.1.47.1.1.1.1.9',
+  entPhysicalSoftwareRev: '1.3.6.1.2.1.47.1.1.1.1.10',
+  entPhysicalSerialNum: '1.3.6.1.2.1.47.1.1.1.1.11',
+  entPhysicalMfgName: '1.3.6.1.2.1.47.1.1.1.1.12',
+  entPhysicalModelName: '1.3.6.1.2.1.47.1.1.1.1.13',
+};
+
 // IF-MIB ifAdminStatus / ifOperStatus, as the MIB numbers them. An unlisted
 // value becomes null at the call site rather than a guess: an unknown status is
 // not a status.
@@ -142,6 +207,10 @@ module.exports = {
   BRIDGE,
   Q_BRIDGE,
   LLDP,
+  CDP,
+  CISCO_VTP,
+  IP_MIB,
+  ENTITY,
   IF_OPER_STATUS,
   IF_ADMIN_STATUS,
   DUPLEX_STATUS,

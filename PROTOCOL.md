@@ -62,7 +62,15 @@ The agent reads only `certFingerprint`.
 
 ### 1.3 `GET /agents/me/config` — fetch the server-assigned monitor config
 
-`src/apiClient.js getConfig()`. Called at startup and on every WS (re)connect.
+`src/apiClient.js getFullConfig()`. Called at startup, on every WS (re)connect,
+every `configRefreshIntervalMs` (default 300 s, `BLUEEYE_CONFIG_REFRESH_MS`;
+skipped while the WebSocket is down; `0` disables) and before every
+`poll-snmp` (bounded to 5 s — on a timeout or an error the poll runs with the
+assignment already held). The same body carries `snmpTargets`, so a switch
+assigned to a running agent, or a changed source, applies without a reconnect.
+The startup and reconnect loads always rebuild the sampler and reconcile
+hsflowd; the periodic and `poll-snmp` loads apply only what CHANGED (compared
+key-order-independently) — an unchanged config restarts nothing.
 
 ```jsonc
 // 200 response
@@ -172,7 +180,11 @@ Result envelope (`src/testRunner.js runTest()`):
     "rxBytes": 0, "txBytes": 0, "rxPackets": 0, "txPackets": 0,   // deltas (snmp: packets always 0)
     "rxBytesPerSec": 0, "txBytesPerSec": 0,
     "rxErrors": 0, "txErrors": 0, "rxDrop": 0, "txDrop": 0,
-    "operStatus": "up" | null, "speedMbps": 1000 | null
+    "operStatus": "up" | null, "speedMbps": 1000 | null,
+    // proc (Linux) only; null on every other source and when unreadable:
+    "duplex": "full" | "half" | "unknown" | null,          // /sys/class/net/<if>/duplex
+    "rxFrameErrors": 0 | null, "rxFifoErrors": 0 | null,   // /proc/net/dev rx frame, rx fifo (deltas)
+    "txCollisions": 0 | null, "txCarrierErrors": 0 | null  // /proc/net/dev tx colls, tx carrier (deltas)
   } ],
   "interfacesOmitted": 12,     // only when the cap below kicked in
   "totals": { "rxBytes": 0, "txBytes": 0, "rxPackets": 0, "txPackets": 0,
@@ -180,6 +192,14 @@ Result envelope (`src/testRunner.js runTest()`):
               "rxBytesPerSec": 0, "txBytesPerSec": 0 }
 }
 ```
+
+`duplex` and the four error-detail counters are what let the server tell a
+duplex mismatch (half duplex + collisions, or frame errors on the full-duplex
+end) from a cabling fault (frame/CRC errors on a full-duplex link) from a host
+that is simply too slow (rx fifo overruns). They are **null, never 0**, when the
+source cannot read them (Windows/macOS sources, a down link, most virtual
+interfaces), because a measured zero is what rules those faults out. Additive:
+an older server ignores them.
 
 The `interfaces` list is capped at the **64 busiest** interfaces (by rx+tx
 bytes over the window) so a veth-farm host can't push a result over the
@@ -198,10 +218,66 @@ drain()` + `src/netflow/aggregate.js`): flow summary since the last drain.
   "byPort":     [ { "port": 443, "bytes": 0, "packets": 0, "flows": 0 }, ... ],      // top 50 by bytes
   "byProtocol": [ { "protocol": "tcp", "bytes": 0, "packets": 0, "flows": 0 }, ... ], // top 50
   "topTalkers": [ { "pair": "10.0.0.1->93.184.216.34", "bytes": 0, "packets": 0, "flows": 0 }, ... ], // top 50
-  "flows": [ { "srcIp": "10.0.0.1", "dstIp": "10.0.0.9", "proto": "tcp",  // top 200 by bytes; per-5-tuple
-              "srcPort": 51000, "dstPort": 443, "bytes": 0, "packets": 0, "flows": 0 }, ... ]
+  "flows": [ { "srcIp": "10.0.0.1", "dstIp": "10.0.0.9", "proto": "tcp",  // top 200 by bytes; per-5-tuple + VLAN
+              "srcPort": 51000, "dstPort": 443, "bytes": 0, "packets": 0, "flows": 0,
+              "vlan"?: 120, "inIf"?: 3, "outIf"?: 49 }, ... ],        // present only when the exporter reported them
+  "sflowCounters"?: [ {                          // sflow only; counter samples, see below
+      "agent": "10.14.0.2", "ifIndex": 7, "at": 1790000000000, "uptimeMs": 123456,
+      "ifType": 6, "speed": 1000000000, "direction": 1, "status": 3,
+      "if":  [ /* 13 counters, IF_COUNTER_FIELDS order */ ],
+      "eth"?: [ /* 13 counters, ETHERNET_FIELDS order */ ] }, ... ],
+  "sflowCountersPending"?: 12,                   // readings that did not fit, sent next time
+  "sflowExporters"?: ["10.14.0.2", "2001:db8::1"], // sflow only; every exporter heard from this interval
+  "truncated"?: { "budgetBytes": 49088, "originalBytes": 66077,     // sflow only; the collector made
+                  "removed": { "flows": 71 } }                       // room for the counters' floor
 }
 ```
+
+`sflowExporters`: the distinct exporter addresses (the sFlow agent address in
+the datagram header, IPv6 compressed as in `sflowCounters[].agent`) heard from
+since the last snapshot, in **any** sample — flow or counter — in first-seen
+order, ≤ 256. Flow records are aggregated without the exporter, so without this
+an exporter that sends only flow samples (counter polling off) was named
+nowhere. Absent when nothing was heard. Additive: an older server ignores it.
+
+`vlan` / `inIf` / `outIf`: the 802.1Q VLAN id (1..4094) and the
+exporter's ingress/egress ifIndex. sFlow: the tag in the sampled frame (outer
+tag of QinQ), else the extended-switch record (1001); the flow-sample header's
+input/output interface (format 0 only). NetFlow v9/IPFIX: IE 243 (else 58) and
+IE 10/14. Absent keys mean "not reported". The VLAN is part of the aggregation
+key; the interfaces are not (the first seen is kept). The sampled frame's MACs
+are decoded but not sent.
+
+`sflowCounters`: the latest sFlow **counter sample** per
+(exporter, ifIndex) — generic interface counters (enterprise 0, format 1) and
+Ethernet counters (format 2). Arrays, not named keys, to fit the 64 KB result
+limit (~200 bytes an interface instead of ~500):
+
+- `if` = `ifInOctets, ifInUcastPkts, ifInMulticastPkts, ifInBroadcastPkts,
+  ifInDiscards, ifInErrors, ifInUnknownProtos, ifOutOctets, ifOutUcastPkts,
+  ifOutMulticastPkts, ifOutBroadcastPkts, ifOutDiscards, ifOutErrors`
+  (`src/sflow/collector.js IF_COUNTER_FIELDS`);
+- `eth` = `dot3StatsAlignmentErrors, FCSErrors, SingleCollisionFrames,
+  MultipleCollisionFrames, SQETestErrors, DeferredTransmissions, LateCollisions,
+  ExcessiveCollisions, InternalMacTransmitErrors, CarrierSenseErrors,
+  FrameTooLongs, InternalMacReceiveErrors, SymbolErrors`
+  (`src/sflow/parse.js ETHERNET_FIELDS`);
+- a counter the exporter marks unavailable (all ones) is `null`, never 0;
+- `agent` is the exporter's address from the datagram header (IPv6 compressed);
+  `at` is when the agent received it (ms epoch); `uptimeMs` the exporter's own
+  uptime; `speed` bits/s; `direction` 0 unknown, 1 full, 2 half duplex, 3 in,
+  4 out; `status` bit 0 = admin up, bit 1 = oper up.
+
+Bounded: ≤ 1024 entries and ≤ 24 KB per snapshot, and never more than keeps the
+whole snapshot ≤ 56 KB. What does not fit stays pending (replaced by a newer
+reading, dropped after 10 min) and goes first next time, so a large switch is
+rotated through rather than starved. When readings are pending the counters get
+**at least 8 KB** even if the flow summary alone would fill the 56 KB: the
+smallest `flows` (then `topTalkers`) make way, and the snapshot's `truncated`
+says how many — the totals are summed before any cut and stay whole. (Before
+this, 200 IPv6 flows left the counters no room at all, every interval.) The server
+(`src/devices/sflowCounterIngest.js`) stores them as device counter samples for
+exporters that are registered SNMP devices, and ignores the key when older.
 
 `flows` is the full-5-tuple form the server prefers (populates `flow_records.proto` /
 `dst_port`, and feeds the **service dependency graph**); `byPort`/`byProtocol`/
@@ -222,6 +298,22 @@ non-empty array, ≤ 1000 items, each a JSON object serialising to **≤ 65 535
 bytes** (the whole payload is otherwise opaque to validation; it is stored as a
 JSON blob and interpreted downstream by analysis/flow pipelines).
 
+A result over that is a 400 for the **whole** report, so the agent never sends
+one (`src/resultBudget.js`, applied in `runtime.js` before the POST). A result
+over **60 000 bytes** is trimmed from the tails of, in this order,
+`traffic.sflowCounters` (handed back to the collector, sent next interval),
+`traffic.flows` (smallest first), `traffic.topTalkers`, then — never reached in
+practice — `byPort`, `byProtocol`, `interfaces`; as a last resort the traffic
+keeps only its scalars and `totals`. What was cut is named on the result:
+
+```jsonc
+"truncated"?: { "budgetBytes": 60000, "originalBytes": 81234,
+                "removed": { "traffic.sflowCounters": 60, "traffic.flows": 12 } }
+```
+
+and logged. A result that still cannot fit is not sent (logged as
+`RESULT_TOO_LARGE`). The totals are never trimmed.
+
 ### 1.6 `POST /agents/probe-results` — active probe results
 
 `src/apiClient.js postProbeResults()`. Sent after a `run-probe` command (one
@@ -239,7 +331,7 @@ Normalized probe result (`src/probes/*`; all types):
 ```jsonc
 {
   "ts": "<ISO>",                       // stamped by runProbe
-  "type": "ping"|"tcp"|"dns"|"traceroute"|"tcptraceroute"|"http"|"curl"|"pageload"|"transaction",
+  "type": "ping"|"tcp"|"dns"|"traceroute"|"tcptraceroute"|"http"|"curl"|"pageload"|"transaction"|"path_mtu"|"tls"|"rdns"|"dhcp",
   "target": "<host / URL>",
   "ok": true|false,
   "attempts": 4, "success": 4,         // NOT persisted by the server
@@ -258,9 +350,11 @@ Per-type extras:
 | `traceroute` | `hops: [{hop, ip, ips, sent, recv, lossPct, rttMs, minMs, maxMs, jitterMs}]`, `hopCount`, `queries` | `ip` = first responder (unchanged); `ips: string[]` = every DISTINCT responder on that hop line, in order (ECMP), `[]` for a silent hop. The live `trace_hop` frame's `hop` carries the same record. `hopCount`/`queries` not persisted; `hops` capped server-side at 64 |
 | `tcptraceroute` | the same `hops`/`hopCount`/`queries`, plus `port` | identical hop record — the path is traced with TCP SYNs instead of ICMP/UDP. `target` is `host:port`, which is what keeps a TCP trace and an ICMP trace to the same host as separate series. `port` is not persisted (it is already in `target`) |
 | `http` | `status`, `certExpiryDays` (https), `detail` (cert detail) | |
+| `tls` | `certExpiryDays`, `detail`, `tls: {protocol, cipher, authorized, authorizationError, chainTrusted, hostnameMatches, servername, expiryDays, expired, notYetValid, validFrom, validTo, subject, issuer, altNames, serialNumber, fingerprint256, chainLength, selfSigned}` (only when a certificate was received; a failed handshake is `ok:false` + `error`, no `tls`) | `target` is `host:port`, or `servername@host:port` when an explicit `servername` differs from `host` (agent 0.40+), so two names on one address are two series. `authorized`/`authorizationError` are node's verdict verbatim; `chainTrusted` (0.40+) separates the chain from the name — node checks the chain first, so `ERR_TLS_CERT_ALTNAME_INVALID` is `chainTrusted:true` + `hostnameMatches:false`. `hostnameMatches` is `null` for an IP probed without a name. `servername` = the SNI sent, `null` for none |
 | `curl` | `status`, `bytes`, `contentType`, `detail` (assertion summary) | metadata only, never the body |
 | `pageload` | `status`, `bytes` (page weight), `elements: [{url, kind, status, bytes, ms}]`, `detail` | `elements` capped server-side at 64 |
 | `transaction` | `status` (last step), `bytes` (total), `elements` (`kind` = `"step N METHOD"`), `detail` | extracted variables never leave the agent |
+| `dhcp` | `iface`, `timeoutMs`, `offers: [{serverId, offeredIp, leaseSec, router, dns[], subnetMask, relay}]` (≤ 8), `serverCount`, `detail` | a broadcast DHCPDISCOVER from `0.0.0.0:68` (broadcast flag, random xid, `chaddr` = the interface MAC); every DHCPOFFER for that xid is collected until `timeoutMs` (default 3000, clamped 1000–10000). **No DHCPREQUEST is ever sent**, so no lease is taken. `target` = the interface. `ok` = at least one offer; `rttMs` = first offer. `serverCount` = distinct server identifiers (option 54) — more than one is the rogue-server signal. No answer is `ok:false` + `offers: []` + `detail`, NOT `error`; `error` means it could not run (`"dhcp probe needs root or CAP_NET_BIND_SERVICE (port 68)"`, port 68 held by the host's own DHCP client, no IPv4 interface). `relay` = giaddr when the offer came through a relay agent |
 
 Server persistence (`validation/probeValidation.js`): keeps `ts, type, target,
 ok, rttMs, minMs, maxMs, jitterMs, lossPct, hops, status, certExpiryDays,
@@ -329,6 +423,88 @@ not by the running agent): `GET /enroll/agent-release` (metadata JSON),
 
 ---
 
+### 1.9 `POST /agents/me/snmp-topology` — one SNMP topology cycle
+
+Sent by `src/snmpPoller.js` after polling the switches in `snmpTargets`
+(`src/snmpTopology.js` builds each device's entry). Body
+`{ devices: [ … ], errors: [{ deviceId, error, code }] }`. A cycle that would
+exceed ~900 KiB is sent as **several POSTs**, split by device (never within
+one); the per-device `errors` travel in the first. A device too big on its own
+has its `arp` list trimmed and `arpTruncated: true`.
+
+**Core first, optional in what is left.** Each device gets one timeout (30 s).
+The core tables (`if`, `fdb`, `lldp`, `vlan`) are walked first; the optional
+ones (`cdp`, `arp`, `entity`) are walked afterwards in the remaining time, less
+a 2 s reserve. An optional walk that runs out of time or fails is abandoned and
+the device is still submitted with its core tables — named in the device's own
+`partial` list, **not** in `errors` (which would record the whole poll as
+failed):
+
+```jsonc
+"partial"?: [ { "kind": "arp" | "cdp" | "entity",
+                "reason": "timeout" | "error" | "no-time",   // no-time: never started
+                "rows"?: 3120,                               // arp: rows kept
+                "error"?: "Request timed out" } ]
+```
+
+A cut `arp` keeps the rows read so far (`arpTruncated: true`; the server
+upserts them). So does the per-VLAN forwarding walk below (`kind: 'fdb'`,
+with `vlans`/`of` counts; reason `rotating` when the device has more than 64
+VLANs — the default VLAN is read every poll and the others rotate, 63 a poll,
+so every VLAN is covered within ⌈(VLANs−1)/63⌉ polls; `no-time` when the
+budget ran out). A cut `cdp` or `entity` reports none of its rows — the server
+diffs neighbours and replaces the inventory, so half a table would read as
+removals. `supported` keeps a kind the device answered on its previous poll
+when this poll cut it short. `partial` is absent on a complete poll; a server
+that does not know it ignores it.
+
+Each device entry — every field after `deviceId` is optional to the server,
+and everything below the `vlans` line is newer than the server's first
+version of this endpoint, so an older server ignores it:
+
+**Catalyst IOS (no Q-BRIDGE-MIB).** VLAN names fall back to CISCO-VTP-MIB
+`vtpVlanName` (operational VLANs only, 1002-1005 left out) when
+`dot1qVlanStaticName` is empty. The forwarding table: IOS keeps one BRIDGE-MIB
+instance per VLAN and the default community reads only VLAN 1's, so when the
+Q-BRIDGE FDB is empty and VTP lists VLANs, each VLAN's `dot1dTpFdbPort/Status`
++ `dot1dBasePortIfIndex` are walked under `community@<vlan>` (SNMPv3: context
+`vlan-<vlan>`), at most 64 VLANs, 4 at a time, inside the optional-phase time
+budget, stopping after 3 VLANs fail in a row. Those rows carry their `vlan`
+and resolve through THAT VLAN's bridge-port map; a MAC the untagged default
+walk also saw is reported once, tagged.
+
+```jsonc
+{
+  "deviceId": 7,
+  "sysUpTimeTicks": 123456, "sysName": "sw-core-1", "sysDescr": "Cisco IOS …",
+  "interfaces": [ … ], "fdb": [ … ], "fdbTruncated": false, "fdbTotal": 812,
+  "vlans": [ { "vlan": 20, "name": "Kontor" } ],
+  "supported": ["if", "fdb", "lldp", "vlan", "cdp", "arp", "entity"],
+  // SNMPv2-MIB system group (second GET, so a v1 noSuchName never costs the uptime)
+  "sysLocation": "Bygning 3, rum 2.14, rack B", "sysContact": "…", "sysObjectId": "1.3.6.1.4.1.9.1.1745",
+  // LLDP and CDP in one list (≤ 512 together, LLDP first); `protocol` says which
+  "neighbours": [
+    { "protocol": "lldp", "localPort": 3, "localIfIndex": 10003, "localIfName": "Gi0/24",
+      "remoteChassisId": "aa:bb:cc:11:22:33", "remotePortId": "Gi1/0/5", "remotePortDesc": "…", "remoteSysName": "sw-acc-2" },
+    { "protocol": "cdp", "localPort": 10102, "localIfIndex": 10102, "localIfName": "Gi1/0/2",
+      "remoteChassisId": "sw-dist-1", "remotePortId": "Gi1/0/48", "remotePortDesc": null, "remoteSysName": "sw-dist-1",
+      "remoteAddress": "10.14.0.11", "remotePlatform": "cisco WS-C3850-48P" }
+  ],
+  // IP-MIB ARP table (collect 'arp'): ipNetToPhysicalTable, else ipNetToMediaTable
+  "arp": [ { "ip": "10.20.0.84", "mac": "00:1b:44:11:3a:b7", "ifIndex": 20, "ifName": "Vlan20" } ],
+  "arpSource": "ipNetToPhysical" | "ipNetToMedia" | null, "arpTruncated": false, "arpTotal": 1,
+  // ENTITY-MIB (collect 'entity'): every chassis (≤ 16) + modules with a model or serial (≤ 32)
+  "inventory": [ { "entIndex": 1, "class": "chassis" | "module", "name": "Switch 1", "descr": "…",
+                   "model": "WS-C3850-48P", "serial": "FOC1234X0AB", "vendor": "Cisco Systems, Inc.",
+                   "hardwareRev": "V07", "firmwareRev": "…", "softwareRev": "16.12.04" } ]
+}
+```
+
+What is walked follows the device's `collect` from `snmpTargets`: `cdp`, `arp`
+and `entity` are opt-in kinds, so an agent polling for a server that never sends
+them reads exactly what it read before. A device that does not implement a MIB
+answers with an empty walk, which is an empty list and never an error.
+
 ## 2. WebSocket `/ws/agent`
 
 Connection: `ws(s)://<server>/ws/agent` with `Authorization: Bearer <token>` and
@@ -384,7 +560,7 @@ the canonical names shown):
 | `rekey` (aliases: re-key, rotate-key, repin, re-pin) | `id`, `auditId?`, `publicKey` (required PEM) | replace the pinned release trust anchor, in memory and on disk. **Strict by default** — see §2.3 | `ack {id, accepted, runtime}`, `command-result {id, ok, fingerprint?}`, `action-result` |
 | `evidence` (alias: evidence-snapshot) | `id`, `snapshotId`, `clusterId`, `commandSetVersion`, `items[]`, `signature?` | collect READ-ONLY items from the agent's own allowlist (`iface.counters`, `arp.table`, `snmp.reads`, `agent.state`); anything else is refused per item | `command-result {id, ok:true, evidence:{commandSetVersion, items[]}}` |
 | `run-discovery` (aliases: discovery-sweep, sweep) | `discovery: { cidrs?, ports?, rateLimit?, addressCap?, requestId? }` (required object) | sweep the scope from THIS agent's vantage (empty scope ⇒ its own subnets), POST `/agents/discovery-results` | — (REST only); a scope refusal posts `refused:true` with a reason |
-| `poll-snmp` | `deviceId?` | run an SNMP topology cycle now instead of waiting out the per-device interval; read-only on the device | `command-result {id, ok:true, snmp}` |
+| `poll-snmp` | `deviceId?` | re-read `GET /agents/me/config` (≤ 5 s, errors tolerated), then run an SNMP topology + counter cycle now instead of waiting out the per-device interval; read-only on the device | `command-result {id, ok:true, devices, polled, failed, configRefreshed, deviceAssigned?, detail?, snmp, counters}` — `devices` = switches assigned to this agent; `detail` says so when that is 0 or when `deviceId` is not one of them |
 | `burst` (alias: burst-mode) | `id`, `target` (required), `seconds?`, `hz?`, `probe?`, `size?`, `df?` | measure ONE target up to once a second for at most two minutes, streaming every sample | `command-result` per sample + a final one |
 | `stop-burst` (alias: burst-stop) | `id` | cancel a running burst at the next tick | `command-result {id, ok:true, stopped:bool}` |
 
@@ -392,7 +568,8 @@ Probe `spec` (built by the server's `validateProbeSpec`): `{ type, host,
 count?, port? (tcp, tcptraceroute — the latter defaults to 443),
 maxHops?/queries? (traceroute, tcptraceroute), maxElements? (pageload),
 method?/expectStatus?/expectBody?/expectHeader?/minBytes?/maxBytes? (curl),
-steps?/name? (transaction) }`. The agent reads the target from
+steps?/name? (transaction), iface?/timeoutMs? (dhcp — no host; `iface`
+defaults to the default-route interface) }`. The agent reads the target from
 `spec.host || spec.target` (http-family probes get the URL in `host`).
 
 Anything unrecognised is logged and dropped (`command-ignored`). A handler that
@@ -462,6 +639,7 @@ silence.
   "intervalMs": 60000, "lastReportAt": "<ISO>" | null,
   "collector": { "kind": "sflow", "listening": true, "datagrams": 0, "dropped": 0,
                  "decodedFlows": 0, "counterSamples": 0,   // sflow only
+                 "counterInterfaces": 0, "counterOverflow": 0, // sflow only: pending counter readings
                  "bufferedFlows": 0, "lastDatagramAt": "<ISO>"|null } | null,
   "hsflowd": { "state": "active", "detail": null } | null }
 ```
@@ -490,8 +668,9 @@ survives release swaps).
 | `BLUEEYE_PROBE_COUNT` | `probeCount` | `3` | attempts per scheduled probe |
 | `BLUEEYE_PROBE_GATEWAY` | `probeGateway` | `true` | auto-probe the default gateway |
 | `BLUEEYE_PROBE_DNS` | `probeDns` | `true` | auto-probe resolv.conf nameservers |
-| `BLUEEYE_PROBE_TARGETS` | `probeTargets` | `[]` | extra targets (`"ping:1.1.1.1,tcp:host:443,dns:example.com"`) |
+| `BLUEEYE_PROBE_TARGETS` | `probeTargets` | `[]` | extra targets (`"ping:1.1.1.1,tcp:host:443,dns:example.com"`; `"dhcp"` / `"dhcp:eth0"` schedules the DHCP test — never on by default) |
 | `BLUEEYE_CAPABILITIES_INTERVAL_MS` | `capabilitiesIntervalMs` | `300000` | periodic capabilities re-report (§1.4); `0` disables |
+| `BLUEEYE_CONFIG_REFRESH_MS` | `configRefreshIntervalMs` | `300000` | periodic `GET /agents/me/config` (§1.3); an unchanged config is a no-op; `0` disables |
 | `BLUEEYE_LOG_LEVEL` | — | `info` | logger (`src/index.js`) |
 | `BLUEEYE_ACTION_LOG` | — | — (no-op) | local append-only action trail (`src/runtime.js`, `src/selfDelete.js`) |
 | `BLUEEYE_SERVICE_NAME` | — | `blueeye-agent` | systemd unit for restart/uninstall (`src/selfUpdate.js`, `src/selfDelete.js`) |
@@ -579,8 +758,9 @@ audit event.
 
 ### 4.4 hsflowd reconcile (local sFlow exporter)
 
-Runs after every successful `GET /agents/me/config` — i.e. at startup and on
-each WS reconnect (`src/runtime.js reconcileHsflowd`):
+Runs after every successful `GET /agents/me/config` at startup and on each WS
+reconnect, and after a periodic/`poll-snmp` re-read only when `monitorConfig`
+changed (`src/runtime.js reconcileHsflowd`):
 
 * desired = `source === 'sflow' && sflow.hsflowd` ⇒
   `enable({collectorPort: sflow.port||6343, samplingRate?, pollingSecs?, device?})`;
@@ -615,3 +795,7 @@ permission_denied | unknown` (mirrored by the server's `HSFLOWD_STATES`).
 | scheduled probes | ≤ 16 targets per cycle (agent-side) |
 | traffic snapshots | ≤ 64 interfaces per snapshot, busiest kept (agent-side; `interfacesOmitted` counts the rest) |
 | flow summaries | top 50 per byPort/byProtocol/topTalkers; collector buffer 100 000 flows |
+| `sflowCounters` | ≤ 1024 entries, ≤ 24 KB, ≥ 8 KB floor when pending, whole snapshot ≤ 56 KB; ≤ 4096 interfaces pending, stale after 10 min |
+| `sflowExporters` | ≤ 256 addresses per snapshot |
+| traffic result (agent-side) | trimmed to ≤ 60 000 bytes before the POST (`truncated` names what went); never sent over 65 535 |
+| `POST /agents/me/snmp-topology` | ≤ ~900 KiB per POST (split by device); per device: fdb ≤ 5 000, neighbours (LLDP+CDP) ≤ 512, arp ≤ 8 192 (walk bounded at 16 384 rows), inventory ≤ 16 chassis + 32 modules (agent-side) |

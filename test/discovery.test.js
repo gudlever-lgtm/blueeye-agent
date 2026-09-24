@@ -184,3 +184,86 @@ test('with no ports from the server the scanner sweeps the default list', async 
   await scanner.scan({ cidrs: ['10.0.0.1/32'], addressCap: 10, rateLimiter: limiter, portList: [] });
   assert.deepEqual([...seenPorts], DEFAULT_PORTS);
 });
+
+// ---- per-address port concurrency -------------------------------------------
+
+// A fake socket that never answers: resolves "closed" after the connect
+// timeout, the way a silent address (firewall drops the SYN) behaves.
+function silentProbe({ inFlight }) {
+  return (ip, port, { timeoutMs }) => new Promise((resolve) => {
+    inFlight.now += 1;
+    inFlight.max = Math.max(inFlight.max, inFlight.now);
+    setTimeout(() => { inFlight.now -= 1; resolve(false); }, timeoutMs);
+  });
+}
+
+test('a silent address costs ~ceil(ports / concurrency) timeouts, not one per port', async () => {
+  const inFlight = { now: 0, max: 0 };
+  const scanner = createScanner({
+    tcpProbe: silentProbe({ inFlight }),
+    icmpProbe: async () => false,
+    dnsReverse: async () => null,
+    tcpTimeoutMs: 60,
+    portConcurrency: 4,
+  });
+  const limiter = createRateLimiter({ ratePerSec: 1e6, sleep: async () => {} });
+  const t0 = Date.now();
+  const res = await scanner.scan({ cidrs: ['10.0.0.1/32'], addressCap: 10, rateLimiter: limiter });
+  const took = Date.now() - t0;
+  assert.equal(res.candidates.length, 0);
+  // 11 default ports, 4 at a time = 3 waves of 60 ms. Sequential was 660 ms.
+  assert.ok(took < 11 * 60 * 0.6, `took ${took} ms`);
+  assert.ok(took >= 3 * 60 - 10, `took ${took} ms`);
+  assert.equal(inFlight.max, 4, 'never more than portConcurrency connects in flight');
+});
+
+test('concurrent port probes still honour the rate limit (grants never bunch up)', async () => {
+  // Real timers, short interval: 100/s = one grant per 10 ms. Without the
+  // queued acquire, every waiting worker computed its wait from the same
+  // stale slot and they all woke together.
+  const limiter = createRateLimiter({ ratePerSec: 100 });
+  const grants = [];
+  const wrapped = { acquire: async () => { await limiter.acquire(); grants.push(performance.now()); } };
+  const scanner = createScanner({
+    tcpProbe: async () => false,
+    icmpProbe: async () => true,
+    dnsReverse: async () => null,
+    ports: [1, 2, 3, 4, 5, 6],
+    portConcurrency: 6,
+  });
+  await scanner.scan({ cidrs: ['10.0.0.1/32'], addressCap: 10, rateLimiter: wrapped });
+  // 1 address grant + 6 ports + 1 rDNS (icmp alive) = 8 grants, ~10 ms apart.
+  assert.equal(grants.length, 8);
+  for (let i = 1; i < grants.length; i += 1) {
+    const gap = grants[i] - grants[i - 1];
+    // Tolerance for libuv's cached loop time (a 10 ms timer may fire ~3 ms
+    // early by the wall clock); bunched grants are ~0 ms apart.
+    assert.ok(gap >= 5, `grant ${i} came ${gap.toFixed(1)} ms after the previous`);
+  }
+});
+
+test('open ports come back in list order whatever order the connects finish in', async () => {
+  const delays = { 22: 40, 80: 5, 443: 20 };
+  const scanner = createScanner({
+    tcpProbe: (ip, port) => new Promise((r) => setTimeout(() => r(port !== 3389), delays[port] || 1)),
+    icmpProbe: async () => null,
+    dnsReverse: async () => null,
+    ports: [22, 80, 443, 3389],
+    portConcurrency: 4,
+  });
+  const limiter = createRateLimiter({ ratePerSec: 1e6, sleep: async () => {} });
+  const res = await scanner.scan({ cidrs: ['10.0.0.1/32'], addressCap: 10, rateLimiter: limiter });
+  assert.deepEqual(res.candidates[0].openPorts, [22, 80, 443]);
+});
+
+test('a port probe that throws is closed, the address sweep carries on', async () => {
+  const scanner = createScanner({
+    tcpProbe: async (ip, port) => { if (port === 80) throw new Error('EMFILE'); return port === 443; },
+    icmpProbe: async () => null,
+    dnsReverse: async () => null,
+    ports: [80, 443],
+  });
+  const limiter = createRateLimiter({ ratePerSec: 1e6, sleep: async () => {} });
+  const res = await scanner.scan({ cidrs: ['10.0.0.1/32'], addressCap: 10, rateLimiter: limiter });
+  assert.deepEqual(res.candidates[0].openPorts, [443]);
+});

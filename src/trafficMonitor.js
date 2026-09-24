@@ -23,6 +23,16 @@ function parseProcNetDev(text) {
       txPackets: cols[9],
       txErrors: cols[10],
       txDrop: cols[11],
+      // The four that say WHICH kind of error it was. `frame` counts frames
+      // that failed alignment/length checks — on most drivers it is where
+      // CRC/alignment damage lands, i.e. cabling or a duplex mismatch seen from
+      // the FULL-duplex end. `fifo` is the NIC's own ring overrunning (the host
+      // is too slow, not the wire). `colls` and `carrier` only move on a
+      // half-duplex or failing link: a switched full-duplex port never collides.
+      rxFifo: cols[4],
+      rxFrame: cols[5],
+      txColls: cols[13],
+      txCarrier: cols[14],
     };
   }
   return result;
@@ -38,12 +48,23 @@ function defaultReadProc() {
 async function defaultReadIfaceMeta(iface) {
   let operStatus = null;
   let speedMbps = null;
+  let duplex = null;
   try { operStatus = (await fs.promises.readFile(`/sys/class/net/${iface}/operstate`, 'utf8')).trim() || null; } catch { /* n/a */ }
   try {
     const s = Number((await fs.promises.readFile(`/sys/class/net/${iface}/speed`, 'utf8')).trim());
     if (Number.isFinite(s) && s > 0) speedMbps = s;
   } catch { /* speed unreadable for many ifaces */ }
-  return { operStatus, speedMbps };
+  // full | half | unknown. The kernel reports what the link NEGOTIATED (or was
+  // forced to); "half" on a switched port is the half of a duplex mismatch this
+  // host can see. Reading it fails (EINVAL) on a link that is down and on most
+  // virtual interfaces — that is null, never a guess.
+  try { duplex = parseDuplex(await fs.promises.readFile(`/sys/class/net/${iface}/duplex`, 'utf8')); } catch { /* n/a */ }
+  return { operStatus, speedMbps, duplex };
+}
+
+function parseDuplex(text) {
+  const v = String(text == null ? '' : text).trim().toLowerCase();
+  return v === 'full' || v === 'half' || v === 'unknown' ? v : null;
 }
 
 function snapshot(readProc) {
@@ -79,6 +100,10 @@ async function buildSnapshot(first, second, {
   const entries = [];
   const totals = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0, rxErrors: 0, txErrors: 0, rxDrop: 0, txDrop: 0 };
   const delta = (a, b, k) => Math.max((a[k] || 0) - (b[k] || 0), 0);
+  // The error-detail counters are not reported by every source (Windows and an
+  // older parse have none), and "not measured" must not read as "zero errors",
+  // so a counter missing from either side is null rather than 0.
+  const optDelta = (a, b, k) => (Number.isFinite(a[k]) && Number.isFinite(b[k]) ? Math.max(a[k] - b[k], 0) : null);
 
   for (const iface of Object.keys(second)) {
     if (!includeLoopback && iface === 'lo') continue;
@@ -107,6 +132,10 @@ async function buildSnapshot(first, second, {
       txErrors,
       rxDrop,
       txDrop,
+      rxFrameErrors: optDelta(second[iface], first[iface], 'rxFrame'),
+      rxFifoErrors: optDelta(second[iface], first[iface], 'rxFifo'),
+      txCollisions: optDelta(second[iface], first[iface], 'txColls'),
+      txCarrierErrors: optDelta(second[iface], first[iface], 'txCarrier'),
     });
   }
 
@@ -123,7 +152,12 @@ async function buildSnapshot(first, second, {
   const interfaces = [];
   for (const entry of entries) {
     const meta = await readIfaceMeta(entry.iface);
-    interfaces.push({ ...entry, operStatus: meta.operStatus, speedMbps: meta.speedMbps });
+    interfaces.push({
+      ...entry,
+      operStatus: meta.operStatus,
+      speedMbps: meta.speedMbps,
+      duplex: meta.duplex === undefined ? null : meta.duplex,
+    });
   }
 
   return {
@@ -159,4 +193,4 @@ async function sampleTraffic({
   return buildSnapshot(first, second, { intervalMs, elapsedSec, includeLoopback, readIfaceMeta, maxInterfaces });
 }
 
-module.exports = { parseProcNetDev, snapshot, sampleTraffic, buildSnapshot, defaultReadIfaceMeta, MAX_INTERFACES };
+module.exports = { parseProcNetDev, parseDuplex, snapshot, sampleTraffic, buildSnapshot, defaultReadIfaceMeta, MAX_INTERFACES };

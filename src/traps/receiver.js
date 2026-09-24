@@ -1,9 +1,8 @@
 'use strict';
 
-const { loadNetSnmp } = require('../snmp/session');
-
 const dgram = require('dgram');
 const { translateTrap } = require('./translate');
+const { decodeTrap } = require('./decode');
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -28,7 +27,19 @@ const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 // The source address is all we have, so a trap is accepted ONLY from an address
 // this agent actually polls (its `snmpTargets`). Everything else is counted and
 // dropped. That is a weak check, and it is the strongest one v2c permits; SNMPv3
-// traps, which can be authenticated, are a separate piece of work.
+// traps, which can be authenticated, are a separate piece of work (they are
+// counted as `v3` and dropped, never half-decoded).
+//
+// THE COMMUNITY, TOO, WHEN WE KNOW IT. A v1/v2c trap carries its community in
+// clear text — no secret on the wire, but a second thing a spoofer has to get
+// right, and the thing that tells "the switch" from "anything else on that
+// address". When the polled device's community is known (the server hands the
+// agent the one it polls with), a trap with a different community is counted
+// as `communityMismatch`. It is only REFUSED (and counted as `badCommunity`)
+// when `checkCommunity` is on — off by default, because many switches send
+// traps with a different community than they are polled with, and refusing
+// those would silently drop a whole device's traps. A device with no known
+// community (a v3 target, or none assigned) is checked on address alone.
 
 const MAX_TRAPS = 2000;
 const DEFAULT_RATE_PER_SEC = 50;
@@ -47,13 +58,17 @@ function createTrapReceiver({
   burst = DEFAULT_BURST,
   logger = silentLogger,
   createSocket = () => dgram.createSocket({ type: 'udp4', reuseAddr: true }),
-  // Decodes a datagram into { varbinds: [{ oid, value }] }. Injected so the
-  // tests never need net-snmp, and so a host without the optional dependency
-  // fails at START with a clear reason rather than on the first packet.
-  decode = null,
+  // Decodes a datagram into { version, community, varbinds: [{ oid, value }] }.
+  // The default is the pure BER decoder in ./decode.js; injectable for tests.
+  decode = decodeTrap,
   // (sourceIp) => boolean. The polled-device allowlist, supplied by the
   // runtime from the server-assigned snmpTargets.
   isKnownSender = () => false,
+  // (sourceIp) => community string | null. The community the runtime polls
+  // that device with; null when it is not known (then only the address is
+  // checked).
+  expectedCommunity = () => null,
+  checkCommunity = false,
   // (sourceIp, ifIndex) => ifName | null, from stage 02's topology poll.
   resolveIfName = null,
   now = () => Date.now(),
@@ -64,25 +79,13 @@ function createTrapReceiver({
   let dropped = 0; // rate-limited
   let refused = 0; // not a device this agent polls
   let undecodable = 0;
+  let badCommunity = 0; // refused: v1/v2c community differs from the polled one (checkCommunity on)
+  let communityMismatch = 0; // differed from the polled one (refused or not)
+  let v3 = 0; // SNMPv3 traps — out of scope, counted so they are not "garbage"
   let overflowed = 0;
   let lastAt = null;
   let bound = false;
   const buckets = new Map();
-
-  function defaultDecode(msg) {
-    const net = loadNetSnmp('SNMP traps');
-    // net-snmp exposes the same message parser the trap receiver uses. A v1
-    // trap is converted to the v2 varbind shape by the library, so there is one
-    // path here rather than two.
-    const parsed = net.Message ? net.Message.createFromBuffer(msg) : null;
-    const pdu = parsed && parsed.pdu;
-    if (!pdu || !Array.isArray(pdu.varbinds)) {
-      const err = new Error('not an SNMP trap');
-      err.code = 'TRAP_MALFORMED';
-      throw err;
-    }
-    return { varbinds: pdu.varbinds.map((vb) => ({ oid: vb.oid, value: vb.value })) };
-  }
 
   function allow(sourceIp) {
     const t = now();
@@ -117,11 +120,26 @@ function createTrapReceiver({
 
     let decoded;
     try {
-      decoded = (decode || defaultDecode)(msg);
+      decoded = decode(msg);
     } catch (err) {
-      undecodable += 1;
+      if (err && err.code === 'TRAP_V3_UNSUPPORTED') v3 += 1;
+      else undecodable += 1;
       logger.debug(`trap from ${sourceIp} could not be decoded (${err.message})`);
       return;
+    }
+
+    if (decoded && typeof decoded.community === 'string') {
+      let expected = null;
+      try { expected = expectedCommunity(sourceIp); } catch { expected = null; }
+      if (typeof expected === 'string' && expected && decoded.community !== expected) {
+        communityMismatch += 1;
+        if (checkCommunity) {
+          badCommunity += 1;
+          // Never log the community itself — it is the device's read secret.
+          logger.debug(`trap from ${sourceIp} refused: community does not match the one this agent polls it with`);
+          return;
+        }
+      }
     }
 
     let row;
@@ -155,10 +173,7 @@ function createTrapReceiver({
   }
 
   async function start() {
-    // Fail at START, not on the first packet: a host without net-snmp should
-    // say so in the log at boot, when somebody is looking, rather than silently
-    // discarding every trap.
-    if (!decode) loadNetSnmp('SNMP traps');
+    // No net-snmp needed: the decoder is pure (./decode.js).
     await new Promise((resolve, reject) => {
       socket = createSocket();
       socket.on('message', (msg, rinfo) => {
@@ -190,6 +205,10 @@ function createTrapReceiver({
       // different problems with different fixes.
       refused,
       undecodable,
+      badCommunity,
+      communityMismatch,
+      v3,
+      checkCommunity: Boolean(checkCommunity),
       overflowed,
       senders: buckets.size,
       lastAt: lastAt ? new Date(lastAt).toISOString() : null,

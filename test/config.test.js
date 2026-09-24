@@ -94,3 +94,17 @@ test('capabilitiesIntervalMs: 300 s by default, file then env, 0 disables', () =
     0,
   );
 });
+
+test('configRefreshIntervalMs: 300 s by default, file then env, 0 disables', () => {
+  const dir = tmpDir();
+  const absent = path.join(dir, 'absent.json');
+  assert.equal(loadConfig({ env: { BLUEEYE_AGENT_CONFIG: absent } }).configRefreshIntervalMs, 300000);
+
+  const configPath = path.join(dir, 'config.json');
+  fs.writeFileSync(configPath, JSON.stringify({ configRefreshIntervalMs: 60000 }));
+  assert.equal(loadConfig({ env: { BLUEEYE_AGENT_CONFIG: configPath } }).configRefreshIntervalMs, 60000);
+  assert.equal(
+    loadConfig({ env: { BLUEEYE_AGENT_CONFIG: configPath, BLUEEYE_CONFIG_REFRESH_MS: '0' } }).configRefreshIntervalMs,
+    0,
+  );
+});

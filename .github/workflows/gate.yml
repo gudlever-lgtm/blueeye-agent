@@ -21,3 +21,23 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: bash scripts/gate.sh --force
+
+  # The Go rewrite (blueeye-agent-go/) has its own test suite, which nothing
+  # ran before. A separate job so a Go failure is named as one, and so the
+  # Node gate above does not need a Go toolchain. Not in scripts/gate.sh: the
+  # local hook must not require Go on every contributor's machine.
+  go:
+    name: Go agent vet + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: blueeye-agent-go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: blueeye-agent-go/go.mod
+          cache-dependency-path: blueeye-agent-go/go.sum
+      - run: go vet ./...
+      - run: go test ./...

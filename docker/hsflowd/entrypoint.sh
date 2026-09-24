@@ -8,6 +8,8 @@ set -euo pipefail
 # pcap { dev } is what makes hsflowd sample PACKETS (the src/dst data the
 # Destinations map needs). SFLOW_DEVICE must be the host's real interface
 # (eth0 / ens.. / wlan0); with host networking the container sees the host's.
+# sampling.bps_ratio = 0 stops hsflowd replacing SAMPLING_RATE with a
+# link-speed default (ifSpeed / 1e6) on any NIC that reports a speed.
 : "${COLLECTOR_IP:=127.0.0.1}"
 : "${COLLECTOR_PORT:=6343}"
 : "${SAMPLING_RATE:=256}"
@@ -19,6 +21,7 @@ cat > /etc/hsflowd.conf <<EOF
 sflow {
   collector { ip = ${COLLECTOR_IP}  udpport = ${COLLECTOR_PORT} }
   sampling = ${SAMPLING_RATE}
+  sampling.bps_ratio = 0
   polling = ${POLLING_SECS}
   pcap { dev = ${SFLOW_DEVICE} }
 }
