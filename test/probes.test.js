@@ -162,7 +162,7 @@ test('ping passes a safe host after a `--` end-of-options marker', async () => {
 test('traceroute rejects an option-looking host without spawning', async () => {
   let spawned = false;
   const exec = (_bin, _args, _opts, cb) => { spawned = true; cb(null, ''); };
-  const res = await traceroute({ host: '--help' }, { exec, platform: 'linux' });
+  const res = await traceroute({ host: '--help' }, { reverse: null, exec, platform: 'linux' });
   assert.equal(res.ok, false);
   assert.equal(res.error, 'invalid host');
   assert.equal(spawned, false, 'must not spawn traceroute for an unsafe host');
@@ -172,7 +172,7 @@ test('traceroute reports a reason when the command is missing, not a blank run',
   // Minimal hosts often lack the traceroute binary; the run must say so (so the
   // server/dashboard can explain the empty path) rather than silently return [].
   const exec = (_bin, _args, _opts, cb) => cb(Object.assign(new Error('spawn traceroute ENOENT'), { code: 'ENOENT' }), '');
-  const res = await traceroute({ host: 'example.com' }, { exec, platform: 'linux' });
+  const res = await traceroute({ host: 'example.com' }, { reverse: null, exec, platform: 'linux' });
   assert.equal(res.ok, false);
   assert.equal(res.hopCount, 0);
   assert.deepEqual(res.hops, []);
@@ -183,7 +183,7 @@ test('traceroute still succeeds when the command prints hops despite a nonzero e
   // traceroute can exit nonzero yet still emit a usable report; hops win over err.
   const stdout = ' 1  10.0.0.1  1.0 ms  1.0 ms  1.0 ms\n 2  93.184.216.34  10 ms  10 ms  10 ms\n';
   const exec = (_bin, _args, _opts, cb) => cb(new Error('exit 1'), stdout);
-  const res = await traceroute({ host: 'example.com' }, { exec, platform: 'linux' });
+  const res = await traceroute({ host: 'example.com' }, { reverse: null, exec, platform: 'linux' });
   assert.equal(res.ok, true);
   assert.equal(res.hopCount, 2);
   assert.equal(res.error, undefined);
@@ -472,7 +472,7 @@ const TCP_HOPS = [
 
 test('tcptraceroute traces to host:port with SYNs and parses the hops', async () => {
   const { exec, calls } = fakeTrace({ tcptraceroute: { stdout: TCP_HOPS } });
-  const res = await tcptraceroute({ host: 'example.com', port: 443 }, { exec });
+  const res = await tcptraceroute({ host: 'example.com', port: 443 }, { reverse: null, exec });
   assert.equal(res.type, 'tcptraceroute');
   assert.equal(res.ok, true);
   assert.equal(res.target, 'example.com:443', 'target carries the port so it stays a separate series');
@@ -492,7 +492,7 @@ test('tcptraceroute traces to host:port with SYNs and parses the hops', async ()
 
 test('tcptraceroute falls back to `traceroute -T` when tcptraceroute is absent', async () => {
   const { exec, calls } = fakeTrace({ traceroute: { stdout: ' 1  10.0.0.1  1.0 ms  1.0 ms  1.0 ms\n' } });
-  const res = await tcptraceroute({ host: 'example.com', port: 8443 }, { exec });
+  const res = await tcptraceroute({ host: 'example.com', port: 8443 }, { reverse: null, exec });
   assert.equal(res.ok, true);
   assert.equal(res.hopCount, 1);
   assert.deepEqual(calls.map((c) => c.bin), ['tcptraceroute', 'traceroute']);
@@ -505,7 +505,7 @@ test('tcptraceroute names the installable tool when neither binary exists', asyn
   // server's auto-install offers; naming the fallback would suggest a fix the
   // install-tool allowlist cannot apply.
   const { exec, calls } = fakeTrace({});
-  const res = await tcptraceroute({ host: 'example.com' }, { exec });
+  const res = await tcptraceroute({ host: 'example.com' }, { reverse: null, exec });
   assert.equal(res.ok, false);
   assert.equal(res.error, 'tcptraceroute not installed');
   assert.equal(calls.length, 2, 'both candidates were tried');
@@ -515,19 +515,19 @@ test('tcptraceroute reports a raw-socket permission failure as its own reason', 
   const { exec } = fakeTrace({
     tcptraceroute: { err: new Error('exit 1'), stderr: 'tcptraceroute: Operation not permitted' },
   });
-  const res = await tcptraceroute({ host: 'example.com' }, { exec });
+  const res = await tcptraceroute({ host: 'example.com' }, { reverse: null, exec });
   assert.equal(res.ok, false);
   assert.match(res.error, /needs root/);
 });
 
 test('tcptraceroute defaults to port 443 and rejects a bad port without spawning', async () => {
   const { exec, calls } = fakeTrace({ tcptraceroute: { stdout: ' 1  10.0.0.1  1.0 ms\n' } });
-  const res = await tcptraceroute({ host: 'example.com' }, { exec });
+  const res = await tcptraceroute({ host: 'example.com' }, { reverse: null, exec });
   assert.equal(res.port, 443);
   assert.equal(calls[0].args[calls[0].args.length - 1], '443');
 
   const bad = fakeTrace({});
-  const res2 = await tcptraceroute({ host: 'example.com', port: 70000 }, { exec: bad.exec });
+  const res2 = await tcptraceroute({ host: 'example.com', port: 70000 }, { reverse: null, exec: bad.exec });
   assert.equal(res2.ok, false);
   assert.equal(res2.error, 'invalid port');
   assert.equal(bad.calls.length, 0, 'must not spawn for an invalid port');
@@ -535,7 +535,7 @@ test('tcptraceroute defaults to port 443 and rejects a bad port without spawning
 
 test('tcptraceroute rejects an option-looking host without spawning', async () => {
   const { exec, calls } = fakeTrace({});
-  const res = await tcptraceroute({ host: '-f', port: 443 }, { exec });
+  const res = await tcptraceroute({ host: '-f', port: 443 }, { reverse: null, exec });
   assert.equal(res.ok, false);
   assert.equal(res.error, 'invalid host');
   assert.equal(calls.length, 0);

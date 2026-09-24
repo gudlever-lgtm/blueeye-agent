@@ -33,7 +33,7 @@ test('the run is allowed the time its own arguments imply', async () => {
   // against a timeout of 60.
   let seen = null;
   const exec = (bin, args, opts, cb) => { seen = opts; cb(null, ''); };
-  await traceroute({ host: 'example.com', maxHops: 20 }, { exec, platform: 'win32' });
+  await traceroute({ host: 'example.com', maxHops: 20 }, { reverse: null, exec, platform: 'win32' });
   assert.ok(seen.timeout > 120000, `timeout ${seen.timeout} must cover 20x3x2s`);
   assert.ok(seen.timeout <= 180000, 'and still be bounded');
 });
@@ -41,7 +41,7 @@ test('the run is allowed the time its own arguments imply', async () => {
 test('a short trace does not get a long timeout', async () => {
   let seen = null;
   const exec = (bin, args, opts, cb) => { seen = opts; cb(null, ''); };
-  await traceroute({ host: 'example.com', maxHops: 5, queries: 1 }, { exec, platform: 'linux' });
+  await traceroute({ host: 'example.com', maxHops: 5, queries: 1 }, { reverse: null, exec, platform: 'linux' });
   assert.ok(seen.timeout < 60000, `a 5-hop trace asked for ${seen.timeout}ms`);
 });
 
@@ -91,7 +91,7 @@ test('a killed run says it timed out, not that the tool is missing', async () =>
     err.killed = true;
     cb(err, '');
   };
-  const res = await traceroute({ host: 'example.com' }, { exec, platform: 'win32' });
+  const res = await traceroute({ host: 'example.com' }, { reverse: null, exec, platform: 'win32' });
   assert.equal(res.ok, false);
   assert.match(res.error, /timed out/);
   assert.doesNotMatch(res.error, /not installed/);
@@ -103,7 +103,7 @@ test('a genuinely missing tracert still says so', async () => {
     err.code = 'ENOENT';
     cb(err, '');
   };
-  const res = await traceroute({ host: 'example.com' }, { exec, platform: 'win32' });
+  const res = await traceroute({ host: 'example.com' }, { reverse: null, exec, platform: 'win32' });
   assert.equal(res.ok, false);
   assert.match(res.error, /tracert not installed/);
 });
