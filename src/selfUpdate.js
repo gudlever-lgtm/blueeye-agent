@@ -71,18 +71,57 @@ function createSelfUpdater({
     const base = String(serverUrl || '').replace(/\/+$/, '');
     const url = `${base}${signed ? '/enroll/agent-release.tgz' : '/enroll/agent-source.tgz'}`;
     logger.info(`[update] downloading ${url}`);
-    const res = await doFetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    // `Accept-Encoding: identity` asks for the bytes VERBATIM, and it is what
+    // keeps the checksum checkable. Node's global fetch (undici) offers
+    // `gzip, deflate` by default and transparently DECODES whatever comes back,
+    // so a proxy or CDN that labels this already-gzipped tarball
+    // `Content-Encoding: gzip` gets it silently un-gzipped on arrival: the agent
+    // then hashes the inner tar, never the release, and every attempt fails with
+    // the same pair of hashes. (Agents pinning a cert fingerprint use the raw
+    // https client, which never negotiated encodings — which is why this only
+    // ever bit some hosts.) The bytes are verified by signature + sha256, so
+    // transfer compression buys nothing here anyway.
+    const res = await doFetch(url, { headers: { Authorization: `Bearer ${token}`, 'Accept-Encoding': 'identity' } });
     if (!res || !res.ok) throw fail('DOWNLOAD_FAILED', `download failed (HTTP ${res ? res.status : '?'})`);
 
     const buf = Buffer.from(await res.arrayBuffer());
     const sha = crypto.createHash('sha256').update(buf).digest('hex');
+    const head = (name) => (res.headers && typeof res.headers.get === 'function' ? res.headers.get(name) : null);
+
+    // What to say when the bytes do not hash to what they must. The two hashes
+    // on their own read like a corrupted or tampered download, which is almost
+    // never what happened; these three facts separate the real causes:
+    //   * the server states the sha of what it sent (X-Content-SHA256). When
+    //     that agrees with the expected value but not with what arrived, the
+    //     bytes were altered in transit — nothing on the server is wrong.
+    //   * a release is gzip (magic 1f 8b). Arriving as a bare tar ("ustar" at
+    //     offset 257) means something decompressed it on the way.
+    //   * when the server's own sha disagrees with the expected one, the server
+    //     is serving a release that does not match the manifest it signed.
+    const why = (expected) => {
+      const served = String(head('x-content-sha256') || '').trim().toLowerCase();
+      const isGzip = buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+      const isTar = buf.length > 262 && buf.slice(257, 262).toString('latin1') === 'ustar';
+      const enc = String(head('content-encoding') || '').trim().toLowerCase();
+      const parts = [];
+      if (served && served === expected && served !== sha) {
+        parts.push('the server sent the right release, so the bytes were altered between it and this host');
+        if (!isGzip && isTar) parts.push('what arrived is an UNCOMPRESSED tar, so something on the way decompressed it — a proxy or CDN adding Content-Encoding to an already-gzipped file');
+        else if (enc && enc !== 'identity') parts.push(`the response carried Content-Encoding: ${enc} although identity was requested`);
+        else parts.push('check any proxy, CDN or TLS-terminating cache in the path');
+      } else if (served && served !== expected) {
+        parts.push(`the server says it is serving ${served}, which is not the release that was signed — re-publish the agent release on the server (a restart re-signs it from source)`);
+      } else if (!isGzip) {
+        parts.push(`what arrived is not a gzip archive (first bytes ${buf.slice(0, 4).toString('hex')}), so the download was replaced or truncated`);
+      }
+      return parts.length ? ` — ${parts.join('; ')}` : '';
+    };
     let version = expectedVersion || null;
     if (signed) {
       // Fail CLOSED: never install a signed release we can't authenticate.
       if (!publicKey) throw fail('NO_PUBLIC_KEY', 'no release public key configured — refusing to install a signed release');
-      const header = (name) => (res.headers && typeof res.headers.get === 'function' ? res.headers.get(name) : null);
-      const manifestB64 = header('x-release-manifest');
-      const sig = header('x-release-signature') || signature;
+      const manifestB64 = head('x-release-manifest');
+      const sig = head('x-release-signature') || signature;
       if (!manifestB64 || !sig) throw fail('NO_MANIFEST', 'signed release is missing its manifest/signature');
       let manifest;
       try {
@@ -94,7 +133,7 @@ function createSelfUpdater({
         throw fail('SIGNATURE_INVALID', 'release signature did not verify — refusing to install');
       }
       if (manifest.sha256 !== sha) {
-        throw fail('CHECKSUM_MISMATCH', `checksum mismatch (manifest ${manifest.sha256}, got ${sha}) — refusing to install`);
+        throw fail('CHECKSUM_MISMATCH', `checksum mismatch (manifest ${manifest.sha256}, got ${sha}) — refusing to install${why(String(manifest.sha256).toLowerCase())}`);
       }
       if (expectedVersion && manifest.version !== expectedVersion) {
         throw fail('VERSION_MISMATCH', `version mismatch (expected ${expectedVersion}, got ${manifest.version}) — refusing to install`);
@@ -109,7 +148,7 @@ function createSelfUpdater({
         throw fail('NO_CHECKSUM', 'legacy update carries no sha256 to verify against — refusing to install unverified code');
       }
       if (sha !== expectedSha) {
-        throw fail('CHECKSUM_MISMATCH', `checksum mismatch (expected ${expectedSha}, got ${sha}) — refusing to install`);
+        throw fail('CHECKSUM_MISMATCH', `checksum mismatch (expected ${expectedSha}, got ${sha}) — refusing to install${why(String(expectedSha).toLowerCase())}`);
       }
       logger.info(`[update] checksum OK (${sha})`);
     }

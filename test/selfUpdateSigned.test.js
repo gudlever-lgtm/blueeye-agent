@@ -113,3 +113,96 @@ test('an unsigned update still uses the source bundle + sha256 (back-compat)', a
   assert.equal(r.ok, true);
   assert.ok(calls.includes('tar'));
 });
+
+// --- what a checksum mismatch actually means -------------------------------
+// The release is verified by signature + sha256, and the manifest travels in the
+// headers of the same response as the bytes, so the two can only disagree when
+// something changed the bytes on the way (or when the server is serving a
+// release that is not the one it signed). Reporting the two hashes alone sends
+// the operator hunting for a corrupted download, which is almost never it.
+
+// A response carrying the manifest headers plus whatever else the caller wants
+// to add (X-Content-SHA256, Content-Encoding) and any body.
+function fakeReleaseWith(body, manifest, sig, extra = {}) {
+  const lower = {};
+  for (const [k, v] of Object.entries(extra)) lower[k.toLowerCase()] = v;
+  return {
+    ok: true,
+    status: 200,
+    headers: {
+      get(name) {
+        const k = String(name).toLowerCase();
+        if (k === 'x-release-manifest') return Buffer.from(JSON.stringify(manifest)).toString('base64');
+        if (k === 'x-release-signature') return sig;
+        return k in lower ? lower[k] : null;
+      },
+    },
+    arrayBuffer: async () => Uint8Array.from(body).buffer,
+  };
+}
+
+// The real-world failure: a proxy or CDN labels the already-gzipped release
+// `Content-Encoding: gzip`, the HTTP client dutifully decodes it, and the agent
+// hashes the inner tar instead of the release. Nothing on the server is wrong,
+// and it repeats identically for ever.
+test('a mismatch caused by a decompressing proxy names the transport, not the server', async () => {
+  const zlib = require('zlib');
+  const tar = Buffer.alloc(1024); // a bare tar: "ustar" at offset 257
+  tar.write('ustar', 257, 'latin1');
+  const release = zlib.gzipSync(tar);
+  const manifest = { version: '0.3.0', sha256: sha(release), size: release.length };
+  const sig = sign(manifest);
+  const { updater, calls } = recordingUpdater();
+  await assert.rejects(
+    updater.update({
+      serverUrl: 'http://s', token: 't', signature: sig, publicKey: pubPem,
+      // The server states the sha of what IT sent; the body arrived decoded.
+      fetchImpl: async () => fakeReleaseWith(tar, manifest, sig, { 'X-Content-SHA256': sha(release) }),
+    }),
+    (err) => {
+      assert.equal(err.code, 'CHECKSUM_MISMATCH');
+      assert.match(err.message, /altered between it and this host/);
+      assert.match(err.message, /UNCOMPRESSED tar/);
+      assert.match(err.message, /proxy or CDN/);
+      return true;
+    },
+  );
+  assert.ok(!calls.includes('tar'), 'never extracts');
+});
+
+test('a mismatch where the server serves something else names the server', async () => {
+  const release = Buffer.from('the-signed-release');
+  const manifest = { version: '0.3.0', sha256: sha(release), size: release.length };
+  const sig = sign(manifest);
+  const other = Buffer.from('some-other-release');
+  const { updater } = recordingUpdater();
+  await assert.rejects(
+    updater.update({
+      serverUrl: 'http://s', token: 't', signature: sig, publicKey: pubPem,
+      fetchImpl: async () => fakeReleaseWith(other, manifest, sig, { 'X-Content-SHA256': sha(other) }),
+    }),
+    (err) => {
+      assert.equal(err.code, 'CHECKSUM_MISMATCH');
+      assert.match(err.message, /not the release that was signed/);
+      assert.match(err.message, /re-publish/);
+      return true;
+    },
+  );
+});
+
+// Asking for identity is what stops the transport decoding the body in the
+// first place; the signature already covers integrity, so there is nothing to
+// gain from transfer compression here.
+test('the download asks for the bytes verbatim (Accept-Encoding: identity)', async () => {
+  const release = Buffer.from('agent-release-bytes');
+  const manifest = { version: '0.3.0', sha256: sha(release), size: release.length };
+  const sig = sign(manifest);
+  const { updater } = recordingUpdater();
+  let sent = null;
+  await updater.update({
+    serverUrl: 'http://s', token: 't', signature: sig, publicKey: pubPem,
+    fetchImpl: async (url, opts) => { sent = opts && opts.headers; return fakeRelease(release, manifest, sig); },
+  });
+  assert.equal(sent['Accept-Encoding'], 'identity');
+  assert.equal(sent.Authorization, 'Bearer t');
+});
