@@ -171,6 +171,10 @@ function createSnmpPoller({
   let counterTimer = null;
   let running = false;
   let counterRunning = false;
+  // Settle when the cycle in flight ends, so a caller that must not be told
+  // "skipped" (a pressed Poll now) can wait for it and then run its own.
+  let cycleDone = Promise.resolve();
+  let counterDone = Promise.resolve();
 
   // Replaces the target list. Devices that disappeared from the config lose
   // their schedule state with them.
@@ -217,9 +221,18 @@ function createSnmpPoller({
   // "ifIndex 1" can be shown as "GigabitEthernet0/1" — the poll already read
   // that table, and re-reading it for the trap path would be a second walk of
   // the same data.
-  async function runCycle({ force = false, onResult = null } = {}) {
-    if (running) return { polled: 0, failed: 0, skipped: true };
+  async function runCycle({ force = false, onResult = null, waitIfRunning = false } = {}) {
+    // A timer tick that finds a cycle running skips — the next tick comes. A
+    // forced poll (Poll now) waits for it and then runs its own: the running
+    // cycle may predate the device it was pressed for, and "0 polled" with no
+    // reason is not an answer.
+    while (running) {
+      if (!waitIfRunning) return { polled: 0, failed: 0, skipped: true };
+      await cycleDone; // eslint-disable-line no-await-in-loop
+    }
     running = true;
+    let settle;
+    cycleDone = new Promise((resolve) => { settle = resolve; });
     try {
       const t = now();
       const batch = targets.filter((d) => force || due(d, t));
@@ -284,6 +297,7 @@ function createSnmpPoller({
       return { polled: devices.length, failed: errors.length };
     } finally {
       running = false;
+      settle();
     }
   }
 
@@ -330,10 +344,15 @@ function createSnmpPoller({
   // Never throws, and never holds results for a retry: a counter snapshot is
   // only meaningful next to the reading before it, and re-sending a stale one
   // later would have the server compute a rate over a gap that never happened.
-  async function runCounterCycle({ force = false } = {}) {
+  async function runCounterCycle({ force = false, waitIfRunning = false } = {}) {
     if (!submitCounters) return { polled: 0, failed: 0, skipped: true };
-    if (counterRunning) return { polled: 0, failed: 0, skipped: true };
+    while (counterRunning) {
+      if (!waitIfRunning) return { polled: 0, failed: 0, skipped: true };
+      await counterDone; // eslint-disable-line no-await-in-loop
+    }
     counterRunning = true;
+    let settle;
+    counterDone = new Promise((resolve) => { settle = resolve; });
     try {
       const t = now();
       const batch = targets.filter((d) => wantsCounters(d) && (force || counterDue(d, t)));
@@ -369,6 +388,7 @@ function createSnmpPoller({
       return { polled: devices.length, failed: errors.length };
     } finally {
       counterRunning = false;
+      settle();
     }
   }
 

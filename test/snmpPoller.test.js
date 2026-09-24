@@ -433,3 +433,25 @@ test('a v3 target with a user needs no community', async () => {
   assert.deepEqual(await p.runCycle(), { polled: 1, failed: 0 });
   assert.deepEqual(polls, [7]);
 });
+
+// Found end to end: two "Poll now" presses at the same moment — the second
+// found a cycle running and answered "0 of 2 polled" with no reason.
+test('a forced poll that finds a cycle running waits for it and runs its own; a timer tick still skips', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let calls = 0;
+  const p = createSnmpPoller({
+    submit: async () => {},
+    poll: async ({ device }) => { calls += 1; if (calls === 1) await gate; return RESULT(device.deviceId); },
+  });
+  p.setTargets([TARGET()]);
+
+  const first = p.runCycle({ force: true });
+  await new Promise((r) => setImmediate(r)); // the first cycle is now in flight
+  assert.deepEqual(await p.runCycle(), { polled: 0, failed: 0, skipped: true }, 'a tick skips, as before');
+  const second = p.runCycle({ force: true, waitIfRunning: true });
+  release();
+  assert.deepEqual(await first, { polled: 1, failed: 0 });
+  assert.deepEqual(await second, { polled: 1, failed: 0 }, 'the waiting poll ran its own cycle');
+  assert.equal(calls, 2);
+});

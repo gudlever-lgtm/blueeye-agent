@@ -1731,8 +1731,10 @@ function createAgentRuntime({
       if (fatal) return;
       // Both cycles, because "poll now" from the dashboard means the whole
       // device, not the half of it this command happened to be written for.
-      const r = await runSnmpCycle({ force: true });
-      const c = await runSnmpCounterCycle({ force: true });
+      // waitIfRunning: a cycle already in flight (a timer tick, or a second
+      // Poll now) is waited for, then this one runs — never "0 polled, skipped".
+      const r = await runSnmpCycle({ force: true, waitIfRunning: true });
+      const c = await runSnmpCounterCycle({ force: true, waitIfRunning: true });
       const requested = command && command.deviceId != null ? command.deviceId : null;
       const result = {
         type: 'command-result',
