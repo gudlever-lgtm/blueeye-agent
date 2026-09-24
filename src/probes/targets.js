@@ -4,6 +4,11 @@ const fs = require('fs');
 const net = require('net');
 
 const PROBE_TYPES = new Set(['ping', 'tcp', 'dns', 'traceroute']);
+// An interface name as a dhcp target: what `ip link` / Get-NetAdapter print.
+// No shell ever sees it (it is only a key into os.networkInterfaces()), but it
+// is still held to a plain shape so a config typo reads as "dropped", not as a
+// probe of an interface that cannot exist.
+const IFACE_RE = /^[A-Za-z0-9][A-Za-z0-9 _.:@()-]{0,63}$/;
 
 // Parses operator-configured probe targets. Accepts an array (of strings or
 // {type,host,port} objects) or a comma-separated string. Each entry is one of:
@@ -12,6 +17,8 @@ const PROBE_TYPES = new Set(['ping', 'tcp', 'dns', 'traceroute']);
 //   "tcp:host:443"       → tcp host:443
 //   "dns:example.com"    → dns example.com
 //   "host:443"           → tcp host:443 (host + numeric port, no type)
+//   "dhcp"               → DHCP test on the default-route interface
+//   "dhcp:eth0"          → DHCP test naming eth0's hardware address
 // IPv6 literals are supported — their colons are address characters, not
 // separators: "2606:4700::1111", "ping:2606:4700::1111", "[2606:4700::1111]",
 // "tcp:[2606:4700::1111]:443" and "tcp:2606:4700::1111:443" (port read from
@@ -26,6 +33,7 @@ function parseConfiguredTargets(value) {
 function normalizeOne(item) {
   if (typeof item === 'string') return parseOneSpec(item.trim());
   if (!item || typeof item !== 'object') return null;
+  if (String(item.type || '').toLowerCase() === 'dhcp') return dhcpSpec(item.iface || item.host || item.target || '');
   return parseOneSpec(`${item.type || 'ping'}:${item.host || item.target || ''}${item.port ? `:${item.port}` : ''}`);
 }
 
@@ -38,6 +46,8 @@ function splitBracketed(s) {
 
 function parseOneSpec(s) {
   if (!s) return null;
+  const dhcp = /^dhcp(?::(.*))?$/i.exec(s);
+  if (dhcp) return dhcpSpec(dhcp[1] || '');
   // A bare IPv6 literal — its colons are address chars, not separators.
   if (net.isIPv6(s)) return { type: 'ping', host: s };
   const parts = s.split(':');
@@ -87,6 +97,14 @@ function parseOneSpec(s) {
     spec.port = port;
   }
   return spec;
+}
+
+// A DHCP test is not aimed at a host: it broadcasts, and the only thing it can
+// be told is which interface to speak for. No interface = the default route's.
+function dhcpSpec(raw) {
+  const iface = String(raw || '').trim();
+  if (!iface) return { type: 'dhcp' };
+  return IFACE_RE.test(iface) ? { type: 'dhcp', iface } : null;
 }
 
 // Decodes the default-route gateway from the contents of /proc/net/route.
@@ -156,7 +174,7 @@ async function resolveProbeTargets({
   const seen = new Set();
   const out = [];
   for (const s of specs) {
-    const k = `${s.type}|${s.host}|${s.port || ''}`;
+    const k = `${s.type}|${s.host || s.iface || ''}|${s.port || ''}`;
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(s);

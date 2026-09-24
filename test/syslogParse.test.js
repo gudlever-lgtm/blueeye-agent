@@ -206,3 +206,14 @@ test('masking leaves ordinary text untouched and survives junk', () => {
   assert.equal(maskSyslogMessage(null), null);
   assert.equal(maskSyslogMessage(undefined), undefined);
 });
+
+test('an RFC 6587 octet-count frame sent over UDP is stripped, not a reason to drop the line', () => {
+  const line = '113 <188>1 2026-09-24T01:42:47.790Z vm app 42 ID47 - Interface Gi1/0/2 changed state to down';
+  const r = parseSyslogLine(line, { receivedAt: Date.UTC(2026, 8, 24) });
+  assert.ok(r, 'kept');
+  assert.equal(r.severity, 4);
+  assert.equal(r.host, 'vm');
+  // Only a frame directly followed by a PRI is stripped: a line that merely
+  // starts with a number is not a syslog line and is still refused.
+  assert.equal(parseSyslogLine('113 hello'), null);
+});

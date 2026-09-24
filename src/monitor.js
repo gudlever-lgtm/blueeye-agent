@@ -20,6 +20,11 @@ function collectorSampler(collector, logger, kind) {
   // collector's live receive/decode counters without draining them.
   sampler.kind = kind;
   sampler.stats = () => (typeof collector.stats === 'function' ? collector.stats() : null);
+  // sFlow counter readings the result size guard had to trim go back to the
+  // collector, so they are sent next interval (runtime.js, resultBudget.js).
+  if (typeof collector.requeueCounters === 'function') {
+    sampler.requeueCounters = (entries) => collector.requeueCounters(entries);
+  }
   return sampler;
 }
 

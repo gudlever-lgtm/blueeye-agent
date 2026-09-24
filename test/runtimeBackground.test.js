@@ -446,3 +446,43 @@ test('an LLDP reader that throws costs the field, never the report', async () =>
     await server.close();
   }
 });
+
+// -------------------------------------------- probe batch refused by the server
+// An older server answers 400 to a batch that holds one result type it does not
+// know. The rest of the cycle must still land — one refused result is not a
+// reason to lose every probe of the minute.
+test('a 400 on the scheduled probe batch resubmits one by one and drops only the refused result', async () => {
+  const server = await startFakeServer({ validTokens: ['valid'] });
+  const posted = [];
+  const fetchImpl = async (url, init) => {
+    if (String(url).endsWith('/agents/probe-results')) {
+      const body = JSON.parse(init.body);
+      posted.push(body.results.map((r) => r.type));
+      if (body.results.some((r) => r.type === 'newtype')) {
+        return new Response(JSON.stringify({ error: 'Validation failed' }), { status: 400, headers: { 'content-type': 'application/json' } });
+      }
+    }
+    return fetch(url, init);
+  };
+  const probeRunner = async (spec) => ({ type: spec.type, target: spec.host || spec.target || 'x', ok: true, rttMs: 1 });
+  const runtime = createAgentRuntime({
+    config: makeConfig(server, {
+      probeIntervalMs: 40, probeCount: 1, probeAutoGateway: false, probeAutoDns: false,
+      probeTargets: [{ type: 'ping', host: '192.0.2.1' }, { type: 'newtype', host: '192.0.2.2' }, { type: 'tcp', host: '192.0.2.3', port: 443 }],
+    }),
+    token: 'valid', agentId: 1, logger: silentLogger, hsflowdManager: noopHsflowd, collectLldp: noLldp,
+    fetchImpl, probeRunner,
+  });
+  try {
+    runtime.start();
+    const done = await withTimeout(onceEvent(runtime, 'scheduled-probes-submitted'), 4000, 'no probe submission');
+    assert.deepEqual(done.results.map((r) => r.type).sort(), ['ping', 'tcp']);
+    assert.deepEqual(done.refused.map((r) => r.type), ['newtype']);
+    assert.equal(posted[0].length, 3, 'the whole batch was tried first');
+    const landed = server.receivedProbeResults.flatMap((p) => p.body.results.map((r) => r.type)).sort();
+    assert.deepEqual(landed, ['ping', 'tcp']);
+  } finally {
+    runtime.stop();
+    await server.close();
+  }
+});

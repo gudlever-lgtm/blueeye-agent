@@ -12,6 +12,13 @@ const ETH_HDR = 14;
 const ETHERTYPE_IPV4 = 0x0800;
 const ETHERTYPE_IPV6 = 0x86dd;
 const ETHERTYPE_VLAN = 0x8100;
+const ETHERTYPE_QINQ = 0x88a8;
+
+function mac(buf, o) {
+  const parts = [];
+  for (let i = 0; i < 6; i += 1) parts.push(buf[o + i].toString(16).padStart(2, '0'));
+  return parts.join(':');
+}
 
 // Reads L4 ports for TCP(6)/UDP(17); other protocols get ports 0.
 function readPorts(buf, o, protocol, end) {
@@ -28,14 +35,30 @@ function decodeSampledHeader(header, frameLength) {
 
   let etherType = header.readUInt16BE(12);
   let l3 = ETH_HDR;
-  // Skip up to one VLAN tag.
-  if (etherType === ETHERTYPE_VLAN && header.length >= l3 + 4) {
+  // One 802.1Q tag (0x8100), or the outer tag of a QinQ pair (0x88a8): the
+  // VLAN id is the low 12 bits of the TCI. The tag is read, not just skipped —
+  // "which VLAN" is the first question about a sampled frame on a trunk.
+  // 0 (priority-only tag) and 4095 (reserved) are not VLANs.
+  let vlan = null;
+  if ((etherType === ETHERTYPE_VLAN || etherType === ETHERTYPE_QINQ) && header.length >= l3 + 4) {
+    const vid = header.readUInt16BE(l3) & 0x0fff;
+    if (vid >= 1 && vid <= 4094) vlan = vid;
     etherType = header.readUInt16BE(l3 + 2);
     l3 += 4;
+    // The inner tag of a QinQ frame: skipped, the outer (service) VLAN is kept.
+    if (etherType === ETHERTYPE_VLAN && header.length >= l3 + 4) {
+      etherType = header.readUInt16BE(l3 + 2);
+      l3 += 4;
+    }
   }
 
   const bytes = Number.isFinite(frameLength) && frameLength > 0 ? frameLength : header.length;
   const flow = { srcAddr: '0.0.0.0', dstAddr: '0.0.0.0', srcPort: 0, dstPort: 0, protocol: 0, bytes, packets: 1 };
+  // Layer-2 metadata: the frame's own MAC addresses and VLAN. Addresses only,
+  // never payload — the same class of data as the IP 5-tuple.
+  flow.dstMac = mac(header, 0);
+  flow.srcMac = mac(header, 6);
+  if (vlan != null) flow.vlan = vlan;
 
   if (etherType === ETHERTYPE_IPV4) {
     if (header.length < l3 + 20) return null;

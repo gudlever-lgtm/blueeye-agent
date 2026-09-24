@@ -44,7 +44,24 @@ function extractInterface(text) {
 // exact) and/or the MESSAGE (portable), and an optional `up` flag so the
 // down/up pair of one mnemonic is one rule.
 const RULES = [
+  // --- Junos event IDs --------------------------------------------------------
+  // Junos puts the PROCESS in the tag (mib2d, rpd, mgd) and the event ID first
+  // in the message, so these match the message start. Cited lines in
+  // test/fixtures/syslog/vendor-documented.txt.
+  { type: 'link.down', message: /^SNMP_TRAP_LINK_DOWN\b/ },
+  { type: 'link.up', message: /^SNMP_TRAP_LINK_UP\b/ },
+  { type: 'ospf.adjacency_lost', message: /^RPD_OSPF_NBRDOWN\b/ },
+  { type: 'ospf.adjacency_up', message: /^RPD_OSPF_NBRUP\b/ },
+  { type: 'bgp.session_up', message: /^RPD_BGP_NEIGHBOR_STATE_CHANGED\b.*\bto Established\b/ },
+  { type: 'bgp.session_down', message: /^RPD_BGP_NEIGHBOR_STATE_CHANGED\b.*\bfrom Established to\b/ },
+  { type: 'config.changed', message: /^UI_COMMIT_COMPLETED\b/ },
+
   // --- physical link -------------------------------------------------------
+  // IOS %LINK-5-CHANGED is the ADMIN state change ("changed state to
+  // administratively down" after a shutdown) — the same event a linkDown trap
+  // with ifAdminStatus=down becomes, so the same type.
+  { type: 'link.admin_down', tag: /^%?LINK-\d-CHANGED/i, message: /administratively down/i },
+  { type: 'link.up', tag: /^%?LINK-\d-CHANGED/i, message: /changed state to up/i },
   {
     type: 'link.down',
     tag: /^%?(LINK-\d-UPDOWN|LINEPROTO-\d-UPDOWN|IFNET-\d-IF_DOWN)/i,
@@ -55,8 +72,6 @@ const RULES = [
     tag: /^%?(LINK-\d-UPDOWN|LINEPROTO-\d-UPDOWN|IFNET-\d-IF_UP)/i,
     message: /changed state to up|is up/i,
   },
-  { type: 'link.down', message: /\b(?:link|interface|port)\b[^.]{0,40}\b(?:went |is |changed to )?down\b/i },
-  { type: 'link.up', message: /\b(?:link|interface|port)\b[^.]{0,40}\b(?:came |is |changed to )?up\b/i },
 
   // --- layer 2 -------------------------------------------------------------
   { type: 'stp.loop_detected', tag: /^%?(SPANTREE-\d-LOOPGUARD|SPANTREE-\d-BLOCK)/i },
@@ -78,6 +93,20 @@ const RULES = [
   { type: 'bgp.session_up', tag: /^%?BGP/i, message: /\b(?:up|Established)\b/i },
   { type: 'hsrp.state_changed', tag: /^%?(HSRP|VRRP|STANDBY)/i },
 
+  // --- generic link wording ---------------------------------------------------
+  // Message-only, so BELOW every tag-anchored rule that can mention an
+  // interface: IOS reports an OSPF loss as "%OSPF-5-ADJCHG: ... from FULL to
+  // DOWN, Neighbor Down: Interface down or detached", which these would
+  // otherwise call a link.down (seen in Cisco's own lab output, see
+  // test/fixtures/syslog/vendor-documented.txt).
+  //
+  // The window is 64 characters, not 40: "Interface GigabitEthernet1/0/11,
+  // changed state to down" puts 41 between the two words and missed. It stays
+  // bounded and still stops at a full stop, so "down"/"up" from the NEXT
+  // sentence is never pulled in.
+  { type: 'link.down', message: /\b(?:link|interface|port)\b[^.]{0,64}\b(?:went |is |changed to )?down\b/i },
+  { type: 'link.up', message: /\b(?:link|interface|port)\b[^.]{0,64}\b(?:came |is |changed to )?up\b/i },
+
   // --- addressing ----------------------------------------------------------
   { type: 'dhcp.pool_exhausted', message: /(?:dhcp|pool)[^.]{0,30}(?:exhaust|no (?:free|available) (?:address|lease))/i },
   { type: 'dhcp.conflict', message: /(?:address|ip) conflict|duplicate (?:ip )?address/i },
@@ -86,7 +115,9 @@ const RULES = [
   // --- security / access ---------------------------------------------------
   { type: 'auth.failure', tag: /^%?(SEC_LOGIN-\d-LOGIN_FAILED|AAA-\d-)/i },
   { type: 'auth.failure', message: /authentication failure|failed password|login failed|invalid user/i },
-  { type: 'acl.denied', tag: /^%?SEC-\d-IPACCESSLOG/i },
+  // IPACCESSLOG[P|DP|NP|RP] logs PERMITTED packets too ("list X permitted tcp
+  // ..."): only a line that says denied is a denial.
+  { type: 'acl.denied', tag: /^%?SEC-\d-IPACCESSLOG/i, message: /\bdenied\b/i },
   { type: 'vpn.negotiation_failed', message: /\b(?:ike|isakmp|ipsec)\b[^.]{0,40}\b(?:fail|error|no proposal|timeout)/i },
 
   // --- device health -------------------------------------------------------
@@ -105,6 +136,21 @@ const RULES = [
 
 const UNCLASSIFIED = 'syslog.raw';
 
+// A Cisco-style "%FACILITY-SEVERITY-MNEMONIC" (IOS, IOS-XE, NX-OS, ASA). Strict
+// on purpose — the leading "%", a digit severity, a colon after it — so the
+// lift below can only ever fire on text that names its own event.
+const CISCO_MNEMONIC_TAG_RE = /^%[A-Z0-9_]+(?:-[A-Z0-9_]+)*-[0-7]-[A-Z0-9_]+$/i;
+// The same mnemonic at the START of the message, optionally behind what IOS
+// prepends when the header was not parsed as such: a sequence number ("52: "),
+// an origin hostname ("sw-core-1: ") and a "*Sep 24 08:21:50.123:" stamp.
+const CISCO_MNEMONIC_MSG_RE = new RegExp(
+  '^(?:\\d{1,10}:\\s*)?' +
+  '(?:[A-Za-z0-9][A-Za-z0-9._-]{0,62}:\\s+)?' +
+  '(?:[*.]?[A-Za-z]{3}\\s+\\d{1,2}\\s+(?:\\d{4}\\s+)?\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:\\s+[A-Z]{2,5})?:\\s*)?' +
+  '(%[A-Z0-9_]+(?:-[A-Z0-9_]+)*-[0-7]-[A-Z0-9_]+):\\s?(.*)$',
+  's',
+);
+
 // Classifies one parsed line. Returns { eventType, ifname }.
 //
 // `ifname` is extracted for EVERY line, classified or not: a raw line that
@@ -114,8 +160,21 @@ function classifySyslog(parsed) {
   if (!parsed || typeof parsed !== 'object') {
     return { eventType: UNCLASSIFIED, ifname: null };
   }
-  const tag = typeof parsed.tag === 'string' ? parsed.tag : '';
-  const message = typeof parsed.message === 'string' ? parsed.message : '';
+  let tag = typeof parsed.tag === 'string' ? parsed.tag : '';
+  let message = typeof parsed.message === 'string' ? parsed.message : '';
+  // The Cisco mnemonic is not always in the TAG position. RFC 5424 puts the
+  // APP-NAME there ("sw-core-1 switch - - - %LINK-3-UPDOWN: …"), IOS with
+  // `logging origin-id hostname` and no timestamps puts the hostname there,
+  // and a blank tag leaves nothing — in all three the mnemonic opens the
+  // MESSAGE. When the tag is not itself a mnemonic and the message starts with
+  // one, the mnemonic is the tag for classification and the rest the message.
+  if (!CISCO_MNEMONIC_TAG_RE.test(tag)) {
+    const lifted = CISCO_MNEMONIC_MSG_RE.exec(message);
+    if (lifted) {
+      tag = lifted[1];
+      message = lifted[2];
+    }
+  }
 
   for (const rule of RULES) {
     if (rule.tag && !rule.tag.test(tag)) continue;

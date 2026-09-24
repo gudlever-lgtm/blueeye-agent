@@ -50,14 +50,26 @@ function splitHostPortDot(token) {
   return { addr: s.slice(0, i), port };
 }
 
-// `ss -Htan state established`: State Recv-Q Send-Q Local Peer.
+// `ss -Htan state established`: Recv-Q Send-Q Local Peer — ss OMITS the State
+// column when the filter names exactly one state (iproute2 6.1, verified against
+// the real command; test/fixtures/ss-Htan-state-established.txt). An unfiltered
+// `ss -Htan`, or one naming several states, prints State Recv-Q Send-Q Local
+// Peer. Both shapes are read: a line that starts with the numeric Recv-Q has no
+// State column, anything else does. The old parser read only the second shape,
+// so on the command it actually ran every line was dropped and the netstat
+// fallback (often not installed) was the only thing standing between a host
+// and an empty connection table.
 function parseSs(text) {
   const out = [];
   for (const line of String(text || '').split('\n')) {
     const t = line.trim().split(/\s+/);
-    if (t.length < 5) continue;
-    const local = splitHostPortColon(t[3]);
-    const peer = splitHostPortColon(t[4]);
+    const off = /^\d+$/.test(t[0] || '') ? 0 : 1;
+    if (t.length < 4 + off) continue;
+    // With a State column, keep only established rows (the unfiltered shape
+    // also lists LISTEN/TIME-WAIT, which are not a dependency).
+    if (off === 1 && !/^ESTAB/i.test(t[0])) continue;
+    const local = splitHostPortColon(t[2 + off]);
+    const peer = splitHostPortColon(t[3 + off]);
     if (local && peer) out.push({ localIp: local.addr, localPort: local.port, remoteIp: peer.addr, remotePort: peer.port });
   }
   return out;

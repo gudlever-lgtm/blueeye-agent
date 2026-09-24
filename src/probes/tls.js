@@ -31,12 +31,21 @@ async function tlsProbe(spec, { connect = tls.connect, now = () => Date.now() } 
   if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
     return fail('tls', `${(spec && (spec.host || spec.target)) || ''}:${(spec && spec.port) ?? ''}`, 'invalid host/port');
   }
-  const target = `${host}:${port}`;
   const timeoutMs = clampInt(spec && spec.timeoutMs, 10000, 100, 60000);
   // SNI: which name to ask for. Defaults to the host, which is what a client
   // does; an explicit servername is how you check the certificate a particular
   // virtual host presents on a shared address.
   const servername = safeHost(spec && spec.servername) || (isIpLiteral(host) ? undefined : host);
+  // The IDENTITY of the result. Two probes of one address that ask for two
+  // different names are two questions — one virtual host can be fine while
+  // the next serves the wrong certificate — and with `host:port` alone their
+  // results shared a key on the server, so each overwrote the other's verdict
+  // and finding. An explicit name that differs from the host is therefore
+  // part of the target (`name@host:port`); the ordinary probe, whose SNI IS
+  // its host, keeps the plain `host:port` it always had.
+  const target = servername && servername.toLowerCase() !== host.toLowerCase()
+    ? `${servername}@${host}:${port}`
+    : `${host}:${port}`;
 
   const t0 = now();
   let result;
@@ -57,11 +66,19 @@ async function tlsProbe(spec, { connect = tls.connect, now = () => Date.now() } 
   const expiryDays = Number.isFinite(validTo) ? round((validTo - now()) / 86400000) : null;
   const expired = expiryDays != null && expiryDays <= 0;
   const notYetValid = Number.isFinite(validFrom) && validFrom > now();
-  // The chain's own reason, kept verbatim: Node's codes name the fault
-  // precisely (CERT_HAS_EXPIRED, SELF_SIGNED_CERT_IN_CHAIN,
+  // Node's own reason, kept verbatim: its codes name the fault precisely
+  // (CERT_HAS_EXPIRED, SELF_SIGNED_CERT_IN_CHAIN,
   // UNABLE_TO_VERIFY_LEAF_SIGNATURE, ERR_TLS_CERT_ALTNAME_INVALID) and a
   // paraphrase would lose that.
-  const trustError = authorized ? null : String(authorizationError || 'not authorized');
+  const authError = authorized ? null : String(authorizationError || 'not authorized');
+  // `authorized` is ONE flag for TWO checks. Node verifies the chain first and
+  // only then the name, so ERR_TLS_CERT_ALTNAME_INVALID means the chain PASSED
+  // and the name did not. Reading it as "not trusted" reported a certificate
+  // for the wrong virtual host as an untrusted chain — the wrong fix (install
+  // an intermediate) for a fault whose fix is to reissue or re-point the name.
+  const nameRejected = !authorized && isNameError(authorizationError);
+  const chainTrusted = Boolean(authorized) || nameRejected;
+  const trustError = chainTrusted ? null : authError;
   const names = altNames(cert);
   // A hostname mismatch is checked separately from trust, because a chain can
   // be perfectly valid and still be for somebody else's name.
@@ -69,11 +86,17 @@ async function tlsProbe(spec, { connect = tls.connect, now = () => Date.now() } 
   // The name checked is the one that was ASKED for: the SNI name when there is
   // one — which is the point of pointing this probe at an IP with an explicit
   // servername — and otherwise the host. An IP with no servername has no name
-  // to check, and reports `null` rather than a verdict it did not reach.
+  // to check, and reports `null` rather than a verdict it did not reach (node
+  // compares the bare IP with the certificate's IP entries, which almost no
+  // certificate carries — that is not a fault in the certificate).
   const checkName = servername || (isIpLiteral(host) ? null : host);
-  const nameMatches = checkName ? matchesHost(checkName, cert, names) : null;
+  let nameMatches = checkName ? matchesHost(checkName, cert, names) : null;
+  // Node checked this same name and said no: its verdict stands over ours
+  // (it knows forms this matcher does not, such as a CN-only certificate
+  // alongside IP-only SANs).
+  if (checkName && nameRejected) nameMatches = false;
 
-  const ok = Boolean(authorized) && !expired && !notYetValid && nameMatches !== false;
+  const ok = chainTrusted && !expired && !notYetValid && nameMatches !== false;
   const detail = describe({ expiryDays, expired, notYetValid, trustError, nameMatches, host: checkName || host, cert, protocol });
 
   return {
@@ -95,9 +118,17 @@ async function tlsProbe(spec, { connect = tls.connect, now = () => Date.now() } 
     tls: {
       protocol: protocol || null,
       cipher: (cipher && cipher.name) || null,
+      // Kept as node reports them, for servers that read only these two: a
+      // name mismatch is still `authorized: false` with its own code.
       authorized: Boolean(authorized),
-      authorizationError: trustError,
+      authorizationError: authError,
+      // The two checks behind `authorized`, apart (agent 0.40+): did the chain
+      // validate, and is the certificate for the name asked for.
+      chainTrusted,
       hostnameMatches: nameMatches,
+      // The SNI name sent (null for an IP probed without one) — what a
+      // mismatch finding names.
+      servername: servername || null,
       expiryDays,
       expired,
       notYetValid,
@@ -210,6 +241,9 @@ function chainLength(cert) {
 }
 
 const isSelfSigned = (cert) => Boolean(cert && cert.issuerCertificate === cert);
+// Node's hostname-check failure: the code on current releases, the message
+// text on the oldest ones.
+const isNameError = (e) => /ERR_TLS_CERT_ALTNAME_INVALID|does not match certificate's altnames/i.test(String(e || ''));
 const isIpLiteral = (h) => require('net').isIP(String(h || '')) !== 0;
 
 module.exports = { tlsProbe, matchName };

@@ -3,6 +3,7 @@
 const { execFile } = require('child_process');
 const { round, safeHost } = require('./stats');
 const { findAddress, findAllAddresses, resolveFamily, tracerouteCommands, TRACE_WAIT_MS } = require('./ipFamily');
+const { nameHops } = require('./hopNames');
 
 // Path probe via the system `traceroute` (Linux/macOS) / `tracert` (Windows).
 // MTR-style: sends several probes per hop (`-q queries`) so every hop carries not
@@ -12,6 +13,9 @@ const { findAddress, findAllAddresses, resolveFamily, tracerouteCommands, TRACE_
 // `ip` is the first router that answered (the historical field); `ips` is
 // every DISTINCT router that answered on that hop, in order — more than one
 // means ECMP / load-balanced paths, which a single `ip` silently hid.
+// `hostname` (only on public hops that have one) is the router's PTR name,
+// looked up after the trace — see [`hopNames`](./hopNames.js). The server reads
+// the city out of it to place the hop on the map.
 //
 // IPv6 is traced by the same code: which binary and flags to use lives in
 // [`ipFamily`](./ipFamily.js), and a literal IPv6 target selects it on its own,
@@ -21,8 +25,9 @@ const { findAddress, findAllAddresses, resolveFamily, tracerouteCommands, TRACE_
 // its line, so the server can draw the path while the trace is still running.
 // The returned result is unchanged and stays the record.
 //
-// `exec`/`platform` are injectable for tests.
-async function traceroute(spec, { exec = execFile, platform = process.platform, onHop = null } = {}) {
+// `exec`/`platform`/`reverse` are injectable for tests (`reverse: null` skips
+// the name lookups).
+async function traceroute(spec, { exec = execFile, platform = process.platform, onHop = null, reverse } = {}) {
   const rawHost = String((spec && (spec.host || spec.target)) || '').trim();
   const host = safeHost(rawHost);
   if (!host) return { type: 'traceroute', target: rawHost, ok: false, error: 'invalid host', hops: [] };
@@ -53,6 +58,7 @@ async function traceroute(spec, { exec = execFile, platform = process.platform, 
       : String(run.err.message || 'failed').split('\n')[0].slice(0, 120);
     return { ...base, ok: false, hopCount: 0, hops: [], error: reason };
   }
+  await nameHops(hops, reverse === undefined ? {} : { reverse });
   return { ...base, ok: hops.length > 0, hopCount: hops.length, hops };
 }
 

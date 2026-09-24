@@ -39,7 +39,7 @@ function chunkedExec(out, chunks = 7) {
 
 test('traceroute calls onHop once per hop, in order, even when lines arrive split', async () => {
   const seen = [];
-  const res = await traceroute({ host: 'us.cnn.com' }, { exec: chunkedExec(LINUX_OUT), platform: 'linux', onHop: (h) => seen.push(h) });
+  const res = await traceroute({ host: 'us.cnn.com' }, { reverse: null, exec: chunkedExec(LINUX_OUT), platform: 'linux', onHop: (h) => seen.push(h) });
   assert.deepEqual(seen.map((h) => h.hop), [1, 2, 3]);
   assert.equal(seen[1].ip, null);
   assert.equal(seen[1].lossPct, 100);
@@ -55,12 +55,12 @@ test('Windows CRLF output streams the same hops', async () => {
     '  2    12 ms    11 ms    13 ms  62.61.1.1', '', 'Trace complete.', '',
   ].join('\r\n');
   const seen = [];
-  await traceroute({ host: '151.101.1.67' }, { exec: chunkedExec(out, 5), platform: 'win32', onHop: (h) => seen.push(h) });
+  await traceroute({ host: '151.101.1.67' }, { reverse: null, exec: chunkedExec(out, 5), platform: 'win32', onHop: (h) => seen.push(h) });
   assert.deepEqual(seen.map((h) => [h.hop, h.ip]), [[1, '192.168.1.1'], [2, '62.61.1.1']]);
 });
 
 test('a listener that throws does not break the trace', async () => {
-  const res = await traceroute({ host: 'us.cnn.com' }, { exec: chunkedExec(LINUX_OUT), platform: 'linux', onHop: () => { throw new Error('socket gone'); } });
+  const res = await traceroute({ host: 'us.cnn.com' }, { reverse: null, exec: chunkedExec(LINUX_OUT), platform: 'linux', onHop: () => { throw new Error('socket gone'); } });
   assert.equal(res.ok, true);
   assert.equal(res.hops.length, 3);
 });
@@ -68,7 +68,7 @@ test('a listener that throws does not break the trace', async () => {
 test('an exec without a stdout stream (the old fakes) still works, just without streaming', async () => {
   const exec = (_b, _a, _o, cb) => { setImmediate(() => cb(null, LINUX_OUT, '')); return undefined; };
   const seen = [];
-  const res = await traceroute({ host: 'us.cnn.com' }, { exec, platform: 'linux', onHop: (h) => seen.push(h) });
+  const res = await traceroute({ host: 'us.cnn.com' }, { reverse: null, exec, platform: 'linux', onHop: (h) => seen.push(h) });
   assert.equal(res.hops.length, 3);
   assert.equal(seen.length, 0);
   assert.doesNotThrow(() => streamHops(null, 3, () => {}));
@@ -76,7 +76,7 @@ test('an exec without a stdout stream (the old fakes) still works, just without 
 
 test('tcptraceroute streams hops too', async () => {
   const seen = [];
-  const res = await tcptraceroute({ host: 'us.cnn.com', port: 443 }, { exec: chunkedExec(LINUX_OUT), onHop: (h) => seen.push(h) });
+  const res = await tcptraceroute({ host: 'us.cnn.com', port: 443 }, { reverse: null, exec: chunkedExec(LINUX_OUT), onHop: (h) => seen.push(h) });
   assert.equal(res.target, 'us.cnn.com:443');
   assert.deepEqual(seen.map((h) => h.hop), [1, 2, 3]);
 });
@@ -104,7 +104,7 @@ test('an on-demand traceroute sends a trace_hop frame per hop, then submits the 
   // the traceroute runner, which streams through onHop.
   const probeRunner = async (spec, deps = {}) => ({
     ts: new Date().toISOString(),
-    ...(await traceroute(spec, { exec: chunkedExec(LINUX_OUT), platform: 'linux', ...(deps.traceroute || {}) })),
+    ...(await traceroute(spec, { reverse: null, exec: chunkedExec(LINUX_OUT), platform: 'linux', ...(deps.traceroute || {}) })),
   });
   const runtime = createAgentRuntime({
     config: makeConfig(server), token: 'valid', agentId: 1, logger: silentLogger, hsflowdManager: noopHsflowd, probeRunner,
@@ -164,7 +164,7 @@ const ECMP_OUT = [
 ].join('\n');
 
 test('a hop answered by several routers keeps ip = the first and lists every distinct one in ips', async () => {
-  const res = await traceroute({ host: '93.184.216.34' }, { exec: chunkedExec(ECMP_OUT), platform: 'linux' });
+  const res = await traceroute({ host: '93.184.216.34' }, { reverse: null, exec: chunkedExec(ECMP_OUT), platform: 'linux' });
   assert.equal(res.hops.length, 6);
   const [h1, h2, h3, h4, h5, h6] = res.hops;
   assert.deepEqual(h1.ips, ['192.168.1.1']);
@@ -184,7 +184,7 @@ test('a hop answered by several routers keeps ip = the first and lists every dis
 });
 
 test('tcptraceroute hops carry ips too (same parser)', async () => {
-  const res = await tcptraceroute({ host: '93.184.216.34', port: 443 }, { exec: chunkedExec(ECMP_OUT) });
+  const res = await tcptraceroute({ host: '93.184.216.34', port: 443 }, { reverse: null, exec: chunkedExec(ECMP_OUT) });
   assert.deepEqual(res.hops[1].ips, ['10.1.0.1', '10.2.0.1']);
   assert.equal(res.hops[1].ip, '10.1.0.1');
 });
@@ -193,7 +193,7 @@ test('the live trace_hop frames carry ips as well', async () => {
   const server = await startFakeServer({ validTokens: ['valid'] });
   const probeRunner = async (spec, deps = {}) => ({
     ts: new Date().toISOString(),
-    ...(await traceroute(spec, { exec: chunkedExec(ECMP_OUT), platform: 'linux', ...(deps.traceroute || {}) })),
+    ...(await traceroute(spec, { reverse: null, exec: chunkedExec(ECMP_OUT), platform: 'linux', ...(deps.traceroute || {}) })),
   });
   const runtime = createAgentRuntime({
     config: makeConfig(server), token: 'valid', agentId: 1, logger: silentLogger, hsflowdManager: noopHsflowd, probeRunner,

@@ -217,7 +217,10 @@ test('LLDP neighbours are resolved to the local interface', () => {
     lldpPortDesc: { '0.3.1': 'uplink to core' },
   }));
   assert.equal(r.neighbours.length, 1);
+  // `protocol` since CDP joined LLDP in the same list (the server keys the
+  // two apart); this test pinned the shape before that and was updated for it.
   assert.deepEqual(r.neighbours[0], {
+    protocol: 'lldp',
     localPort: 3,
     localIfIndex: 10003,
     localIfName: 'GigabitEthernet0/24',

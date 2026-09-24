@@ -53,10 +53,15 @@ function startFakeServer(options = {}) {
   const receivedSnmpTopology = [];
   const receivedSnmpCounters = [];
   const receivedSpeedtests = [];
-  const monitorConfig = options.monitorConfig || { source: 'proc' };
+  // Mutable (setMonitorConfig/setSnmpTargets) so a test can change the
+  // assignment under a RUNNING agent, the way an operator does.
+  let monitorConfig = options.monitorConfig || { source: 'proc' };
   // The switches the server has assigned to this agent to poll. Absent by
   // default, which is what an older server looks like to a newer agent.
-  const snmpTargets = options.snmpTargets || null;
+  let snmpTargets = options.snmpTargets || null;
+  // GET /agents/me/config calls seen; configDelayMs holds each answer back.
+  let configFetches = 0;
+  let configDelayMs = 0;
   const sockets = new Set();
 
   // Agent -> server WebSocket frames (acks, heartbeats), so tests can assert the
@@ -145,10 +150,14 @@ function startFakeServer(options = {}) {
         res.end(JSON.stringify({ error: 'Invalid agent token' }));
         return;
       }
-      res.writeHead(200, { 'content-type': 'application/json' });
+      configFetches += 1;
       const body = { agentId: issuedAgentId, monitorConfig };
       if (snmpTargets) body.snmpTargets = snmpTargets;
-      res.end(JSON.stringify(body));
+      const answer = () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(body));
+      };
+      if (configDelayMs > 0) setTimeout(answer, configDelayMs); else answer();
       return;
     }
 
@@ -359,6 +368,10 @@ function startFakeServer(options = {}) {
         receivedWsMessages,
         waitForWsMessage,
         addValidToken: (t) => validTokens.add(t),
+        setMonitorConfig: (mc) => { monitorConfig = mc; },
+        setSnmpTargets: (list) => { snmpTargets = list; },
+        setConfigDelayMs: (ms) => { configDelayMs = ms; },
+        configFetchCount: () => configFetches,
         revokeAllTokens: () => validTokens.clear(),
         close: () =>
           new Promise((done) => {

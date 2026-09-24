@@ -1,0 +1,124 @@
+# Vendor-published syslog text. Every message below is copied character-exact
+# from a source the VENDOR publishes, cited in the comment above it. Read by
+# test/syslogRealLines.test.js (same "# expect:" format as real-captured.txt;
+# receivedAt 2026-09-24T02:00:00Z).
+#
+# The vendor documentation sites themselves (cisco.com, juniper.net,
+# arubanetworking.hpe.com, help.mikrotik.com) were NOT reachable from the
+# capture sandbox (egress proxy), so the sources are the vendors' own GitHub
+# organisations:
+#
+#   [C1] CiscoDevNet/python_code_samples_network @ fb514124e3ab70acfbf6c7aa97bebe68abbe911a
+#        PortFlap_email_alert/sample_log_file.txt ("sh log" of a Catalyst switch)
+#        MIT licence, (c) 2019 Cisco Systems, Inc.
+#   [C2] CiscoDevNet/cml-community @ d9bf15faa04466808aaa3164d884b98b2f8402f2
+#        lab-topologies/ccna-prep/**.yaml — IOS/IOSv-L2 console output in Cisco's
+#        CCNA Prep lab guides. BSD 3-Clause, (c) 2020 Cisco Systems, Inc.
+#   [J1] Mist-Automation-Programmability/mist_webhook_translator @ 663fa43ee4a11e081915b9348a2efab11108e827
+#        src/mist/device_events.json — Junos syslog texts in Juniper Mist's
+#        sample device-event webhooks. MIT licence.
+#
+# Cisco: the sources are console / "show logging" lines, which carry no PRI.
+# Each line here is "<PRI>" + the cited text, the PRI being what IOS sends by
+# default: facility local7 (23) with the severity digit of the mnemonic, i.e.
+# 184 + severity. Nothing after the PRI is changed.
+#
+# Juniper: [J1] carries the MESSAGE only. The header ("<PRI>Mmm dd hh:mm:ss
+# host process[pid]: ") is CONSTRUCTED in the Junos BSD layout; only the text
+# after it is cited.
+#
+# HPE/Aruba and MikroTik: no vendor-published source with exact line text was
+# reachable, so none are included (see test/fixtures/syslog/README.md).
+#
+# ---- Cisco IOS ------------------------------------------------------------------
+# [C1] line 29 — `service timestamps log datetime year` stamp
+# expect: format=rfc3164 facility=23 severity=5 tag=%LINEPROTO-5-UPDOWN time=2018-04-19T18:00:06.000Z eventType=link.down ifname=GigabitEthernet1/0/5
+<189>*Apr 19 2018 18:00:06: %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet1/0/5, changed state to down
+# [C1] line 30
+# expect: format=rfc3164 facility=23 severity=3 tag=%LINK-3-UPDOWN time=2018-04-19T18:00:07.000Z eventType=link.down ifname=GigabitEthernet1/0/5
+<187>*Apr 19 2018 18:00:07: %LINK-3-UPDOWN: Interface GigabitEthernet1/0/5, changed state to down
+# [C2] s2e6/CCNA_Prep_2025_S2E6_Syslog.yaml line 847. An administrative shutdown:
+# %LINK-5-CHANGED is the admin state change after a shutdown: link.admin_down, as the trap path names it.
+# expect: format=rfc3164 severity=5 tag=%LINK-5-CHANGED time=2026-04-08T18:58:53.745Z eventType=link.admin_down ifname=Ethernet0/0
+<189>Apr  8 18:58:53.745: %LINK-5-CHANGED: Interface Ethernet0/0, changed state to administratively down
+# [C2] s2e6/CCNA_Prep_2025_S2E6_Syslog.yaml line 850
+# expect: format=rfc3164 severity=3 tag=%LINK-3-UPDOWN eventType=link.up ifname=Ethernet0/0
+<187>Apr  8 18:58:57.425: %LINK-3-UPDOWN: Interface Ethernet0/0, changed state to up
+# [C2] s2e6/CCNA_Prep_2025_S2E6_Syslog.yaml line 852
+# expect: format=rfc3164 severity=5 tag=%LINEPROTO-5-UPDOWN eventType=link.up ifname=Ethernet0/0
+<189>Apr  8 18:58:58.425: %LINEPROTO-5-UPDOWN: Line protocol on Interface Ethernet0/0, changed state to up
+# [C2] s2e6/CCNA_Prep_2025_S2E6_Syslog.yaml line 854 — a DHCP client lease, not a fault
+# expect: format=rfc3164 severity=6 tag=%DHCP-6-ADDRESS_ASSIGN eventType=syslog.raw ifname=Ethernet0/0 keep=192.168.255.81
+<190>Apr  8 18:59:02.567: %DHCP-6-ADDRESS_ASSIGN: Interface Ethernet0/0 assigned DHCP address 192.168.255.81, mask 255.255.255.0, hostname rtr01
+# [C2] s3e4/CCNA_Prep_2025_S3E4_AAA.yaml line 469
+# expect: format=rfc3164 severity=5 tag=%SYS-5-CONFIG_I time=2025-11-21T04:08:52.712Z eventType=config.changed
+<189>*Nov 21 04:08:52.712: %SYS-5-CONFIG_I: Configured from console by console
+# [C2] s3e4/CCNA_Prep_2025_S3E4_AAA.yaml line 482 — a SUCCESSFUL login is not an auth failure
+# expect: format=rfc3164 severity=5 tag=%SEC_LOGIN-5-LOGIN_SUCCESS eventType=syslog.raw
+<189>*Nov 21 04:08:57.578: %SEC_LOGIN-5-LOGIN_SUCCESS: Login Success [user: ] [Source: LOCAL] [localport: 0] at 04:08:57 UTC Fri Nov 21 2025
+# [C2] s3e1/CCNA_Prep_S03E01_-_Layer_2_Security.yaml line 1499
+# expect: format=rfc3164 severity=2 tag=%PORT_SECURITY-2-PSECURE_VIOLATION eventType=port.security_violation ifname=GigabitEthernet0/2
+<186>*Oct 17 18:59:46.342: %PORT_SECURITY-2-PSECURE_VIOLATION: Security violation occurred, caused by MAC address 5254.0022.2200 on port GigabitEthernet0/2.
+# [C2] s3e1/CCNA_Prep_S03E01_-_Layer_2_Security.yaml line 1515
+# expect: format=rfc3164 severity=4 tag=%PM-4-ERR_DISABLE eventType=port.err_disabled ifname=Gi0/3
+<188>*Oct 17 19:09:42.050: %PM-4-ERR_DISABLE: psecure-violation error detected on Gi0/3, putting Gi0/3 in err-disable state
+# [C2] s3e1/CCNA_Prep_S03E01_-_Layer_2_Security.yaml line 1765
+# expect: format=rfc3164 severity=5 tag=%DHCP_SNOOPING-5-DHCP_SNOOPING_UNTRUSTED_PORT eventType=syslog.raw
+<189>*Oct 27 14:09:31.405: %DHCP_SNOOPING-5-DHCP_SNOOPING_UNTRUSTED_PORT: DHCP_SNOOPING drop message on untrusted port, message type: DHCPOFFER, MAC sa: 5254.00e5.8f80
+# [C2] s1e4/CCNA_Prep_2024_S1E4_Static_Routing.yaml line 2338
+# expect: format=rfc3164 severity=5 tag=%OSPF-5-ADJCHG eventType=ospf.adjacency_lost ifname=Ethernet1/0 keep=2.2.2.2
+<189>*Oct  9 15:29:29.978: %OSPF-5-ADJCHG: Process 1, Nbr 2.2.2.2 on Ethernet1/0 from FULL to DOWN, Neighbor Down: Dead timer expired
+# [C2] s1e4/CCNA_Prep_2024_S1E4_Static_Routing.yaml line 2675 — says "Interface down",
+# and is still an OSPF adjacency loss, not a link.down
+# expect: format=rfc3164 severity=5 tag=%OSPF-5-ADJCHG eventType=ospf.adjacency_lost ifname=Ethernet0/0
+<189>*Oct  9 00:03:27.706: %OSPF-5-ADJCHG: Process 100, Nbr 0.0.0.2 on Ethernet0/0 from FULL to DOWN, Neighbor Down: Interface down or detached
+# [C2] s1e5/CCNA_Prep_2024_S1E5_Conquering_OSPF.yaml line 950
+# expect: format=rfc3164 severity=5 tag=%OSPF-5-ADJCHG eventType=ospf.adjacency_up ifname=Ethernet0/2
+<189>*Oct 18 06:04:22.574: %OSPF-5-ADJCHG: Process 1, Nbr 192.168.199.1 on Ethernet0/2 from LOADING to FULL, Loading Done
+# [C2] s3e3/CCNA_Prep_2025_S3E3_Advanced_ACL_Exploration.yaml line 3911 — ".": clock not
+# synchronised. A PERMITTED packet: not an acl.denied.
+# expect: format=rfc3164 severity=6 tag=%SEC-6-IPACCESSLOGP time=2025-11-18T02:14:47.898Z eventType=syslog.raw keep=192.168.0.17(58020)
+<190>.Nov 18 02:14:47.898: %SEC-6-IPACCESSLOGP: list TO-SIMULATED-INTERNET permitted tcp 192.168.0.17(58020) -> 192.0.2.210(80), 1 packet
+# [C2] s1e2/CCNA_Prep_2024_S1E2_STP.yaml line 1670
+# expect: format=rfc3164 severity=2 tag=%SPANTREE-2-BLOCK_BPDUGUARD eventType=stp.loop_detected ifname=Gi1/2
+<186>*Sep 16 16:48:23.755: %SPANTREE-2-BLOCK_BPDUGUARD: Received BPDU on port Gi1/2 with BPDU Guard enabled. Disabling port.
+# [C2] s1e2/CCNA_Prep_2024_S1E2_STP.yaml line 1671
+# expect: format=rfc3164 severity=4 tag=%PM-4-ERR_DISABLE eventType=port.err_disabled ifname=Gi1/2
+<188>*Sep 16 16:48:23.756: %PM-4-ERR_DISABLE: bpduguard error detected on Gi1/2, putting Gi1/2 in err-disable state
+# [C2] s1e2/CCNA_Prep_2024_S1E2_STP.yaml line 1749 (after the "DLS1# " prompt)
+# expect: format=rfc3164 severity=2 tag=%SPANTREE-2-ROOTGUARD_BLOCK eventType=stp.topology_change ifname=GigabitEthernet0/1
+<186>*Sep 16 17:00:22.663: %SPANTREE-2-ROOTGUARD_BLOCK: Root guard blocking port GigabitEthernet0/1 on VLAN0001.
+# [C2] s1e3/CCNA_Prep_2024_S1E3_EtherChannel.yaml line 1219
+# expect: format=rfc3164 severity=2 tag=%SPANTREE-2-ROOTGUARD_BLOCK eventType=stp.topology_change ifname=Ethernet0/2
+<186>*Sep 24 20:42:16.078: %SPANTREE-2-ROOTGUARD_BLOCK: Received a superior STP BPDU from bridge aabb.cc00.5600. Root guard blocking port Ethernet0/2 on VLAN0100.
+# [C2] s1e2/CCNA_Prep_2024_S1E2_STP.yaml line 1792
+# expect: format=rfc3164 severity=2 tag=%SPANTREE-2-ROOTGUARD_UNBLOCK eventType=stp.topology_change ifname=GigabitEthernet0/1
+<186>*Sep 16 17:11:11.875: %SPANTREE-2-ROOTGUARD_UNBLOCK: Root guard unblocking port GigabitEthernet0/1 on VLAN0010.
+#
+# ---- Juniper Junos (header constructed, message cited) --------------------------
+# Junos event IDs lead the message (the tag is the process): SNMP_TRAP_LINK_*,
+# RPD_OSPF_NBR*, RPD_BGP_NEIGHBOR_STATE_CHANGED and UI_COMMIT_COMPLETED are classified.
+# [J1] line 399
+# expect: format=rfc3164 facility=3 severity=4 host=ex-sw1 tag=mib2d procId=1850 eventType=link.down ifname=ge-0/0/2
+<28>Sep 24 01:00:00 ex-sw1 mib2d[1850]: SNMP_TRAP_LINK_DOWN: ifIndex 515, ifAdminStatus up(1), ifOperStatus down(2), ifName ge-0/0/2
+# [J1] line 384
+# expect: format=rfc3164 facility=3 severity=6 host=ex-sw1 tag=mib2d eventType=link.up ifname=ge-0/0/2
+<30>Sep 24 01:00:05 ex-sw1 mib2d[1850]: SNMP_TRAP_LINK_UP: ifIndex 515, ifAdminStatus up(1), ifOperStatus up(1), ifName ge-0/0/2
+# [J1] line 1254
+# expect: format=rfc3164 host=ex-sw1 tag=rpd eventType=ospf.adjacency_lost keep=172.2.1.2
+<28>Sep 24 01:00:10 ex-sw1 rpd[1790]: RPD_OSPF_NBRDOWN: OSPF neighbor 172.2.1.2 (realm ospf-v2 st0.0 area 0.0.0.0) state changed from Full to Down due to InActiveTimer (event reason: neighbor was inactive and declared dead)
+# [J1] line 820
+# expect: format=rfc3164 host=ex-sw1 tag=rpd eventType=bgp.session_up keep=10.182.104.73
+<29>Sep 24 01:00:15 ex-sw1 rpd[1790]: RPD_BGP_NEIGHBOR_STATE_CHANGED: BGP peer 10.182.104.73 (External AS 65503) changed state from OpenConfirm to Established (event RecvKeepAlive) (instance master)
+# [J1] line 414
+# expect: format=rfc3164 host=ex-sw1 tag=mgd eventType=config.changed
+<29>Sep 24 01:00:20 ex-sw1 mgd[2210]: UI_COMMIT_COMPLETED:  : commit complete , backup config at /var/log/mist-A0l3zt.xml.gz
+# [J1] line 702 — "Interface ge-0/0/6 is DOWN" reads as a link.down (the port was shut by BPDU protection)
+# expect: format=rfc3164 host=ex-sw1 tag=l2cpd eventType=link.down ifname=ge-0/0/6
+<28>Sep 24 01:00:25 ex-sw1 l2cpd[1777]: L2CPD_RECEIVE_BPDU_BLOCK_ENABLED: BPDU_PROTECT: Interface ge-0/0/6 is DOWN: BPDU error detected
+# [J1] line 521
+# expect: format=rfc3164 host=ex-sw1 tag=l2ald eventType=syslog.raw ifname=ge-0/0/1.0
+<28>Sep 24 01:00:30 ex-sw1 l2ald[1766]: L2ALD_ST_CTL_IN_EFFECT: ge-0/0/1.0: storm control in effect on the port
+# [J1] line 456
+# expect: format=rfc3164 host=ex-sw1 tag=snmpd eventType=syslog.raw
+<29>Sep 24 01:00:35 ex-sw1 snmpd[1830]: SNMPD_TRAP_COLD_START: trap_generate_cold: SNMP trap: cold start

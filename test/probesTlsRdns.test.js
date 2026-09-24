@@ -125,9 +125,83 @@ test('tls: an explicit servername checks the certificate that name is served', a
     now,
   });
   assert.equal(captured.servername, 'mail.example.com');
-  assert.equal(r.target, '10.0.0.5:8443');
+  // Deliberately changed (agent 0.40): the explicit name is part of the
+  // target, so a second probe of 10.0.0.5:8443 for another name is a second
+  // result on the server rather than an overwrite of this one.
+  assert.equal(r.target, 'mail.example.com@10.0.0.5:8443');
+  assert.equal(r.tls.servername, 'mail.example.com');
   assert.equal(r.tls.hostnameMatches, true, 'the name checked is the SNI name, not the IP');
   assert.equal(r.ok, true);
+});
+
+test('tls: two names on one address are two targets; the ordinary probe keeps host:port', async () => {
+  const good = await tlsProbe({ type: 'tls', host: '10.0.0.5', port: 8443, servername: 'mail.example.com' }, {
+    connect: fakeTls({ peer: cert({ cn: 'mail.example.com', san: 'DNS:mail.example.com' }) }), now,
+  });
+  const wrong = await tlsProbe({ type: 'tls', host: '10.0.0.5', port: 8443, servername: 'wrong.example.com' }, {
+    connect: fakeTls({ peer: cert({ cn: 'mail.example.com', san: 'DNS:mail.example.com' }), authorized: false, authorizationError: 'ERR_TLS_CERT_ALTNAME_INVALID' }), now,
+  });
+  assert.notEqual(good.target, wrong.target, 'a valid and a mismatched name on one port must not share a key');
+  assert.equal(wrong.target, 'wrong.example.com@10.0.0.5:8443');
+  // No explicit name, or one that is the host itself: unchanged.
+  const plain = await tlsProbe({ type: 'tls', host: 'example.com', port: 443 }, { connect: fakeTls({ peer: cert() }), now });
+  assert.equal(plain.target, 'example.com:443');
+  assert.equal(plain.tls.servername, 'example.com');
+  const same = await tlsProbe({ type: 'tls', host: 'Example.com', port: 443, servername: 'example.com' }, { connect: fakeTls({ peer: cert() }), now });
+  assert.equal(same.target, 'Example.com:443');
+  const ip = await tlsProbe({ type: 'tls', host: '10.0.0.5' }, { connect: fakeTls({ peer: cert() }), now });
+  assert.equal(ip.target, '10.0.0.5:443');
+  assert.equal(ip.tls.servername, null);
+});
+
+test('tls: node\'s ALTNAME error is a name mismatch on a trusted chain, not an untrusted chain', async () => {
+  // Node verifies the chain BEFORE the hostname, so this code only ever means
+  // "the chain validated; the name did not". E2E: reported as "chain not
+  // trusted: ERR_TLS_CERT_ALTNAME_INVALID".
+  const r = await tlsProbe({ type: 'tls', host: '203.0.113.2', port: 8443, servername: 'wrong.example.com' }, {
+    connect: fakeTls({ peer: cert({ cn: 'right.example.com', san: 'DNS:right.example.com' }), authorized: false, authorizationError: 'ERR_TLS_CERT_ALTNAME_INVALID' }),
+    now,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.tls.chainTrusted, true, 'the chain is fine');
+  assert.equal(r.tls.hostnameMatches, false);
+  // Backward-compatible fields, as node reported them.
+  assert.equal(r.tls.authorized, false);
+  assert.equal(r.tls.authorizationError, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  assert.equal(r.tls.servername, 'wrong.example.com');
+  assert.match(r.detail, /name mismatch — not valid for wrong\.example\.com/);
+  assert.doesNotMatch(r.detail, /chain not trusted/);
+
+  // Node's verdict stands even where this matcher would have said yes.
+  const cnOnly = await tlsProbe({ type: 'tls', host: 'example.com' }, {
+    connect: fakeTls({ peer: cert(), authorized: false, authorizationError: 'ERR_TLS_CERT_ALTNAME_INVALID' }),
+    now,
+  });
+  assert.equal(cnOnly.tls.hostnameMatches, false);
+  assert.equal(cnOnly.tls.chainTrusted, true);
+
+  // An IP with no name asked for: node compared the bare IP with the
+  // certificate's IP entries. That is no fault of the certificate, and the
+  // probe does not fail on it.
+  const bareIp = await tlsProbe({ type: 'tls', host: '203.0.113.2', port: 8443 }, {
+    connect: fakeTls({ peer: cert(), authorized: false, authorizationError: 'ERR_TLS_CERT_ALTNAME_INVALID' }),
+    now,
+  });
+  assert.equal(bareIp.tls.chainTrusted, true);
+  assert.equal(bareIp.tls.hostnameMatches, null);
+  assert.equal(bareIp.ok, true);
+  assert.doesNotMatch(bareIp.detail, /chain not trusted/);
+});
+
+test('tls: a genuinely untrusted chain is still chainTrusted:false', async () => {
+  const r = await tlsProbe({ type: 'tls', host: 'example.com' }, {
+    connect: fakeTls({ peer: cert({ selfSigned: true }), authorized: false, authorizationError: 'DEPTH_ZERO_SELF_SIGNED_CERT' }),
+    now,
+  });
+  assert.equal(r.tls.chainTrusted, false);
+  assert.equal(r.ok, false);
+  const good = await tlsProbe({ type: 'tls', host: 'example.com' }, { connect: fakeTls({ peer: cert() }), now });
+  assert.equal(good.tls.chainTrusted, true);
 });
 
 test('tls: an IP target is not name-checked, because there is no name to check', async () => {

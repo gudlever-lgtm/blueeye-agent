@@ -307,7 +307,8 @@ Configuration is read from a JSON file and can be overridden by environment vari
 - **Capabilities + config:** on start the agent reports its capabilities
   (`{ sources: [...], unavailable: { ... } }`) to `POST /agents/me/capabilities`
   and fetches its assigned source from `GET /agents/me/config`. It re-fetches the
-  config on every (re)connection so dashboard changes take effect immediately. Both
+  config on every (re)connection, every 5 minutes (`BLUEEYE_CONFIG_REFRESH_MS`) and
+  before a "Poll now", so dashboard changes take effect without a reconnect. Both
   sources produce the same result format, so the server/dashboard treats them
   uniformly.
 - **Continuous reporting:** independently of server commands, the agent measures

@@ -113,7 +113,15 @@ function toStr(v) {
 }
 
 function toNum(v) {
-  if (Buffer.isBuffer(v)) return v.length ? v.readUIntBE(0, Math.min(v.length, 6)) : null;
+  // An integer varbind as bytes (Counter64, or any BER integer the decoder
+  // leaves raw). ALL bytes, big-endian: reading only the first six read a
+  // seven-byte Counter64 256x low — the same bug snmp/session.js had.
+  if (Buffer.isBuffer(v)) {
+    if (!v.length) return null;
+    let n = 0n;
+    for (const b of v) n = (n << 8n) | BigInt(b);
+    return Number(n);
+  }
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }

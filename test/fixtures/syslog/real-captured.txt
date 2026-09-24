@@ -1,0 +1,52 @@
+# Real syslog datagrams, captured off the wire 2026-09-24 on Ubuntu 24.04 by a
+# plain Node dgram socket on 127.0.0.1 (one datagram per line below, byte-exact;
+# none carried a trailing newline). Read by test/syslogRealLines.test.js.
+#
+# Format of this file: lines starting with "#" are comments, except
+# "# expect: key=value ..." (value may be "quoted") which states what the NEXT
+# line must parse to.
+# receivedAt for every line is 2026-09-24T02:00:00Z.
+#
+# ---- util-linux logger 2.39.3, straight to UDP --------------------------------
+# logger -n 127.0.0.1 -P 15140 -d --rfc3164 -t sshd -i -p auth.warning "Failed password for invalid user admin from 198.51.100.7 port 52614 ssh2"
+# expect: format=rfc3164 facility=4 severity=4 host=vm tag=sshd procId=15566 time=2026-09-24T01:42:31.000Z eventType=auth.failure keep=198.51.100.7
+<36>Sep 24 01:42:31 vm sshd[15566]: Failed password for invalid user admin from 198.51.100.7 port 52614 ssh2
+# logger ... --rfc3164 -t kernel -p kern.info "e1000e: eth0 NIC Link is Down"
+# (logger refuses the kern facility for user processes and sends user.info, <14>)
+# expect: format=rfc3164 facility=1 severity=6 host=vm tag=kernel eventType=link.down ifname=eth0
+<14>Sep 24 01:42:31 vm kernel: e1000e: eth0 NIC Link is Down
+# logger ... --rfc5424 -t blueeye-test -p local0.notice --msgid LINKCHG --sd-id ifstate@32473 --sd-param 'ifName="eth0"' --sd-param 'state="down"' "interface eth0 changed state to down"
+# expect: format=rfc5424 facility=16 severity=5 host=vm tag=blueeye-test msgId=LINKCHG time=2026-09-24T01:42:31.603Z eventType=link.down ifname=eth0 message="interface eth0 changed state to down"
+<133>1 2026-09-24T01:42:31.603266+00:00 vm blueeye-test - LINKCHG [timeQuality tzKnown="1" isSynced="0"][ifstate@32473 ifName="eth0" state="down"] interface eth0 changed state to down
+# logger ... --rfc5424 -t app -p user.err --sd-id origin --sd-param 'software="logger"' --sd-id meta --sd-param 'sequenceId="7"' "login failed for user operator password=hunter2"
+# expect: format=rfc5424 facility=1 severity=3 host=vm tag=app eventType=auth.failure secret=hunter2
+<11>1 2026-09-24T01:42:31.606134+00:00 vm app - - [timeQuality tzKnown="1" isSynced="0"][origin software="logger"][meta sequenceId="7"] login failed for user operator password=hunter2
+# logger ... --rfc5424=notq,notime -t notime -p daemon.info "a message without a timestamp"
+# expect: format=rfc5424 facility=3 severity=6 host=vm tag=notime time=null eventType=syslog.raw message="a message without a timestamp"
+<30>1 - vm notime - - - a message without a timestamp
+#
+# ---- rsyslogd 8.2312.0 forwarding (omfwd, UDP), one message in three templates --
+# logger -u <imuxsock socket> -t CRON -i -p cron.info "(root) CMD (run-parts /etc/cron.hourly)"
+# RSYSLOG_TraditionalForwardFormat
+# expect: format=rfc3164 facility=9 severity=6 host=vm tag=CRON procId=15734 time=2026-09-24T01:42:47.000Z eventType=syslog.raw
+<78>Sep 24 01:42:47 vm CRON[15734]: (root) CMD (run-parts /etc/cron.hourly)
+# RSYSLOG_ForwardFormat — BSD layout with an RFC 3339 stamp and no version digit
+# expect: format=rfc3164 facility=9 severity=6 host=vm tag=CRON procId=15734 time=2026-09-24T01:42:47.794Z eventType=syslog.raw
+<78>2026-09-24T01:42:47.794495+00:00 vm CRON[15734]: (root) CMD (run-parts /etc/cron.hourly)
+# RSYSLOG_SyslogProtocol23Format — RFC 5424, "- -" then two spaces before MSG
+# expect: format=rfc5424 facility=9 severity=6 host=vm tag=CRON procId=15734 time=2026-09-24T01:42:47.794Z eventType=syslog.raw
+<78>1 2026-09-24T01:42:47.794495+00:00 vm CRON 15734 - -  (root) CMD (run-parts /etc/cron.hourly)
+# logger -u <socket> -t systemd-networkd -i -p daemon.notice "eth1: Lost carrier"
+# expect: format=rfc3164 facility=3 severity=5 host=vm tag=systemd-networkd ifname=eth1
+<29>Sep 24 01:42:47 vm systemd-networkd[15736]: eth1: Lost carrier
+# expect: format=rfc3164 facility=3 severity=5 host=vm tag=systemd-networkd time=2026-09-24T01:42:47.797Z ifname=eth1
+<29>2026-09-24T01:42:47.797583+00:00 vm systemd-networkd[15736]: eth1: Lost carrier
+# expect: format=rfc5424 facility=3 severity=5 host=vm tag=systemd-networkd procId=15736 ifname=eth1
+<29>1 2026-09-24T01:42:47.797583+00:00 vm systemd-networkd 15736 - -  eth1: Lost carrier
+# logger -u <socket> -t dhclient -i -p daemon.warning "DHCPDISCOVER on eth1 to 255.255.255.255 port 67 interval 3"
+# expect: format=rfc3164 facility=3 severity=4 host=vm tag=dhclient ifname=eth1 keep=255.255.255.255
+<28>Sep 24 01:42:47 vm dhclient[15737]: DHCPDISCOVER on eth1 to 255.255.255.255 port 67 interval 3
+# expect: format=rfc3164 facility=3 severity=4 host=vm tag=dhclient procId=15737 ifname=eth1
+<28>2026-09-24T01:42:47.800230+00:00 vm dhclient[15737]: DHCPDISCOVER on eth1 to 255.255.255.255 port 67 interval 3
+# expect: format=rfc5424 facility=3 severity=4 host=vm tag=dhclient procId=15737 ifname=eth1
+<28>1 2026-09-24T01:42:47.800230+00:00 vm dhclient 15737 - -  DHCPDISCOVER on eth1 to 255.255.255.255 port 67 interval 3

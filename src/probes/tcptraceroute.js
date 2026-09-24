@@ -3,6 +3,7 @@
 const { execFile } = require('child_process');
 const { clampInt, safeHost } = require('./stats');
 const { parseTraceroute, streamHops } = require('./traceroute');
+const { nameHops } = require('./hopNames');
 
 // TCP path probe: traces the route to host:port with TCP SYN packets instead of
 // the ICMP/UDP probes plain `traceroute` sends.
@@ -28,8 +29,9 @@ const { parseTraceroute, streamHops } = require('./traceroute');
 //
 // Result shape matches the traceroute probe — `target` is `host:port` so a TCP
 // trace and an ICMP trace to the same host stay separate series on the server.
-// `exec` is injectable for tests.
-function tcptraceroute(spec, { exec = execFile, onHop = null } = {}) {
+// Public hops get their PTR name as `hostname`, like the ICMP probe.
+// `exec`/`reverse` are injectable for tests (`reverse: null` skips the lookups).
+function tcptraceroute(spec, { exec = execFile, onHop = null, reverse } = {}) {
   const rawHost = String((spec && (spec.host || spec.target)) || '').trim();
   const host = safeHost(rawHost);
   const port = Number(spec && spec.port !== undefined ? spec.port : 443);
@@ -51,9 +53,12 @@ function tcptraceroute(spec, { exec = execFile, onHop = null } = {}) {
     { bin: 'traceroute', args: ['-n', '-T', '-p', String(port), '-m', String(maxHops), '-q', String(queries), '-w', '2', '--', host] },
   ];
 
-  return runFirstAvailable(exec, attempts, onHop, queries).then((run) => {
+  return runFirstAvailable(exec, attempts, onHop, queries).then(async (run) => {
     const hops = parseTraceroute(run.stdout, queries);
-    if (hops.length > 0) return { type: 'tcptraceroute', target, port, ok: true, hopCount: hops.length, queries, hops };
+    if (hops.length > 0) {
+      await nameHops(hops, reverse === undefined ? {} : { reverse });
+      return { type: 'tcptraceroute', target, port, ok: true, hopCount: hops.length, queries, hops };
+    }
     return {
       type: 'tcptraceroute', target, port, ok: false, hopCount: 0, queries, hops: [],
       error: failureReason(run),

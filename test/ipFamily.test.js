@@ -207,7 +207,7 @@ test('traceroute traces IPv6 and falls back to the second binary when the first 
     if (bin === 'traceroute') { const e = new Error('ENOENT'); e.code = 'ENOENT'; return cb(e, ''); }
     cb(null, ' 1  2001:db8::1  1.0 ms  1.0 ms  1.0 ms\n 2  2001:db8::40  9.0 ms  9.0 ms  9.0 ms\n');
   };
-  const res = await traceroute({ host: '2001:db8::40' }, { exec, platform: 'linux' });
+  const res = await traceroute({ host: '2001:db8::40' }, { reverse: null, exec, platform: 'linux' });
   assert.deepEqual(tried, ['traceroute', 'traceroute6']);
   assert.equal(res.ok, true);
   assert.equal(res.ipVersion, 6, 'the literal selected IPv6 with no parameter');
@@ -217,7 +217,7 @@ test('traceroute traces IPv6 and falls back to the second binary when the first 
 
 test('traceroute names the first candidate when no IPv6 binary exists at all', async () => {
   const exec = (bin, _a, _o, cb) => { const e = new Error('ENOENT'); e.code = 'ENOENT'; cb(e, ''); };
-  const res = await traceroute({ host: '2001:db8::40' }, { exec, platform: 'linux' });
+  const res = await traceroute({ host: '2001:db8::40' }, { reverse: null, exec, platform: 'linux' });
   assert.equal(res.ok, false);
   assert.equal(res.error, 'traceroute not installed', 'the reason names the tool the server can install');
   assert.deepEqual(res.hops, []);
@@ -226,7 +226,7 @@ test('traceroute names the first candidate when no IPv6 binary exists at all', a
 test('a non-ENOENT failure belongs to the binary that ran — no pointless second attempt', async () => {
   const tried = [];
   const exec = (bin, _a, _o, cb) => { tried.push(bin); cb(Object.assign(new Error('boom'), { killed: true }), ''); };
-  const res = await traceroute({ host: '2001:db8::40' }, { exec, platform: 'linux' });
+  const res = await traceroute({ host: '2001:db8::40' }, { reverse: null, exec, platform: 'linux' });
   assert.deepEqual(tried, ['traceroute'], 'a real failure must not be retried against another binary');
   assert.equal(res.error, 'traceroute timed out');
 });
@@ -234,7 +234,7 @@ test('a non-ENOENT failure belongs to the binary that ran — no pointless secon
 test('an explicit ip_version overrides what the literal says', async () => {
   let seen = null;
   const exec = (bin, args, _o, cb) => { seen = { bin, args }; cb(null, ' 1  10.0.0.1  1.0 ms\n'); };
-  const res = await traceroute({ host: 'example.com', ip_version: 6 }, { exec, platform: 'linux' });
+  const res = await traceroute({ host: 'example.com', ip_version: 6 }, { reverse: null, exec, platform: 'linux' });
   assert.equal(res.ipVersion, 6);
   assert.ok(seen.args.includes('-6'));
 });
@@ -243,7 +243,7 @@ test('the IPv4 traceroute is unchanged: one binary, no -6, same argv', async () 
   const tried = [];
   let seen = null;
   const exec = (bin, args, _o, cb) => { tried.push(bin); seen = args; cb(null, ' 1  10.0.0.1  1.0 ms  1.0 ms  1.0 ms\n'); };
-  const res = await traceroute({ host: 'example.com' }, { exec, platform: 'linux' });
+  const res = await traceroute({ host: 'example.com' }, { reverse: null, exec, platform: 'linux' });
   assert.deepEqual(tried, ['traceroute']);
   assert.deepEqual(seen, ['-n', '-m', '20', '-q', '3', '-w', '2', '--', 'example.com']);
   assert.equal(res.ipVersion, 4);

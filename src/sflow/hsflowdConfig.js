@@ -13,12 +13,21 @@ const { defaultRouteInterface } = require('../probes/targets');
 //   sflow {
 //     collector { ip = 127.0.0.1  udpport = 6343 }
 //     sampling = 256
+//     sampling.bps_ratio = 0
 //     polling  = 20
 //     pcap { dev = eth0 }
 //   }
 // `pcap { dev }` is what makes hsflowd sample PACKETS (the 5-tuple data); without
 // an interface it would export interface counters only. The device name varies
 // per host (eth0/ens.../wlan0), so it is configurable and defaults to eth0.
+//
+// `sampling.bps_ratio = 0` is what makes `sampling = N` actually apply. hsflowd
+// (verified on 2.1.26, hsflowconfig.c lookupPacketSamplingRate) IGNORES the
+// global `sampling` on any interface that reports a link speed and uses
+// ifSpeed / 1 000 000 instead (min 100): a 1G NIC samples 1-in-1000, a 10G one
+// 1-in-10000, whatever was configured. Ratio 0 turns that off, so the rate the
+// server assigned is the rate the datagrams carry (see
+// test/fixtures/sflow/README.md for the capture that showed it).
 
 const DEFAULTS = {
   collectorIp: '127.0.0.1',
@@ -64,6 +73,7 @@ function renderHsflowdConf(opts = {}) {
     'sflow {',
     `  collector { ip = ${o.collectorIp}  udpport = ${o.collectorPort} }`,
     `  sampling = ${o.samplingRate}`,
+    '  sampling.bps_ratio = 0',
     `  polling = ${o.pollingSecs}`,
     `  pcap { dev = ${o.device} }`,
     '}',

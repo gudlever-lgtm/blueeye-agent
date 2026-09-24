@@ -16,6 +16,16 @@ test('renderHsflowdConf points the collector at the local agent by default', () 
   assert.match(conf, /pcap \{ dev = eth0 \}/);
 });
 
+test('renderHsflowdConf turns off hsflowd\'s link-speed sampling default, so `sampling` applies', () => {
+  // hsflowd 2.1.26 replaces `sampling = N` with ifSpeed/1e6 on any NIC that
+  // reports a speed (a 10G veth sampled 1-in-10000 with `sampling = 8`) unless
+  // bps_ratio is 0 — see test/fixtures/sflow/README.md.
+  const conf = renderHsflowdConf({ samplingRate: 8 });
+  assert.match(conf, /^ {2}sampling\.bps_ratio = 0$/m);
+  assert.ok(conf.indexOf('sampling.bps_ratio') > conf.indexOf('sampling = 8'), 'inside the sflow block, after sampling');
+  assert.ok(conf.indexOf('sampling.bps_ratio') < conf.lastIndexOf('}'));
+});
+
 test('renderHsflowdConf honours overrides', () => {
   const conf = renderHsflowdConf({ collectorPort: 7000, samplingRate: 1000, pollingSecs: 30, device: 'ens5' });
   assert.match(conf, /udpport = 7000/);
