@@ -14,6 +14,7 @@ const BURST = /^burst(?:[\s_-]?mode)?$/i;
 const BURST_STOP = /^(stop[\s_-]?burst|burst[\s_-]?stop)$/i;
 const POLL_SNMP = /^poll[\s_-]?snmp$/i;
 const REKEY = /^(rekey|re[\s_-]?key|rotate[\s_-]?key|repin|re[\s_-]?pin)$/i;
+const RUN_TRANSACTION = /^(run[\s_-]?transaction|run[\s_-]?test[\s_-]?now|transaction[\s_-]?now)$/i;
 
 function verbOf(command) {
   if (typeof command === 'string') return command.trim();
@@ -129,4 +130,24 @@ function isRekeyCommand(command) {
   return REKEY.test(verbOf(command)) && !!command && typeof command.publicKey === 'string' && command.publicKey.trim() !== '';
 }
 
-module.exports = { isBurstCommand, isStopBurstCommand, isPollSnmpCommand, isRekeyCommand, isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand };
+// Recognises a run-transaction command: { name: 'run-transaction', id, testId,
+// capture? } — run an ASSIGNED transaction test immediately rather than waiting
+// out its interval, optionally keeping the packet headers of the traffic the run
+// generates. `testId` is required and must be a positive integer: a run-
+// transaction with no test is not a command, and the agent only ever runs a test
+// the server has already assigned to it (checked again in the manager), so this
+// can never be turned into "generate traffic towards an arbitrary host".
+function isRunTransactionCommand(command) {
+  if (!RUN_TRANSACTION.test(verbOf(command))) return false;
+  if (!command || typeof command !== 'object') return false;
+  const id = Number(command.testId != null ? command.testId : command.test_id);
+  return Number.isInteger(id) && id > 0;
+}
+
+// The test id a run-transaction command names, accepting either spelling.
+function transactionIdOf(command) {
+  const id = Number(command && (command.testId != null ? command.testId : command.test_id));
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+module.exports = { isRunTransactionCommand, transactionIdOf, isBurstCommand, isStopBurstCommand, isPollSnmpCommand, isRekeyCommand, isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isSpeedtestCommand, isDiagnoseCommand, isDeleteCommand, isInstallToolCommand, isEvidenceCommand, isRunDiscoveryCommand };

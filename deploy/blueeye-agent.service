@@ -79,7 +79,14 @@ RestrictRealtime=yes
 LockPersonality=yes
 # AF_NETLINK is required: `ss` (connection table) and `ethtool` (NIC inventory)
 # both talk netlink. AF_UNIX covers the D-Bus call behind `systemctl`.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+#
+# AF_PACKET is what libpcap opens to capture, so `tcpdump` cannot start without
+# it — the transaction header capture (src/capture/) would refuse on every host
+# running under this unit. It is a real widening of the sandbox and is listed
+# last so it is the obvious line to remove on a host that does not want the
+# feature: dropping it leaves everything else working, and the agent then
+# reports `capabilities.unavailable.capture` instead of failing silently.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
 # State the agent writes (token, config, action log) stays owner-only.
 UMask=0077
 # A core dump would contain the agent token in cleartext.

@@ -43,6 +43,7 @@ const FULL_PAYLOAD = {
   discovery: { cidrs: [] },
   target: '10.0.0.1',
   items: ['agent.state'],
+  testId: 4,
 };
 
 const recogniserNames = Object.keys(recognisers).filter((k) => k.startsWith('is'));

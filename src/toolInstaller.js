@@ -15,6 +15,13 @@ const TOOLS = Object.freeze({
   traceroute: { apt: 'traceroute', dnf: 'traceroute', yum: 'traceroute', zypper: 'traceroute', apk: 'traceroute', pacman: 'traceroute' },
   mtr: { apt: 'mtr-tiny', dnf: 'mtr', yum: 'mtr', zypper: 'mtr', apk: 'mtr', pacman: 'mtr' },
   tcptraceroute: { apt: 'tcptraceroute', dnf: 'tcptraceroute', yum: 'tcptraceroute', zypper: null, apk: 'tcptraceroute', pacman: 'tcptraceroute' },
+  // The transaction header capture (src/capture/) runs tcpdump. Installing it
+  // does not grant anything: the agent still needs CAP_NET_RAW to open a device,
+  // and the capture still only ever runs with a filter derived from a test the
+  // server has already assigned. Without this entry the only fix for
+  // `capabilities.unavailable.capture = "tcpdump is not installed"` would be
+  // shell access to a host that deliberately has none.
+  tcpdump: { apt: 'tcpdump', dnf: 'tcpdump', yum: 'tcpdump', zypper: 'tcpdump', apk: 'tcpdump', pacman: 'tcpdump' },
 });
 
 const ALLOWED = Object.freeze(Object.keys(TOOLS));

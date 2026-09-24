@@ -81,5 +81,5 @@ test('refuses a tool with no package for the detected manager (tcptraceroute on 
 });
 
 test('the allowlist is the documented diagnostic set', () => {
-  assert.deepEqual([...ALLOWED_TOOLS].sort(), ['mtr', 'tcptraceroute', 'traceroute']);
+  assert.deepEqual([...ALLOWED_TOOLS].sort(), ['mtr', 'tcpdump', 'tcptraceroute', 'traceroute']);
 });
