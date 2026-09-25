@@ -50,13 +50,9 @@ async function traceroute(spec, { exec = execFile, platform = process.platform, 
   const hops = parseTraceroute(run.stdout, queries);
   const base = { type: 'traceroute', target: host, ipVersion: family, queries };
   // Surface *why* a run came back empty so the server/dashboard can explain it
-  // instead of drawing a blank path: a missing binary (ENOENT) is the common
-  // case on minimal hosts/containers; `killed` means it ran but timed out.
+  // instead of drawing a blank path.
   if (hops.length === 0 && run.err) {
-    const reason = run.missing ? `${run.bin} not installed`
-      : run.err.killed ? `${run.bin} timed out`
-      : String(run.err.message || 'failed').split('\n')[0].slice(0, 120);
-    return { ...base, ok: false, hopCount: 0, hops: [], error: reason };
+    return { ...base, ok: false, hopCount: 0, hops: [], error: failureReason(run) };
   }
   await nameHops(hops, reverse === undefined ? {} : { reverse });
   return { ...base, ok: hops.length > 0, hopCount: hops.length, hops };
@@ -82,8 +78,14 @@ async function runFirstAvailable(exec, candidates, timeoutMs, onHop = null, quer
 
 function runOnce(exec, { bin, args }, timeoutMs = 60000, onHop = null, queries = 3) {
   return new Promise((resolve) => {
-    const child = exec(bin, args, { timeout: timeoutMs }, (err, stdout) => {
-      resolve({ bin, err: err || null, missing: false, stdout: String(stdout || '') });
+    const child = exec(bin, args, { timeout: timeoutMs }, (err, stdout, stderr) => {
+      // STDERR IS THE ANSWER, and it used to be dropped on the floor. Node puts
+      // `Command failed: <the whole command line>` on the FIRST line of
+      // err.message and the tool's own words after it, so reading line 0 —
+      // which is what this did — reported the command back to the operator and
+      // threw away the reason. "Command failed: tracert -4 -d -w 2000 -h 20
+      // www.example.sg" tells nobody that the name does not resolve.
+      resolve({ bin, err: err || null, missing: false, stdout: String(stdout || ''), stderr: String(stderr || '') });
     });
     streamHops(child, queries, onHop);
   });
@@ -106,6 +108,36 @@ function streamHops(child, queries, onHop) {
       try { onHop(hop); } catch { /* the live view is a courtesy */ }
     }
   });
+}
+
+// Explains a run that produced no hops, in the words an operator can act on.
+// Ordered because several of these also exit non-zero: the specific causes have
+// to be recognised before the generic message.
+//
+// Both streams are read. Windows `tracert` writes its diagnostics to STDOUT
+// ("Unable to resolve target system name x."), unix `traceroute` to stderr, and
+// the exec error only repeats the command line.
+function failureReason(run) {
+  const { bin, err } = run;
+  if (run.missing) return `${bin} not installed`;
+  if (err && err.killed) return `${bin} timed out`;
+  const text = `${run.stderr || ''}\n${run.stdout || ''}`;
+  const low = text.toLowerCase();
+  // A name that does not resolve is the most common of these by far, and it is
+  // a finding in its own right — not a broken probe.
+  if (/unable to resolve target system name|name or service not known|unknown host|could not resolve|no address associated with|temporary failure in name resolution|nodename nor servname/.test(low)) {
+    return 'could not resolve the target name';
+  }
+  if (/permission denied|must be root|operation not permitted|raw socket|socket\(/.test(low)) return `${bin} needs root or Administrator (raw socket)`;
+  if (/network is unreachable|unable to contact ip driver|destination host unreachable/.test(low)) return 'the network is unreachable from this host';
+  if (/invalid (option|argument)|unrecognized option|bad option|usage:/.test(low)) return `${bin} refused these options on this host`;
+  // Anything else: the tool's own first line of complaint, never the command
+  // line we just built.
+  const line = text.split(/\r?\n/).map((l) => l.trim()).find((l) => l && !/^command failed:|^tracing route|^traceroute to|^over a maximum/i.test(l));
+  if (line) return line.slice(0, 120);
+  const msg = String((err && err.message) || '').split(/\r?\n/).slice(1)
+    .map((l) => l.trim()).find((l) => l && !/^command failed:/i.test(l));
+  return (msg || `${bin} produced no hops`).slice(0, 120);
 }
 
 // Aggregates the RTT samples + timeouts seen for one hop into a normalized hop
@@ -177,4 +209,4 @@ function parseTraceroute(text, queries = 3) {
   return hops;
 }
 
-module.exports = { traceroute, parseTraceroute, streamHops };
+module.exports = { traceroute, parseTraceroute, streamHops, failureReason };

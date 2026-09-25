@@ -2,7 +2,7 @@
 
 const { execFile } = require('child_process');
 const { clampInt, safeHost } = require('./stats');
-const { parseTraceroute, streamHops } = require('./traceroute');
+const { parseTraceroute, streamHops, failureReason } = require('./traceroute');
 const { nameHops } = require('./hopNames');
 
 // TCP path probe: traces the route to host:port with TCP SYN packets instead of
@@ -90,20 +90,6 @@ function runOnce(exec, { bin, args }, onHop = null, queries = 3) {
     });
     streamHops(child, queries, onHop);
   });
-}
-
-// Explains an empty path. The ordering matters: a permission failure also exits
-// non-zero, so it has to be recognised before the generic message.
-function failureReason(run) {
-  const { bin, err, stderr } = run;
-  if (run.missing) return `${bin} not installed`;
-  if (err && err.killed) return `${bin} timed out`;
-  const s = String(stderr || '').toLowerCase();
-  if (/permission denied|must be root|operation not permitted|not permitted|raw socket/.test(s)) {
-    return `${bin} needs root (raw socket)`;
-  }
-  const line = String((err && err.message) || stderr || 'no hops returned').split('\n')[0].trim();
-  return line.slice(0, 120) || 'no hops returned';
 }
 
 module.exports = { tcptraceroute };
