@@ -159,17 +159,31 @@ update it by rebuilding on the host (see below), not from the dashboard.
 
 Updates **reuse the stored token** (the Docker volume, or
 `/opt/blueeye-agent/token`), so you never re-enroll. Which path you use depends
-on how the agent is supervised — check with **Agents → Ping** in the dashboard
-(the toast shows `managed`), or on the host (`docker ps` /
+on how the agent is supervised — `capabilities.managed` decides, not the
+platform. Read it in the dashboard under **Fleet → the agent → ⋯ → Ping** (the
+toast shows `managed`), or on the host (`docker ps` /
 `systemctl status blueeye-agent`).
 
-**systemd / Node — easiest is the dashboard** (Agents → **Update**, or
-Settings → Updates); it downloads the published source, verifies its checksum,
-reinstalls deps and restarts the unit. To do the same by hand, verify the
-bundle against the server's published `X-Content-SHA256` header before
-extracting — the source endpoint is public (no token needed) and HTTPS already
-protects the transfer, but the checksum guards against a truncated/tampered
-bundle, mirroring the installer:
+`systemd`, `windows-service` and `launchd` agents are **pushed to**; `docker`
+and `unmanaged` ones are not, because nothing on those hosts would restart the
+agent onto new code.
+
+**Service-managed (systemd / Windows service / launchd) — easiest is the
+dashboard**: **Fleet → the agent → Update** (the version row in the drawer
+carries the action), or **Settings → Updates** for the fleet. What it pushes is
+the **signed release**: the agent downloads `/enroll/agent-release.tgz` asking
+for the bytes verbatim (`Accept-Encoding: identity` — a proxy that re-encodes an
+already-compressed release is what used to produce an unexplainable checksum
+mismatch), verifies the Ed25519 signature over the release manifest plus the
+sha256 and the version, and only then swaps and restarts. An agent that has
+pinned a release key **refuses an unsigned update outright**, so a downgrade to
+the unsigned source bundle is not something an attacker can ask for.
+
+The source bundle below is the **fallback** path, for a server with no signed
+release. Verify it against the server's published `X-Content-SHA256` header
+before extracting — the source endpoint is public (no token needed) and HTTPS
+already protects the transfer, but the checksum guards against a
+truncated/tampered bundle, mirroring the installer:
 
 ```bash
 # download the bundle + capture the server's published checksum (response header)
@@ -200,6 +214,29 @@ npm install --omit=dev        # only if dependencies changed
 # stop the running process, then:
 npm start
 ```
+
+### Agents that are not connected when you click
+
+A push needs a live socket, and a host that is online for ten minutes a day
+never has one when somebody is looking at the dashboard. Three things cover it,
+and none of them is on by default beyond the first:
+
+- **The update is queued.** Updating an agent that is offline is accepted rather
+  than refused, and the command is delivered the moment that agent next dials
+  in. Clicking Update twice leaves one queued command with the newest target,
+  and a queued update expires (24 h by default) instead of installing a version
+  two releases old on a host that comes back next month.
+- **A fleet rollout** (**Settings → Updates**) moves the agents that are
+  actually behind, one batch at a time, with an audit row per agent. Run it with
+  a batch of one as a canary first.
+- **The agent asks for its own update.** With **Settings → Agents → Automatic
+  agent updates** on (off by default), an agent that reads its config and finds
+  itself behind asks the server for the update, inside a maintenance window it
+  evaluates in **its own local time** (`src/updateWindow.js`, byte-identical to
+  the server's copy — a fleet across three time zones cannot have `02:00`
+  decided centrally). The server re-checks everything the agent claimed and
+  rate-limits it. A single host opts out with `BLUEEYE_AUTO_UPDATE=0`
+  (`autoUpdate: false` in the config file).
 
 > The dashboard Update and the `agent-source.tgz` paths install **whatever the
 > server currently publishes** (its `AGENT_SOURCE_DIR`). After bumping the agent
@@ -237,7 +274,7 @@ Env overrides: `SERVICE_NAME`, `BLUEEYE_INSTALL_DIR`, `CONTAINER`, `IMAGE`,
 `TOKEN_VOLUME`.
 
 > This removes the agent **locally only**. To also remove it from the BlueEyes
-> server's list, open the dashboard → **Agents → Delete**.
+> server's list, open the dashboard → **Fleet → the agent → ⋯ → Delete agent**.
 
 (If you installed from a checkout with the Docker `install.sh`, you can run
 `sudo ./uninstall.sh` from that checkout instead.)
@@ -255,6 +292,7 @@ Configuration is read from a JSON file and can be overridden by environment vari
 | `enrollmentCode`  | `BLUEEYE_ENROLLMENT_CODE`    | (none)                         | One-time code — first start only    |
 | `serverUrls`      | `BLUEEYE_SERVER_URLS`        | (none)                         | Extra ways in to the SAME server, tried in order when a connection cannot be established. Comma/space separated |
 | `serverCertFingerprint` | `BLUEEYE_SERVER_CERT_FINGERPRINT` | (none)              | SHA-256 of the server's TLS cert — pinned for https. Several may be listed (comma separated), which is how a certificate is RENEWED without locking pinned agents out |
+| `serverCertFingerprints` | `BLUEEYE_SERVER_CERT_FINGERPRINTS` | (none)             | The same pin as a LIST (comma/space separated). Add the next certificate's fingerprint BEFORE a renewal: any one of them may match, so a rotation does not lock every pinned agent out of the only channel that could fix it |
 | `tokenPath`       | `BLUEEYE_TOKEN_PATH`         | `<agent-dir>/.blueeye-agent/token` | Where the token is stored (0600) — relative to the agent's own directory, not cwd |
 | `heartbeatMs`     | `BLUEEYE_HEARTBEAT_MS`       | `15000`                        | Heartbeat message interval          |
 | `reconnectBaseMs` | `BLUEEYE_RECONNECT_BASE_MS`  | `1000`                         | Backoff base for reconnect          |
