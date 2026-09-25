@@ -221,8 +221,86 @@ function ensureInstalled({
   return { ok: true, changed };
 }
 
+
+// Repoints `current` at a release directory.
+//
+// On POSIX this is a temp symlink plus a rename, which is atomic: there is no
+// instant where `current` does not exist. Windows has no atomic replace for a
+// directory junction — rename onto an existing name fails — so there it is a
+// remove followed by a create, and the gap is covered by WHEN it happens: the
+// swap during an update runs while the old process is still serving, and the
+// swap during a rollback runs before the service has started.
+function repointCurrent(currentLink, target, { fsImpl = fs, platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    try { fsImpl.rmSync(currentLink, { recursive: false, force: true }); } catch { /* absent */ }
+    // 'junction' rather than 'dir': a junction needs no privilege, a directory
+    // symlink needs SeCreateSymbolicLink or developer mode.
+    fsImpl.symlinkSync(target, currentLink, 'junction');
+    return;
+  }
+  const tmpLink = `${currentLink}.next`;
+  try { fsImpl.rmSync(tmpLink, { force: true }); } catch { /* none */ }
+  fsImpl.symlinkSync(target, tmpLink);
+  fsImpl.renameSync(tmpLink, currentLink); // atomic replace of the symlink
+}
+
+// The guard, in Node, for the hosts that have no ExecStartPre to run the sh one:
+// a Windows service and a launchd job. Same protocol, same file, same decision —
+// count this start, and past the limit repoint `current` at the previous release.
+//
+// The difference is WHO acts on it. Under systemd the guard runs before the
+// agent, so it can simply hand the next start the old code. Here the agent is
+// already running the unproven release when it gets to look, so a rollback has
+// to be followed by the process exiting: the service manager then starts again,
+// on the release this call just restored. The caller decides that (it owns
+// process exit); this returns what happened.
+//
+//   { action: 'none' }         nothing is waiting to prove itself
+//   { action: 'counted' }      counted this start, keep going
+//   { action: 'rolled-back' }  `current` now points at `previous` — EXIT so the
+//                              service manager starts it
+//   { action: 'exhausted' }    out of attempts and no previous release kept;
+//                              nothing better to run, so keep going and let the
+//                              loop be visible
+function enforceStartup({
+  releasesDir = process.env.BLUEEYE_RELEASES_DIR || '',
+  currentLink = process.env.BLUEEYE_CURRENT_LINK || '',
+  attempts: limit = DEFAULT_ATTEMPTS,
+  fsImpl = fs,
+  platform = process.platform,
+} = {}) {
+  if (!releasesDir || !currentLink) return { action: 'none', reason: 'no blue/green layout' };
+  const pending = readPending(releasesDir, { fsImpl });
+  if (!pending) return { action: 'none' };
+
+  if (pending.attempts < limit) {
+    try {
+      fsImpl.writeFileSync(pendingPath(releasesDir), `${pending.version}\n${pending.attempts + 1}\n`, { mode: 0o644 });
+    } catch { /* best-effort: a marker we cannot write only costs the rollback */ }
+    return { action: 'counted', version: pending.version, attempts: pending.attempts + 1 };
+  }
+
+  let previous = '';
+  try { previous = String(fsImpl.readFileSync(path.join(releasesDir, PREVIOUS), 'utf8')).trim(); } catch { /* none kept */ }
+  const usable = previous && (() => {
+    try { return fsImpl.statSync(previous).isDirectory(); } catch { return false; }
+  })();
+
+  if (!usable) {
+    // Clearing the marker matters: re-arming it would hide the loop behind a
+    // guard that keeps "handling" it. Let the restarts be visible instead.
+    confirmRelease(releasesDir, { fsImpl });
+    return { action: 'exhausted', version: pending.version, attempts: pending.attempts };
+  }
+
+  repointCurrent(currentLink, previous, { fsImpl, platform });
+  confirmRelease(releasesDir, { fsImpl });
+  return { action: 'rolled-back', version: pending.version, attempts: pending.attempts, previous };
+}
+
 module.exports = {
   PENDING, PREVIOUS, DEFAULT_ATTEMPTS, DEFAULT_CONFIRM_MS,
   pendingPath, markPending, confirmRelease, readPending,
   guardScript, dropIn, ensureInstalled,
+  repointCurrent, enforceStartup,
 };

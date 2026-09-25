@@ -15,7 +15,7 @@ dependency (`ws`); HTTP uses Node's built-in `fetch`.
 | --- | --- |
 | Entry point | [`src/index.js`](src/index.js) → `main()` (only place that calls `process.exit`) |
 | Composition root | [`src/runtime.js`](src/runtime.js) → `createAgentRuntime()` ties WS + REST + commands together |
-| Live channel | [`src/agentClient.js`](src/agentClient.js) — WebSocket to `/ws/agent` |
+| Live channel | [`src/agentClient.js`](src/agentClient.js) — WebSocket to `/ws/agent`. Heartbeat + a WS **ping**, and a deadline refreshed by anything arriving: nothing for `staleConnectionMs` on an OPEN socket means the peer is gone (a half-open TCP connection otherwise looks connected until the kernel gives up retransmitting, 10-15 min). A 401 pauses and re-dials on a long timer instead of ending the agent, and `serverUrls` are tried in order when a connection cannot be ESTABLISHED |
 | REST | [`src/apiClient.js`](src/apiClient.js) — Bearer-authenticated calls |
 | Traffic sources | proc · snmp · netflow · sflow (server picks per agent) |
 | Active probes | ping · tcp · dns · rdns · traceroute · tcptraceroute · http · tls · dhcp |
@@ -212,11 +212,25 @@ Server → agent commands ([`command.js`](src/command.js)):
   left the agent hashing the inner tar and reporting a checksum mismatch for ever. A
   mismatch now names its cause (bytes altered in transit vs a server serving something
   other than what it signed). Then extract (tar-slip + link members refused),
-  `npm ci --omit=dev`, atomically repoint `current`, and ask systemd to restart. **The
+  `npm ci --omit=dev`, repoint `current`, and ask the service manager to restart. **The
   restart is checked**: when it fails the new code is on disk but this old process is
-  still the one running, so the agent reports the action FAILED with
-  `run: systemctl restart …` rather than a success whose version never changes. systemd
-  only — docker/unmanaged decline.
+  still the one running, so the agent reports the action FAILED with the command to run
+  rather than a success whose version never changes. **systemd, a Windows service and a
+  launchd job** are all restartable (`capabilities.managed`, `isSelfUpdatable`);
+  docker and unmanaged decline. The restart differs per runtime: `systemctl --no-block
+  restart`, `launchctl kickstart -k`, and on Windows a DETACHED `cmd` that stops and
+  starts the service — a service cannot stop itself in the foreground, because the stop
+  ends the process that was going to issue the start. The `current` swap is atomic on
+  POSIX (temp symlink + rename) and a remove-plus-create on Windows, which has no
+  rename-onto-an-existing-junction; the gap is covered by when it happens (the old
+  process is still serving).
+- **The agent can also ASK.** `GET /agents/me/config` carries
+  `updates{agentVersion,auto,window}`; when the server's policy allows it and this agent
+  is behind, inside the maintenance window (its OWN local time,
+  [`updateWindow.js`](src/updateWindow.js), byte-identical in the server), it sends an
+  `update-request` frame — once per offered version. That is what reaches a host online
+  for ten minutes a day, where a one-click Update had to coincide with the connection.
+  The server re-checks all of it and rate-limits the request.
 - **rekey** (`rekey|re-key|rotate-key|re-pin` + a `publicKey` string, plus a `vendorProof`
   where the trust chain is in force; PRIVILEGED) → replace the
   release trust anchor this host pins ([`release/keyStore.js`](src/release/keyStore.js)).
@@ -302,6 +316,13 @@ Loaded by [`config.js`](src/config.js); precedence **defaults < JSON file < env*
 | `BLUEEYE_REQUIRE_SIGNED_COMMANDS` | **on once the server has signed one** | refuse an unsigned `update`/`delete`/`install-tool`. A RATCHET: the first command whose signature verifies latches it on for good (recorded in `release-trust.json`). Deriving it from "a key is pinned" instead bricked every privileged command on a fleet whose server had lost its signing key — pinning says the agent can CHECK a signature, not that its server can MAKE one. `=0` opts out ([`commandAuth.js`](src/commandAuth.js)) |
 | `BLUEEYE_VENDOR_ROOT_PUBLIC_KEY` | (embedded) | the vendor trust anchor. Dev/test override only — production ignores it without `BLUEEYE_TRUST_ANCHOR_OVERRIDE_ACK` ([`license/vendorRoot.js`](src/license/vendorRoot.js)) |
 | `BLUEEYE_REQUIRE_SIGNED_UPDATES` | off | refuse an unsigned release ([`selfUpdate.js`](src/selfUpdate.js)) |
+| `BLUEEYE_STALE_CONNECTION_MS` | 3 × heartbeat (min 30 s) | nothing heard back on an open socket for this long = dead, re-dial ([`agentClient.js`](src/agentClient.js)) |
+| `BLUEEYE_SOCKET_KEEPALIVE_MS` | 30000 | TCP keepalive on the WebSocket socket |
+| `BLUEEYE_AUTH_RETRY_MS` | 900000 | wait this long before re-dialling after a refused token; never re-enrolls. `0` = exit and stay down, as it used to |
+| `BLUEEYE_SERVER_URLS` | — | extra ways in to the same server, tried in order |
+| `BLUEEYE_RESULT_SPOOL_MAX` | 240 | measurements held when the server could not take them ([`resultSpool.js`](src/resultSpool.js)) |
+| `BLUEEYE_AUTO_UPDATE` | on | local opt-out from the server's auto-update policy (which is off by default) |
+| `BLUEEYE_LAUNCHD_LABEL` | com.blueeye.agent | the launchd job to kickstart on a self-update |
 | `BLUEEYE_ALLOW_UNSIGNED_REKEY` | off | break-glass: let an UNSIGNED `rekey` replace an anchor this host already holds. Needed only to recover a fleet whose server lost its signing key ([`commandAuth.js`](src/commandAuth.js)) |
 | `BLUEEYE_RELEASE_PUBLIC_KEY` | (installer) | the pinned release anchor. A `rekey` accepted from the server stores one in `release-key.pem` beside the token, and THAT wins ([`release/keyStore.js`](src/release/keyStore.js)) |
 

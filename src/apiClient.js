@@ -30,8 +30,12 @@ async function jsonOrEmpty(res) {
 }
 
 function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
+  // `serverUrl` may be a function, so a client built once still follows the
+  // agent when the live channel fails over to another way in to the same server
+  // (config.serverUrls). Resolved per call rather than captured here.
+  const base = () => String(typeof serverUrl === 'function' ? serverUrl() : serverUrl || '').replace(/\/+$/, '');
   async function postResults(results) {
-    const res = await fetchImpl(`${serverUrl}/agents/results`, {
+    const res = await fetchImpl(`${base()}/agents/results`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -46,7 +50,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
   // Fetches this agent's server-assigned monitoring config. Returns the
   // monitorConfig object (e.g. { source: 'proc' } or { source: 'snmp', ... }).
   async function getConfig() {
-    const res = await fetchImpl(`${serverUrl}/agents/me/config`, {
+    const res = await fetchImpl(`${base()}/agents/me/config`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     assertOk(res, 'fetching config', 'fetch config');
@@ -60,7 +64,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
   // a monitorConfig object, and widening it would be a silent contract change
   // in the one place the agent decides how it measures.
   async function getFullConfig() {
-    const res = await fetchImpl(`${serverUrl}/agents/me/config`, {
+    const res = await fetchImpl(`${base()}/agents/me/config`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     assertOk(res, 'fetching config', 'fetch config');
@@ -71,7 +75,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
   // from each switch this agent polls, plus a per-device error for the ones
   // that did not answer.
   async function postSnmpTopology(payload) {
-    const res = await fetchImpl(`${serverUrl}/agents/me/snmp-topology`, {
+    const res = await fetchImpl(`${base()}/agents/me/snmp-topology`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(payload),
@@ -85,7 +89,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
   // the topology POST, because the two run at different cadences and a counter
   // batch is an order of magnitude larger.
   async function postSnmpCounters(payload) {
-    const res = await fetchImpl(`${serverUrl}/agents/me/snmp-counters`, {
+    const res = await fetchImpl(`${base()}/agents/me/snmp-counters`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(payload),
@@ -96,7 +100,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
 
   // Posts active-probe results (ping/tcp/dns/traceroute) for this agent.
   async function postProbeResults(results) {
-    const res = await fetchImpl(`${serverUrl}/agents/probe-results`, {
+    const res = await fetchImpl(`${base()}/agents/probe-results`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ results }),
@@ -107,7 +111,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
 
   // Posts active-discovery candidates found by this agent's scan.
   async function postDiscoveryResults(payload) {
-    const res = await fetchImpl(`${serverUrl}/agents/discovery-results`, {
+    const res = await fetchImpl(`${base()}/agents/discovery-results`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(payload),
@@ -118,7 +122,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
 
   // Posts an active throughput ("speed test") result for this agent.
   async function postSpeedtest(result) {
-    const res = await fetchImpl(`${serverUrl}/speedtest/results`, {
+    const res = await fetchImpl(`${base()}/speedtest/results`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ result }),
@@ -131,7 +135,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
   // the network devices pointing at it. One batch per flush interval; the server
   // resolves each sender to a device and folds repeats.
   async function postDeviceEvents(events) {
-    const res = await fetchImpl(`${serverUrl}/agents/me/device-events`, {
+    const res = await fetchImpl(`${base()}/agents/me/device-events`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ events }),
@@ -142,7 +146,7 @@ function createApiClient({ serverUrl, token, fetchImpl = fetch }) {
 
   // Reports what this agent can do (e.g. { sources: ['proc','snmp'] }).
   async function postCapabilities(capabilities) {
-    const res = await fetchImpl(`${serverUrl}/agents/me/capabilities`, {
+    const res = await fetchImpl(`${base()}/agents/me/capabilities`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ capabilities }),

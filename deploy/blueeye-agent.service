@@ -3,12 +3,17 @@ Description=BlueEyes monitoring agent
 Documentation=https://github.com/gudlever-lgtm/blueeye-agent
 After=network-online.target
 Wants=network-online.target
-# A burst of fast restarts (e.g. a bad release) is visible via `systemctl status`.
-# ExecStartPre below acts before the limit is reached: after 3 starts without the
-# agent confirming the release (it deletes releases/.pending once it has held a
-# server connection), `current` is repointed at the previous release.
-StartLimitIntervalSec=120
-StartLimitBurst=5
+# NO start limit. A rate limit here means systemd eventually stops trying, and a
+# monitoring agent that has given up is indistinguishable from one that was never
+# installed: no connection, therefore no server-driven recovery, therefore a shell
+# on a host that is not supposed to need one. The two failures a limit was meant
+# to contain are handled where they happen instead — a bad release by the
+# ExecStartPre guard below (after 3 starts without the agent confirming the
+# release it repoints `current` at the previous one), and a refused token by the
+# agent itself (it pauses and re-dials on a long timer rather than exiting).
+# A restart loop is still visible in `systemctl status` and the journal.
+StartLimitIntervalSec=0
+StartLimitBurst=0
 
 [Service]
 Type=simple
@@ -25,7 +30,11 @@ WorkingDirectory=/opt/blueeye-agent/current
 # releaseGuard.js). The leading '-' means a missing guard never blocks a start.
 ExecStartPre=-/bin/sh /opt/blueeye-agent/bin/release-guard.sh /opt/blueeye-agent/releases /opt/blueeye-agent/current 3
 ExecStart=/usr/bin/node /opt/blueeye-agent/current/src/index.js
-Restart=on-failure
+# always, not on-failure: the agent exits 0 on SIGTERM (a stop is honoured) and
+# non-zero on anything it cannot recover from, but a clean exit that nobody asked
+# for — a crash guard that shut down tidily, a Node that exited on an unhandled
+# rejection — would otherwise leave the host unmonitored and silent.
+Restart=always
 RestartSec=5
 
 # Provisioning. The token, config and action log live OUTSIDE the swappable release

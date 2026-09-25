@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { parseConfiguredTargets } = require('./probes/targets');
-const { normalizeFingerprint } = require('./fingerprint');
+const { normalizeFingerprint, normalizeFingerprints } = require('./fingerprint');
 
 function toInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -60,10 +60,26 @@ function loadConfig({ env = process.env } = {}) {
   const file = readConfigFile(configPath);
 
   const serverUrl = env.BLUEEYE_SERVER_URL || file.serverUrl || 'http://localhost:3000';
+  // Alternative ways in to the SAME server, tried in order when the first cannot
+  // be reached — a second DNS name, the internal address behind the proxy, a
+  // spare ingress. One name or one reverse proxy is otherwise a single point of
+  // failure that no amount of reconnecting gets past. `serverUrl` is always the
+  // first candidate; the others are extras, never a different server (they share
+  // the agent's token and its pins).
+  const serverUrls = parseServerUrls(serverUrl, env.BLUEEYE_SERVER_URLS ?? file.serverUrls);
   const enrollmentCode = env.BLUEEYE_ENROLLMENT_CODE || file.enrollmentCode || null;
   // SHA-256 of the server's (or its reverse proxy's) TLS leaf cert. When set and
   // the server is https, the agent pins it and refuses a mismatching cert.
-  const serverCertFingerprint = normalizeFingerprint(env.BLUEEYE_SERVER_CERT_FINGERPRINT || file.serverCertFingerprint || '');
+  // SEVERAL may be set (comma/space separated, or an array in the config file):
+  // a pin is to one leaf certificate, so holding the NEXT certificate's pin
+  // alongside the current one is what keeps a renewal from locking the fleet out
+  // of the only channel that could fix it.
+  const serverCertFingerprints = normalizeFingerprints(
+    env.BLUEEYE_SERVER_CERT_FINGERPRINTS || env.BLUEEYE_SERVER_CERT_FINGERPRINT || file.serverCertFingerprints || file.serverCertFingerprint || ''
+  );
+  // The first pin, kept for the single-pin callers (the enroll CLI writes one,
+  // doctor reports one) and for config files written by older agents.
+  const serverCertFingerprint = serverCertFingerprints[0] || '';
   // Default is resolved relative to the agent's OWN directory, not the current
   // working directory — so a token written by `blueeye-agent enroll` is found by
   // the long-running service later even if they were started from different cwds
@@ -79,12 +95,43 @@ function loadConfig({ env = process.env } = {}) {
     maxMs: toInt(env.BLUEEYE_RECONNECT_MAX_MS, file.reconnectMaxMs ?? 30000),
     factor: 2,
   };
+  // How long the agent tolerates hearing NOTHING back on an open socket before
+  // it treats the connection as dead and re-dials. The heartbeat is a send; a
+  // send says nothing about whether anything is still listening. Without this a
+  // half-open TCP connection (a NAT table that dropped the entry, a firewall
+  // that stopped forwarding, a load balancer that went away) leaves the agent
+  // believing it is connected until the kernel gives up retransmitting —
+  // typically 10-15 minutes on Linux, during which it is green in the dashboard,
+  // takes no commands and loses its samples. 0 disables the check.
+  const staleConnectionMs = toInt(env.BLUEEYE_STALE_CONNECTION_MS, file.staleConnectionMs ?? Math.max(3 * heartbeatMs, 30000));
+  // TCP keepalive on the WebSocket socket, so the kernel also has a reason to
+  // notice a path that stopped working. Belt to the stale-read braces above;
+  // 0 disables it.
+  const socketKeepAliveMs = toInt(env.BLUEEYE_SOCKET_KEEPALIVE_MS, file.socketKeepAliveMs ?? 30000);
+  // How long to wait before re-dialling after the server REJECTED the token
+  // (401). This used to be terminal — the agent exited and stayed down until
+  // someone logged into the host. A revoked token deserves that; a server
+  // restored from backup, a re-provisioned server or a rotated token does not,
+  // and those take the whole fleet at once with no way in from the server side.
+  // So a 401 now costs a long, quiet retry instead of the agent's life. It still
+  // never re-enrolls by itself. 0 keeps the old behaviour (fatal, no retry).
+  const authRetryMs = toInt(env.BLUEEYE_AUTH_RETRY_MS, file.authRetryMs ?? 900000);
 
   // Continuous reporting: how often the agent measures and submits traffic on
   // its own (0 disables it; default 60s). The sampling window per measurement
   // is reportSampleMs.
   const reportIntervalMs = toInt(env.BLUEEYE_REPORT_INTERVAL_MS, file.reportIntervalMs ?? 60000);
   const reportSampleMs = toInt(env.BLUEEYE_REPORT_SAMPLE_MS, file.reportSampleMs ?? 1000);
+  // Measurements the server could not take are held here and re-submitted on the
+  // next successful one, so a short outage leaves a gap in the DELIVERY rather
+  // than a hole in the history. Bounded and oldest-first-dropped: an agent that
+  // cannot reach its server for a day must not become the host's memory problem.
+  // 0 disables the spool (drop on failure, the old behaviour).
+  const resultSpoolMax = toInt(env.BLUEEYE_RESULT_SPOOL_MAX, file.resultSpoolMax ?? 240);
+  // Local opt-out from the server's auto-update policy. The policy itself lives
+  // on the server (off by default) and arrives with the agent config; this flag
+  // lets one host refuse to act on it without the server having to know.
+  const autoUpdateEnabled = toBool(env.BLUEEYE_AUTO_UPDATE, file.autoUpdate, true);
 
   // Scheduled active probes: the agent periodically pings its default gateway +
   // DNS servers (auto-discovered) and any configured targets, so fleet health is
@@ -152,13 +199,20 @@ function loadConfig({ env = process.env } = {}) {
   return {
     configPath,
     serverUrl,
+    serverUrls,
     enrollmentCode,
     serverCertFingerprint,
+    serverCertFingerprints,
     tokenPath,
     heartbeatMs,
     backoff,
+    staleConnectionMs,
+    socketKeepAliveMs,
+    authRetryMs,
     reportIntervalMs,
     reportSampleMs,
+    resultSpoolMax,
+    autoUpdateEnabled,
     probeIntervalMs,
     probeCount,
     probeAutoGateway,
@@ -217,6 +271,25 @@ function writeConfigValues(config, values = {}) {
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, `${JSON.stringify(file, null, 2)}\n`);
   return true;
+}
+
+// Builds the ordered list of server URLs to try. `primary` always leads (it is
+// what enrollment, the pins and every existing deployment mean by "the server");
+// `extra` may be an array or one string listing URLs separated by comma,
+// semicolon or whitespace. Unparseable entries and duplicates are dropped, so a
+// typo in the extras can never displace the URL that works.
+function parseServerUrls(primary, extra) {
+  const out = [];
+  const add = (value) => {
+    const url = String(value || '').trim().replace(/\/+$/, '');
+    if (!url) return;
+    try { new URL(url); } catch { return; }
+    if (!out.includes(url)) out.push(url);
+  };
+  add(primary);
+  const parts = Array.isArray(extra) ? extra : String(extra || '').split(/[\s,;]+/);
+  for (const part of parts) add(part);
+  return out;
 }
 
 module.exports = { loadConfig, clearEnrollmentCode, writeConfigValues, configPathFrom };

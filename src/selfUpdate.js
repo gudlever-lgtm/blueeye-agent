@@ -4,12 +4,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
+const { spawnSync, spawn } = require('child_process');
 const { verifyManifest } = require('./release/verifyManifest');
 const releaseGuard = require('./release/releaseGuard');
 
-// Self-update for systemd-managed agents. Given the server URL + token and the
-// command's expectations, it:
+// Self-update for agents under a service manager that can restart them:
+// systemd, a Windows service, or a launchd job. Given the server URL + token and
+// the command's expectations, it:
 //   1. downloads the signed release (or legacy source bundle),
 //   2. verifies it — Ed25519 signature over the manifest + sha256 + version for a
 //      signed release (fails CLOSED), or sha256 for the legacy bundle,
@@ -17,13 +18,24 @@ const releaseGuard = require('./release/releaseGuard');
 //      it extracts a NEW release dir and atomically repoints `current` (keeping
 //      the previous release for rollback); otherwise it extracts in place,
 //   4. installs deps (npm ci --omit=dev, falling back to npm install),
-//   5. (caller then) asks systemd to restart onto the new code.
+//   5. (caller then) asks the service manager to restart onto the new code.
 //
 // Docker/unmanaged agents are not updated here (the host rebuilds those) — the
 // caller checks `managed` first. Everything is injectable for tests.
 function createSelfUpdater({
   installDir = path.join(__dirname, '..'),
   serviceName = process.env.BLUEEYE_SERVICE_NAME || 'blueeye-agent',
+  // Which service manager restarts us. Decides the restart command and nothing
+  // else — download, verification and the blue/green install are identical
+  // everywhere. 'systemd' | 'windows-service' | 'launchd'.
+  runtime = String(process.env.BLUEEYE_RUNTIME || '').toLowerCase() || '',
+  platform = process.platform,
+  // launchd needs the job's label, not the service name.
+  launchdLabel = process.env.BLUEEYE_LAUNCHD_LABEL || 'com.blueeye.agent',
+  // Restarting a Windows service from inside that service cannot be done in the
+  // foreground: the stop kills the process issuing the start. So it is handed to
+  // a DETACHED child that outlives us.
+  spawnImpl = spawn,
   // Atomic, rollback-able layout (set by the systemd installer): versioned
   // release dirs + a `current` symlink the service runs from. When BOTH are set
   // (and a version is known), an update extracts a new release dir and atomically
@@ -265,10 +277,7 @@ function createSelfUpdater({
     try { prev = fsImpl.readlinkSync(currentLink); } catch { /* first install / not a link */ }
 
     logger.info(`[update] swapping ${currentLink} -> ${newDir}`);
-    const tmpLink = `${currentLink}.next`;
-    try { fsImpl.rmSync(tmpLink, { force: true }); } catch { /* none */ }
-    fsImpl.symlinkSync(newDir, tmpLink);
-    fsImpl.renameSync(tmpLink, currentLink); // atomic replace of the symlink
+    guard.repointCurrent(currentLink, newDir, { fsImpl, platform });
 
     if (prev && path.resolve(prev) !== path.resolve(newDir)) {
       try { fsImpl.writeFileSync(path.join(releasesDir, '.previous'), prev); } catch { /* best-effort */ }
@@ -306,17 +315,22 @@ function createSelfUpdater({
     let prev = '';
     try { prev = String(fsImpl.readFileSync(path.join(releasesDir, '.previous'), 'utf8')).trim(); } catch { return { ok: false, reason: 'no-previous' }; }
     if (!prev) return { ok: false, reason: 'no-previous' };
-    const tmpLink = `${currentLink}.next`;
-    try { fsImpl.rmSync(tmpLink, { force: true }); } catch { /* none */ }
-    fsImpl.symlinkSync(prev, tmpLink);
-    fsImpl.renameSync(tmpLink, currentLink);
+    guard.repointCurrent(currentLink, prev, { fsImpl, platform });
     logger.info(`[update] rolled back ${currentLink} -> ${prev}`);
     return { ok: true, previous: prev };
   }
 
-  // Asks systemd to restart this unit. --no-block enqueues the job in PID 1, so it
-  // completes even though this process is terminated during the stop phase
-  // (systemd then starts a fresh instance running the just-installed code).
+  // Which service manager to ask for the restart. The explicit runtime wins (the
+  // installer sets it); otherwise the platform decides, which keeps every agent
+  // in the field working without a re-provision.
+  function restartKind() {
+    if (runtime === 'systemd' || runtime === 'windows-service' || runtime === 'launchd') return runtime;
+    if (platform === 'win32') return 'windows-service';
+    if (platform === 'darwin') return 'launchd';
+    return 'systemd';
+  }
+
+  // Asks the service manager to restart this agent onto the code just installed.
   //
   // Returns { ok, detail } rather than the raw spawn result, because the caller
   // has to act on a failure: the new code is on disk but the process running is
@@ -324,8 +338,18 @@ function createSelfUpdater({
   // used to be reported as a successful update, which is how "the update says it
   // worked and the version never changes" happened with nothing in any log.
   function restart() {
-    logger.info(`[update] requesting restart of ${serviceName}`);
-    const r = exec('systemctl', ['--no-block', 'restart', serviceName], { encoding: 'utf8' });
+    const kind = restartKind();
+    logger.info(`[update] requesting restart of ${serviceName} (${kind})`);
+    if (kind === 'windows-service') return restartWindowsService();
+    if (kind === 'launchd') return run('launchctl', ['kickstart', '-k', `system/${launchdLabel}`]);
+    // --no-block enqueues the job in PID 1, so it completes even though this
+    // process is terminated during the stop phase (systemd then starts a fresh
+    // instance running the just-installed code).
+    return run('systemctl', ['--no-block', 'restart', serviceName]);
+  }
+
+  function run(cmd, args) {
+    const r = exec(cmd, args, { encoding: 'utf8' });
     if (!r || r.error || r.status !== 0) {
       const detail = r && r.error ? r.error.message
         : (r && r.stderr ? String(r.stderr).trim() : `exit ${r ? r.status : '?'}`);
@@ -335,7 +359,32 @@ function createSelfUpdater({
     return { ok: true, detail: null, result: r };
   }
 
-  return { update, restart, rollback, installRelease };
+  // A service cannot stop and start itself in the foreground: the stop ends the
+  // process that was going to issue the start, and the new code never runs. So
+  // the pair is handed to a detached `cmd` that is not a child of the service in
+  // any way that matters — it survives our exit, waits for the stop to finish,
+  // and starts us again.
+  //
+  // There is no status to check: success is that this process is killed shortly
+  // afterwards. A spawn that fails to launch at all IS reportable, and is.
+  function restartWindowsService() {
+    const command = `timeout /t 2 /nobreak >nul & net stop "${serviceName}" >nul 2>&1 & net start "${serviceName}" >nul 2>&1`;
+    try {
+      const child = spawnImpl('cmd.exe', ['/d', '/s', '/c', command], {
+        detached: true,
+        stdio: 'ignore',
+        windowsVerbatimArguments: true,
+      });
+      if (child && typeof child.unref === 'function') child.unref();
+      if (child && child.error) throw child.error;
+      return { ok: true, detail: null, result: child };
+    } catch (err) {
+      logger.error(`[update] restart of ${serviceName} FAILED: ${err.message}`);
+      return { ok: false, detail: err.message, result: null };
+    }
+  }
+
+  return { update, restart, rollback, installRelease, restartKind };
 }
 
 // Numeric, dotted-version compare for prune ordering (oldest first).

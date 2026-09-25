@@ -113,6 +113,21 @@ const CANONICALIZE_VECTORS = [
 // Deliberately simple: a real tokeniser would be more correct about `//` inside
 // a string literal, and canonicalize.js contains none. If that ever stops being
 // true the digest changes and the gate says so, which is the right failure.
+// src/lib/updateWindow.js (blueeye-server) and src/updateWindow.js (the agent) —
+// what a self-update maintenance window MEANS. The server validates the string
+// and passes it down; only the AGENT can evaluate it, because only the agent
+// knows its own local time. If the two disagree — about a window that wraps
+// midnight, or about whether an unset window means "always" or "never" — the
+// fleet either updates at lunchtime or never updates at all, and neither side
+// can see that from its own copy.
+const UPDATE_WINDOW_DIGEST = '2335e82973ef1187c978591442cc4ab37331bfe55d11976274c9ddb8cf6477a5';
+
+// src/lib/version.js (blueeye-server) and src/version.js (the agent) — what
+// "behind" means. The server decides which agents a fleet rollout touches; the
+// agent decides whether to ask for its own update. Two answers to that question
+// means an agent that asks forever, or one that never does.
+const VERSION_COMPARE_DIGEST = 'b49e3015b55339d78cd5db7c1825fd3165e10a0f6c8727af198c3bc2783c6d6b';
+
 function digestOf(source) {
   const stripped = String(source)
     .replace(/\/\*[\s\S]*?\*\//g, '')   // block comments
@@ -122,6 +137,8 @@ function digestOf(source) {
 }
 
 module.exports = {
+  UPDATE_WINDOW_DIGEST,
+  VERSION_COMPARE_DIGEST,
   FINGERPRINT_DIGEST,
   VENDOR_ROOT_PUBLIC_KEY,
   CANONICALIZE_DIGEST,
