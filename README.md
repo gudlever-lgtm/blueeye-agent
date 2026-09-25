@@ -24,7 +24,9 @@ built-in `fetch`, so there is no external HTTP SDK.
 ## Requirements
 
 - Node.js >= 18 (developed and tested on Node 22)
-- 64-bit host (`linux/amd64` or `linux/arm64`)
+- Linux, macOS or Windows. The one-liner installs a systemd service, a launchd
+  daemon or a scheduled task accordingly; the Docker image is 64-bit Linux
+  (`linux/amd64` or `linux/arm64`)
 - Access to a running `blueeye-server`
 
 ## Getting started
@@ -51,12 +53,20 @@ with the code, server address, and checksum already filled in. Run it on the
 machine:
 
 ```bash
+# Linux and macOS
 curl -sSL https://<server>/enroll/<CODE>/install.sh | sh
 ```
 
-The script fetches the agent binary **from the server itself** (works in
-air-gapped networks too), verifies its SHA-256, runs `blueeye-agent enroll`,
-and installs a systemd service. You never type the server address yourself.
+On **Windows** the same page gives a PowerShell command instead: it downloads
+`/enroll/<CODE>/install.ps1` to `$env:TEMP` and runs it from there (deliberately
+not `irm … | iex` — a downloaded script should be on disk where it can be read
+before it runs). Run it in an **elevated** PowerShell.
+
+The script fetches the agent **from the server itself** (works in air-gapped
+networks too), verifies it, runs `blueeye-agent enroll`, and installs whatever
+the host supervises with: a **systemd service** on Linux, a **LaunchDaemon** on
+macOS, a **scheduled task** on Windows. You never type the server address
+yourself.
 
 ### Manual: the `enroll` command
 
@@ -151,6 +161,39 @@ journalctl -u blueeye-agent -f                # follow logs
 > `ExecStart` straight at Node, as the bundled installer does:
 > `ExecStart=/usr/bin/node /opt/blueeye-agent/src/index.js`.
 
+**macOS (launchd).** The one-liner installs a LaunchDaemon labelled
+`com.blueeye.agent` at `/Library/LaunchDaemons/com.blueeye.agent.plist`, with
+`KeepAlive` (so it comes back) and `BLUEEYE_RUNTIME=launchd` in its
+`EnvironmentVariables`. That tag is what makes the agent report `managed:
+launchd`, so one-click updates from the dashboard work the same as on systemd.
+
+```bash
+sudo launchctl print system/com.blueeye.agent     # is it loaded, and what state
+sudo launchctl kickstart -k system/com.blueeye.agent   # restart it
+```
+
+**Windows (scheduled task).** `install.ps1` installs Node + the agent and
+registers a scheduled task that runs it as `SYSTEM` at boot, restarting on
+failure — the dependency-free equivalent of the systemd unit. A scheduled task
+is not a service, so the launcher sets `BLUEEYE_RUNTIME=unmanaged` and the agent
+**declines a pushed update**, which is the safe answer: nothing there would stop
+and start it cleanly on the server's behalf. Updating it is one command on the
+host instead — see below. stdout and stderr go to `agent.log` in the log
+directory, because a task running as SYSTEM has no console and "installed but
+not connected" otherwise has no indicator.
+
+```powershell
+Get-ScheduledTask -TaskName blueeye-agent | Select-Object State
+Stop-ScheduledTask -TaskName blueeye-agent; Start-ScheduledTask -TaskName blueeye-agent
+```
+
+> Running the agent as a **real** Windows service (NSSM, `sc.exe`, or any
+> wrapper) is supported and pushable: set `BLUEEYE_RUNTIME=windows-service` in
+> its environment, and the server restarts it with a detached stop+start after
+> swapping the code. A Windows service cannot be detected from the environment —
+> the process looks like any other — so without that variable the agent reports
+> `unmanaged` and declines.
+
 **Docker.** `./install.sh` already runs the container with `--restart
 unless-stopped`, so it returns after a reboot. It reports `managed: docker` —
 update it by rebuilding on the host (see below), not from the dashboard.
@@ -164,11 +207,15 @@ platform. Read it in the dashboard under **Fleet → the agent → ⋯ → Ping*
 toast shows `managed`), or on the host (`docker ps` /
 `systemctl status blueeye-agent`).
 
-`systemd`, `windows-service` and `launchd` agents are **pushed to**; `docker`
-and `unmanaged` ones are not, because nothing on those hosts would restart the
-agent onto new code.
+`systemd`, `launchd` and `windows-service` agents are **pushed to**; `docker` and
+`unmanaged` ones are not, because nothing on those hosts would restart the agent
+onto new code. Note which side Windows falls on: an agent installed by
+`install.ps1` runs under a **scheduled task** and reports `unmanaged`, so it is
+updated with a command on the host (below) rather than a push. Only an agent run
+as a genuine Windows service, with `BLUEEYE_RUNTIME=windows-service`, is pushed
+to.
 
-**Service-managed (systemd / Windows service / launchd) — easiest is the
+**Service-managed (systemd / launchd / a real Windows service) — easiest is the
 dashboard**: **Fleet → the agent → Update** (the version row in the drawer
 carries the action), or **Settings → Updates** for the fleet. What it pushes is
 the **signed release**: the agent downloads `/enroll/agent-release.tgz` asking
@@ -204,6 +251,13 @@ enrollment code needed):
 cd /path/to/blueeye-agent && git pull --ff-only
 BLUEEYE_SERVER_URL=https://<server> ./install.sh
 ```
+
+**Windows (scheduled task) — one command on the host.** The dashboard's update
+button on such an agent hands you the command instead of pushing: it updates the
+installed agent **in place**, carries no enrollment code (so the host keeps its
+token and its identity — it can never create a second agent), and refuses a
+machine with no agent. Run it in an elevated PowerShell; the agent stops for a
+few seconds while its code is replaced, then reconnects on the new version.
 
 **Unmanaged (bare `npm start`)** — nothing restarts it for you; update the
 source and restart it yourself:
@@ -250,9 +304,17 @@ and none of them is on by default beyond the first:
 Easiest — a one-liner from the server (mirrors install):
 
 ```bash
+# Linux and macOS
 curl -sSL https://<server>/enroll/uninstall.sh | sudo sh            # warns, then asks y/N
 curl -sSL https://<server>/enroll/uninstall.sh | sudo sh -s -- --purge   # pass flags after --
 ```
+
+On **Windows** it is `/enroll/uninstall.ps1`, downloaded and run from an elevated
+PowerShell the same way as the installer — a Windows host is never handed a bash
+one-liner. It removes the scheduled task, the install directory, the state
+directory (with the token) and the logs, and it is idempotent: a missing task or
+directory is not an error. It honours the same `BLUEEYE_INSTALL_DIR` /
+`BLUEEYE_STATE_DIR` / `BLUEEYE_LOG_DIR` overrides as the installer.
 
 `uninstall.sh` is also shipped **with the agent** — the installer drops it in the
 install directory, so it's already on the machine:
