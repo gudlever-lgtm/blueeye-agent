@@ -164,3 +164,34 @@ test('sFlow collector stats() reports receive/decode counters without draining',
   assert.equal(c.stats().decodedFlows, 1);
   assert.equal(c.stats().bufferedFlows, 0);
 });
+
+test('sFlow collector reports rx/tx rates around the host it runs on', () => {
+  let clock = 0;
+  const c = createSflowCollector({ now: () => clock, localIps: () => ['10.0.0.5'] });
+  // 10.0.0.5 -> 93.184.216.34 is outbound; the reply is inbound.
+  c._feed(sflowDatagram({ samplingRate: 100, frameLength: 1000, raw: rawPacket(TCP) }));
+  c._feed(sflowDatagram({ samplingRate: 100, frameLength: 1500,
+    raw: rawPacket({ src: '93.184.216.34', dst: '10.0.0.5', srcPort: 443, dstPort: 50000, protocol: 6 }) }));
+
+  clock = 10000; // a ten-second interval
+  const t = c.drain().totals;
+  assert.equal(t.txBytes, 100000); // 1000 * 100
+  assert.equal(t.rxBytes, 150000); // 1500 * 100
+  assert.equal(t.txBytesPerSec, 10000);
+  assert.equal(t.rxBytesPerSec, 15000);
+  assert.equal(t.unattributedBytes, 0);
+});
+
+test('sFlow from a switch carries a rate but no direction, and says which', () => {
+  let clock = 0;
+  // The agent's own addresses appear at neither end — the exporter is a switch.
+  const c = createSflowCollector({ now: () => clock, localIps: () => ['172.16.0.9'] });
+  c._feed(sflowDatagram({ samplingRate: 100, frameLength: 1000, raw: rawPacket(TCP) }));
+
+  clock = 10000;
+  const t = c.drain().totals;
+  assert.equal(t.bytesPerSec, 10000); // the traffic is real and reported
+  assert.equal(t.rxBytesPerSec, 0);
+  assert.equal(t.txBytesPerSec, 0);
+  assert.equal(t.unattributedBytes, 100000); // …but not attributable to a direction
+});

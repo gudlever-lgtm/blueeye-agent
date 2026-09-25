@@ -73,17 +73,48 @@ function addFlow(map, f, bytes, packets) {
   map.set(key, rec);
 }
 
+// Which way a flow went relative to the host the agent runs on: 'rx' when the
+// host is the destination, 'tx' when it is the source, null when it is neither
+// (a switch exporting its own ports — the common sFlow case) or both (a flow
+// between two of this host's own addresses). Null is not a failure: it is the
+// honest answer, and the caller reports those bytes separately rather than
+// guessing a direction for them.
+function directionOf(f, local) {
+  if (!local || local.size === 0) return null;
+  const src = local.has(f.srcAddr);
+  const dst = local.has(f.dstAddr);
+  if (src === dst) return null; // neither end is ours, or both are
+  return src ? 'tx' : 'rx';
+}
+
 // Aggregates an array of flow records (as produced by parseV5) into:
 //   { totals, byPort: [...], byProtocol: [...], topTalkers: [...], flows: [...] }
 // `topN` caps the summary lists; `flowTopN` caps the per-5-tuple `flows` list
 // (kept larger — it is the input to the server's service dependency graph).
 // `flows` is additive: older servers ignore it and keep using `topTalkers`.
-function aggregateFlows(flows, { topN = 50, flowTopN = 200 } = {}) {
+//
+// `elapsedSec` (how long this interval actually was) and `localIps` (this
+// host's own addresses) turn the byte counts into the RATES the dashboard's
+// bandwidth columns read — the same `totals.rxBytesPerSec`/`txBytesPerSec` the
+// proc and SNMP samplers report, so a flow-sourced agent stops reading as a
+// permanent 0 B/s. Both are optional and additive:
+//
+//   * without `elapsedSec` the totals are byte counts only, exactly as before;
+//   * `bytesPerSec` is always the whole interval's rate, direction or not;
+//   * rx/tx need `localIps` to say which way a flow went. An exporter that is
+//     not this host (a switch) matches neither end, so those bytes land in
+//     `unattributedBytes` and rx/tx stay 0 — the dashboard says as much rather
+//     than showing a number nobody can source.
+function aggregateFlows(flows, { topN = 50, flowTopN = 200, elapsedSec = null, localIps = null } = {}) {
   const byPort = new Map();
   const byProto = new Map();
   const byTalker = new Map();
   const byFlow = new Map();
   const totals = { bytes: 0, packets: 0, flows: 0 };
+  const local = localIps && localIps.length ? new Set(localIps) : null;
+  let rxBytes = 0;
+  let txBytes = 0;
+  let unattributedBytes = 0;
 
   for (const f of flows) {
     const bytes = Number(f.bytes) || 0;
@@ -92,10 +123,29 @@ function aggregateFlows(flows, { topN = 50, flowTopN = 200 } = {}) {
     totals.packets += packets;
     totals.flows += 1;
 
+    const dir = directionOf(f, local);
+    if (dir === 'rx') rxBytes += bytes;
+    else if (dir === 'tx') txBytes += bytes;
+    else unattributedBytes += bytes;
+
     add(byPort, servicePort(f), bytes, packets);
     add(byProto, f.protocolName || String(f.protocol), bytes, packets);
     add(byTalker, `${f.srcAddr}->${f.dstAddr}`, bytes, packets);
     if (f.srcAddr && f.dstAddr) addFlow(byFlow, f, bytes, packets);
+  }
+
+  // Byte counts are always reported; the per-second fields only when the
+  // caller could say how long the interval was. `rxBytes + txBytes +
+  // unattributedBytes === totals.bytes`, always — nothing is counted twice.
+  totals.rxBytes = rxBytes;
+  totals.txBytes = txBytes;
+  totals.unattributedBytes = unattributedBytes;
+  const secs = Number(elapsedSec);
+  if (Number.isFinite(secs) && secs > 0) {
+    totals.elapsedSec = Math.round(secs * 1000) / 1000;
+    totals.bytesPerSec = Math.round(totals.bytes / secs);
+    totals.rxBytesPerSec = Math.round(rxBytes / secs);
+    totals.txBytesPerSec = Math.round(txBytes / secs);
   }
 
   const toSorted = (map, mapKey) =>

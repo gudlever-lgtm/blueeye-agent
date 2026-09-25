@@ -4,6 +4,7 @@ const dgram = require('dgram');
 const { parseV5 } = require('./parseV5');
 const { parseTemplated } = require('./parseTemplated');
 const { aggregateFlows } = require('./aggregate');
+const { collectLocalIps } = require('../localIps');
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -17,12 +18,18 @@ const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 // known.
 //
 // The socket factory is injectable so tests can feed packets without real UDP.
+//
+// `localIps` is read at every drain (not once at construction) so an address
+// that changes — DHCP, a new interface — is picked up without a restart; it is
+// what lets the snapshot say which way the traffic went (aggregate.js).
 function createNetflowCollector({
   port = 2055,
   bindAddress = '0.0.0.0',
   maxFlows = 100000,
   logger = silentLogger,
   createSocket = () => dgram.createSocket('udp4'),
+  now = () => Date.now(),
+  localIps = () => collectLocalIps(),
 } = {}) {
   let socket = null;
   let buffer = [];
@@ -32,6 +39,10 @@ function createNetflowCollector({
   let lastAt = null; // ms epoch of the last packet seen (any packet)
   let bound = false; // the UDP socket actually bound (vs failed/closed)
   const templates = new Map(); // v9/IPFIX template cache, persisted across packets
+  // When the interval now being drained began. The rate is measured over the
+  // time actually elapsed, not the interval the caller asked for: a slow
+  // sample or a restarted loop would otherwise overstate the bandwidth.
+  let lastDrainAt = now();
 
   function handlePacket(msg) {
     lastAt = Date.now();
@@ -70,11 +81,27 @@ function createNetflowCollector({
     });
   }
 
+  // Closes the interval: how long it ran, and whose addresses to measure it
+  // against. A failure to read the host's addresses costs the direction split,
+  // never the snapshot.
+  function intervalOpts() {
+    const at = now();
+    const elapsedSec = Math.max((at - lastDrainAt) / 1000, 0.001);
+    lastDrainAt = at;
+    let ips = null;
+    try {
+      ips = localIps();
+    } catch (err) {
+      logger.debug(`NetFlow: could not read local addresses (${err.message})`);
+    }
+    return { elapsedSec, localIps: Array.isArray(ips) ? ips : null };
+  }
+
   // Returns an aggregated snapshot of the buffered flows and clears the buffer.
   function drain(opts) {
     const flows = buffer;
     buffer = [];
-    const agg = aggregateFlows(flows, opts);
+    const agg = aggregateFlows(flows, { ...opts, ...intervalOpts() });
     return { source: 'netflow', packets: received, droppedPackets: dropped, ...agg };
   }
 
