@@ -253,11 +253,17 @@ Configuration is read from a JSON file and can be overridden by environment vari
 | (file path)       | `BLUEEYE_AGENT_CONFIG`       | `./blueeye-agent.config.json`  | Path to the JSON config             |
 | `serverUrl`       | `BLUEEYE_SERVER_URL`         | `http://localhost:3000`        | blueeye-server URL                  |
 | `enrollmentCode`  | `BLUEEYE_ENROLLMENT_CODE`    | (none)                         | One-time code — first start only    |
-| `serverCertFingerprint` | `BLUEEYE_SERVER_CERT_FINGERPRINT` | (none)              | SHA-256 of the server's TLS cert — pinned for https |
+| `serverUrls`      | `BLUEEYE_SERVER_URLS`        | (none)                         | Extra ways in to the SAME server, tried in order when a connection cannot be established. Comma/space separated |
+| `serverCertFingerprint` | `BLUEEYE_SERVER_CERT_FINGERPRINT` | (none)              | SHA-256 of the server's TLS cert — pinned for https. Several may be listed (comma separated), which is how a certificate is RENEWED without locking pinned agents out |
 | `tokenPath`       | `BLUEEYE_TOKEN_PATH`         | `<agent-dir>/.blueeye-agent/token` | Where the token is stored (0600) — relative to the agent's own directory, not cwd |
 | `heartbeatMs`     | `BLUEEYE_HEARTBEAT_MS`       | `15000`                        | Heartbeat message interval          |
 | `reconnectBaseMs` | `BLUEEYE_RECONNECT_BASE_MS`  | `1000`                         | Backoff base for reconnect          |
 | `reconnectMaxMs`  | `BLUEEYE_RECONNECT_MAX_MS`   | `30000`                        | Backoff ceiling                     |
+| `staleConnectionMs` | `BLUEEYE_STALE_CONNECTION_MS` | `3 × heartbeat` (min 30 s)  | Nothing heard back on an open socket for this long = dead, re-dial. `0` disables |
+| `socketKeepAliveMs` | `BLUEEYE_SOCKET_KEEPALIVE_MS` | `30000`                    | TCP keepalive on the WebSocket socket. `0` disables |
+| `authRetryMs`     | `BLUEEYE_AUTH_RETRY_MS`      | `900000`                       | How long to wait before re-dialling after the server refused the token (401). Never re-enrolls. `0` = the old behaviour, exit and stay down |
+| `resultSpoolMax`  | `BLUEEYE_RESULT_SPOOL_MAX`   | `240`                          | Measurements the server could not take are held and re-sent, oldest dropped past this. `0` disables |
+| `autoUpdate`      | `BLUEEYE_AUTO_UPDATE`        | `true`                         | Local opt-out from the server's auto-update policy (which is off by default) |
 | `probeIntervalMs` | `BLUEEYE_PROBE_INTERVAL_MS`  | `60000`                        | Scheduled probes — `0` disables     |
 | `probeCount`      | `BLUEEYE_PROBE_COUNT`        | `3`                            | Attempts per scheduled probe        |
 | `probeGateway`    | `BLUEEYE_PROBE_GATEWAY`      | `true`                         | Auto-ping default gateway           |

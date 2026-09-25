@@ -218,9 +218,10 @@ test('a silent address costs ~ceil(ports / concurrency) timeouts, not one per po
 });
 
 test('concurrent port probes still honour the rate limit (grants never bunch up)', async () => {
-  // Real timers, short interval: 100/s = one grant per 10 ms. Without the
-  // queued acquire, every waiting worker computed its wait from the same
-  // stale slot and they all woke together.
+  // Real timers, short interval: 100/s = one grant per 10 ms. Six workers race
+  // for those slots, which is the case that used to fail: each one waiting read
+  // the same `nextAt`, computed the same wait, and they all woke together — so a
+  // scan fired six probes in one millisecond and the rate limit meant nothing.
   const limiter = createRateLimiter({ ratePerSec: 100 });
   const grants = [];
   const wrapped = { acquire: async () => { await limiter.acquire(); grants.push(performance.now()); } };
@@ -232,13 +233,28 @@ test('concurrent port probes still honour the rate limit (grants never bunch up)
     portConcurrency: 6,
   });
   await scanner.scan({ cidrs: ['10.0.0.1/32'], addressCap: 10, rateLimiter: wrapped });
-  // 1 address grant + 6 ports + 1 rDNS (icmp alive) = 8 grants, ~10 ms apart.
+  // 1 address grant + 6 ports + 1 rDNS (icmp alive) = 8 grants.
   assert.equal(grants.length, 8);
+
+  // What matters is the RATE, not each individual gap. Slots are absolute, so an
+  // oversleeping timer is absorbed by the grant after it: a 15 ms gap is followed
+  // by a 4 ms one and the schedule is still exactly on time. Asserting a floor on
+  // every gap forbade that catch-up and failed intermittently on a loaded
+  // machine — for the behaviour that keeps the average right.
+  const elapsed = grants[grants.length - 1] - grants[0];
+  const expected = (grants.length - 1) * limiter.intervalMs;
+  // Tolerance for libuv's cached loop time (a 10 ms timer may fire a few ms early
+  // by the wall clock).
+  assert.ok(
+    elapsed >= expected - 8,
+    `8 grants took ${elapsed.toFixed(1)} ms; at 100/s they must take about ${expected} ms`
+  );
+
+  // And bunching, which is the actual regression this guards: two grants in the
+  // same instant. Real spacing is milliseconds; a bunched pair is ~0 ms apart.
   for (let i = 1; i < grants.length; i += 1) {
     const gap = grants[i] - grants[i - 1];
-    // Tolerance for libuv's cached loop time (a 10 ms timer may fire ~3 ms
-    // early by the wall clock); bunched grants are ~0 ms apart.
-    assert.ok(gap >= 5, `grant ${i} came ${gap.toFixed(1)} ms after the previous`);
+    assert.ok(gap >= 1, `grant ${i} came ${gap.toFixed(3)} ms after the previous — they bunched`);
   }
 });
 

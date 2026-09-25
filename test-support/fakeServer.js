@@ -56,6 +56,7 @@ function startFakeServer(options = {}) {
   // Mutable (setMonitorConfig/setSnmpTargets) so a test can change the
   // assignment under a RUNNING agent, the way an operator does.
   let monitorConfig = options.monitorConfig || { source: 'proc' };
+  let updates = options.updates || null;
   // The switches the server has assigned to this agent to poll. Absent by
   // default, which is what an older server looks like to a newer agent.
   let snmpTargets = options.snmpTargets || null;
@@ -153,6 +154,9 @@ function startFakeServer(options = {}) {
       configFetches += 1;
       const body = { agentId: issuedAgentId, monitorConfig };
       if (snmpTargets) body.snmpTargets = snmpTargets;
+      // The version this server offers and whether the agent may go and get it.
+      // Absent by default, which is what an older server sends.
+      if (updates) body.updates = updates;
       const answer = () => {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(body));
@@ -369,6 +373,7 @@ function startFakeServer(options = {}) {
         waitForWsMessage,
         addValidToken: (t) => validTokens.add(t),
         setMonitorConfig: (mc) => { monitorConfig = mc; },
+        setUpdateOffer: (u) => { updates = u; },
         setSnmpTargets: (list) => { snmpTargets = list; },
         setConfigDelayMs: (ms) => { configDelayMs = ms; },
         configFetchCount: () => configFetches,

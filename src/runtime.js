@@ -17,6 +17,9 @@ const { createActionLog } = require('./actionLog');
 const { resolveReleasePublicKey } = require('./release/publicKey');
 const keyStore = require('./release/keyStore');
 const releaseGuard = require('./release/releaseGuard');
+const { createResultSpool } = require('./resultSpool');
+const { isWithinWindow } = require('./updateWindow');
+const { isNewer: isNewerVersion } = require('./version');
 const { verifyTrustProof } = require('./license/trustProof');
 const { runSpeedtest } = require('./speedtest');
 const { runTest } = require('./testRunner');
@@ -25,7 +28,7 @@ const { runProbe } = require('./probes');
 const { resolveProbeTargets } = require('./probes/targets');
 const { createSampler } = require('./monitor');
 const { createHsflowdManager } = require('./sflow/hsflowd');
-const { detectCapabilities } = require('./capabilities');
+const { detectCapabilities, isSelfUpdatable } = require('./capabilities');
 const { collectNicInfo } = require('./nicInfo');
 const { collectConnections } = require('./connTable');
 const { collectArpTable } = require('./arpTable');
@@ -158,6 +161,9 @@ function createAgentRuntime({
   releasesDir = process.env.BLUEEYE_RELEASES_DIR || '',
   guard = releaseGuard,
   confirmReleaseAfterMs = releaseGuard.DEFAULT_CONFIRM_MS,
+  // Bounded hold for measurements the server could not take (resultSpool.js).
+  // Injectable so a test can watch what was kept and what was dropped.
+  resultSpool = null,
   // The release trust anchor; injectable for tests. A key pinned here by an
   // accepted rekey wins over the one the installer baked into the environment.
   releasePublicKey = resolveReleasePublicKey(process.env, { pinnedPath: pinnedKeyPath, readPinned: (f) => keys.readPinnedKey(f) }),
@@ -185,7 +191,7 @@ function createAgentRuntime({
   // replaces it while the agent runs: the update that follows it must verify
   // against the new key without waiting for a restart.
   let pinnedKey = releasePublicKey;
-  const updater = selfUpdater || createSelfUpdater({ logger });
+  const updater = selfUpdater || createSelfUpdater({ logger, runtime: capabilities.managed });
   // The deleter must wipe the token the runtime actually uses: tokenPath can be
   // set via the config FILE (not just env), and selfDelete's own default only
   // sees the env — so a file-configured path would be left un-wiped.
@@ -197,18 +203,39 @@ function createAgentRuntime({
   // When a cert fingerprint is configured and the server is https, pin it on the
   // REST calls too (the WS client pins separately). Falls back to the injected
   // fetch (or global fetch) otherwise — so tests that inject a fetch are unaffected.
-  const fp = config.serverCertFingerprint;
-  const effectiveFetch = (fp && /^https:/i.test(config.serverUrl)) ? makePinnedFetch(fp) : fetchImpl;
-  const api = createApiClient({ serverUrl: config.serverUrl, token, fetchImpl: effectiveFetch });
+  // Several pins may be configured so a certificate can be renewed without
+  // locking the fleet out; `serverCertFingerprint` (the first) stays for config
+  // files and callers that only ever knew one.
+  const fp = (config.serverCertFingerprints && config.serverCertFingerprints.length)
+    ? config.serverCertFingerprints
+    : config.serverCertFingerprint;
+  const anyHttps = [config.serverUrl, ...(config.serverUrls || [])].some((u) => /^https:/i.test(String(u || '')));
+  const hasPin = Array.isArray(fp) ? fp.length > 0 : !!fp;
+  const effectiveFetch = (hasPin && anyHttps) ? makePinnedFetch(fp) : fetchImpl;
+  // The live channel decides which of the configured URLs is in use; REST
+  // follows it, so a failover moves the whole agent rather than half of it.
   const client = createAgentClient({
     serverUrl: config.serverUrl,
+    serverUrls: config.serverUrls,
     token,
     logger,
     heartbeatMs: config.heartbeatMs,
     backoff: config.backoff,
     WebSocketImpl,
     certFingerprint: fp,
+    staleConnectionMs: config.staleConnectionMs,
+    socketKeepAliveMs: config.socketKeepAliveMs,
+    authRetryMs: config.authRetryMs,
   });
+  const api = createApiClient({
+    serverUrl: () => (typeof client.activeServerUrl === 'function' ? client.activeServerUrl() : config.serverUrl),
+    token,
+    fetchImpl: effectiveFetch,
+  });
+  // Measurements the server could not take. A reading is taken at a moment that
+  // does not come back, so an outage should cost a delay in DELIVERY, not a hole
+  // in the history. Bounded, oldest dropped (resultSpool.js).
+  const spool = resultSpool || createResultSpool({ max: config.resultSpoolMax, logger });
 
   // Transaction-test executor: runs server-pushed http/tcp/dns/icmp tests on their
   // own schedule (interval_sec ± 10% jitter), buffers results while offline (max
@@ -394,6 +421,41 @@ function createAgentRuntime({
     emitter.emit('fatal', reason);
   }
 
+  // A 401 on a REST call. Terminal only when no auth retry is configured.
+  // Otherwise the agent PAUSES — it stops measuring and reporting into a server
+  // that will not have it — while the live channel keeps re-dialling on its long
+  // timer. A token the server starts accepting again (a restore from backup, a
+  // re-provisioned server, a rotation someone finished) then brings the agent
+  // back by itself, which is the whole point: the fleet must not need a shell on
+  // every host to recover from a server-side mistake.
+  let authPaused = false;
+  function handleTokenRejected(reason = 'rest-token-rejected') {
+    if (config.authRetryMs > 0) {
+      if (fatal || authPaused) return;
+      authPaused = true;
+      stopReporting();
+      stopCapabilitiesReporting();
+      stopConfigRefresh();
+      logger.error(
+        `Token rejected (HTTP 401); pausing. Not re-enrolling; the connection keeps retrying every ${Math.round(config.authRetryMs / 1000)}s.`
+      );
+      emitter.emit('auth-rejected', { reason, retryInMs: config.authRetryMs });
+      return;
+    }
+    handleFatal(reason);
+  }
+
+  // The token works again. Puts back everything handleTokenRejected stopped.
+  function resumeAfterAuth() {
+    if (!authPaused || fatal) return;
+    authPaused = false;
+    logger.info('Token accepted again; resuming reporting.');
+    startCapabilitiesReporting();
+    startConfigRefresh();
+    if (reportingStarted) startReporting();
+    emitter.emit('auth-recovered');
+  }
+
   // Ships a non-fatal operational error to the server over the live channel so it
   // surfaces in the server's audit trail (Reporting → Audit) — not just the local
   // log. Best-effort and metadata-only: a closed socket just drops it (the server
@@ -435,17 +497,18 @@ function createAgentRuntime({
         throw err;
       }
       const result = fitted.value;
-      const response = await api.postResults([result]);
+      const response = await spool.deliver('traffic', [result], (items) => api.postResults(items));
       lastReportAt = Date.now();
       logger.info(`Traffic measured (${source}, ${monitorConfig.source}); results submitted.`);
       emitter.emit('results-submitted', { result, response, source });
       return true;
     } catch (err) {
       if (err.code === 'TOKEN_REJECTED') {
-        handleFatal();
+        handleTokenRejected();
         return false;
       }
-      logger.error(`Failed to measure/submit traffic (${source}): ${err.message}`);
+      const waiting = typeof err.spooled === 'number' ? err.spooled : spool.pending('traffic');
+      logger.error(`Failed to measure/submit traffic (${source}): ${err.message}${waiting ? ` (${waiting} batch(es) spooled for the next attempt)` : ''}`);
       reportError('traffic-report', err);
       emitter.emit('command-error', err);
       return false;
@@ -462,13 +525,13 @@ function createAgentRuntime({
   async function runProbeAndSubmit(probeSpec) {
     try {
       const result = await probeRunner(probeSpec, liveTraceDeps(probeSpec));
-      const response = await api.postProbeResults([result]);
+      const response = await spool.deliver('probe', [result], (items) => api.postProbeResults(items));
       const outcome = describeProbeOutcome(result);
       logger.info(`Probe ${result.type} → ${result.target}: ${outcome}.`);
       emitter.emit('probe-submitted', { result, response });
       return true;
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+      if (err.code === 'TOKEN_REJECTED') { handleTokenRejected(); return false; }
       logger.error(`Failed to run/submit probe: ${err.message}`);
       reportError('probe', err);
       emitter.emit('command-error', err);
@@ -523,7 +586,7 @@ function createAgentRuntime({
       emitter.emit('discovery-submitted', payload);
       return true;
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+      if (err.code === 'TOKEN_REJECTED') { handleTokenRejected(); return false; }
       // A scope refusal is an expected outcome, not an error — report it so the
       // server can audit "refused (reason)" instead of the sweep vanishing.
       if (err instanceof DiscoveryScopeError) {
@@ -626,7 +689,7 @@ function createAgentRuntime({
       logger.info(`Reported capabilities: ${capabilities.sources.join(', ') || '(none)'}${nicNote}${connNote}${arpNote}${lldpNote}`);
       emitter.emit('capabilities-reported', payload);
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return; }
+      if (err.code === 'TOKEN_REJECTED') { handleTokenRejected(); return; }
       logger.warn(`Could not report capabilities (${err.message}).`);
       reportError('capabilities', err);
     }
@@ -655,6 +718,11 @@ function createAgentRuntime({
       const body = await api.getFullConfig();
       if (fatal) return { ok: false, changed: false, devices: snmpTargetCount };
       const mc = (body && body.monitorConfig) || { source: 'proc' };
+      // The version the server offers, and whether it will let this agent go and
+      // get it. Evaluated on every config read, which is what reaches an agent
+      // that is only online for a few minutes at a time — nobody has to time a
+      // click to its connection any more.
+      considerSelfUpdate(body && body.updates);
       const targets = body ? body.snmpTargets : undefined;
       const targetsKey = stableKey(targets === undefined ? null : targets);
       const targetsChanged = targetsKey !== appliedTargetsKey;
@@ -688,10 +756,57 @@ function createAgentRuntime({
       await reconcileHsflowd();
       return { ok: true, changed: true, devices: snmpTargetCount };
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return { ok: false, changed: false, devices: 0 }; }
+      if (err.code === 'TOKEN_REJECTED') { handleTokenRejected(); return { ok: false, changed: false, devices: 0 }; }
       logger.warn(`Could not fetch monitor config (${err.message}); using ${monitorConfig.source}.`);
       reportError('config', err);
       return { ok: false, changed: false, devices: snmpTargetCount, error: err.message };
+    }
+  }
+
+  // Asking for our own update.
+  //
+  // Updates used to be pure push: an admin clicked, and the click had to land
+  // while the agent was connected. An agent that is online for ten minutes a day
+  // was therefore effectively un-updatable, and nothing on the agent even knew it
+  // was behind. Now the server states what it offers in the config this agent
+  // already reads, and the agent asks.
+  //
+  // Everything here is a reason NOT to ask; the server re-checks all of it before
+  // it sends anything, because a permission that travelled to a host and back is
+  // not a decision the server made:
+  //
+  //   * the local opt-out (`autoUpdate` in the agent config) — one host can
+  //     refuse without the server having to know;
+  //   * the server's policy flag, off by default;
+  //   * a runtime that can actually be restarted onto new code;
+  //   * the offered version being NEWER than ours, never merely different — a
+  //     downgrade is not an update;
+  //   * the maintenance window, in this host's own local time. A monitoring agent
+  //     restarting mid-incident is its own kind of outage;
+  //   * once per offered version. A reconnect loop must not become an update loop.
+  let requestedUpdateFor = null;
+  function considerSelfUpdate(updates) {
+    if (!updates || typeof updates !== 'object') return;
+    const offered = updates.agentVersion ? String(updates.agentVersion) : '';
+    if (!offered) return;
+    if (!config.autoUpdateEnabled) return;
+    if (!updates.auto) return;
+    if (!isSelfUpdatable(capabilities.managed)) return;
+    const current = capabilities.agentVersion || '';
+    if (!current || !isNewerVersion(offered, current)) return;
+    if (!isWithinWindow(updates.window || '')) {
+      logger.info(`Update to v${offered} is available but outside the maintenance window (${updates.window}); waiting.`);
+      return;
+    }
+    if (requestedUpdateFor === offered) return;
+    requestedUpdateFor = offered;
+    if (client.send({ type: 'update-request', currentVersion: current, offeredVersion: offered })) {
+      logger.info(`Agent is on v${current} and the server offers v${offered}; requested the update.`);
+      actions.log('update.requested', { from: current, to: offered });
+      emitter.emit('update-requested', { from: current, to: offered });
+    } else {
+      // Not connected: nothing was asked, so do not remember having asked.
+      requestedUpdateFor = null;
     }
   }
 
@@ -859,7 +974,7 @@ function createAgentRuntime({
       emitter.emit('device-events', events.length);
       return events.length;
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return 0; }
+      if (err.code === 'TOKEN_REJECTED') { handleTokenRejected(); return 0; }
       logger.warn(`Could not submit ${events.length} device event(s) (${err.message}).`);
       reportError('device-events', err);
       return 0;
@@ -1010,7 +1125,7 @@ function createAgentRuntime({
       }
       return r;
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return { polled: 0, failed: 0 }; }
+      if (err.code === 'TOKEN_REJECTED') { handleTokenRejected(); return { polled: 0, failed: 0 }; }
       logger.warn(`SNMP topology cycle failed (${err.message}).`);
       reportError('snmp-topology', err);
       return { polled: 0, failed: 0 };
@@ -1031,7 +1146,7 @@ function createAgentRuntime({
       }
       return r;
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return { polled: 0, failed: 0 }; }
+      if (err.code === 'TOKEN_REJECTED') { handleTokenRejected(); return { polled: 0, failed: 0 }; }
       logger.warn(`SNMP counter cycle failed (${err.message}).`);
       reportError('snmp-counters', err);
       return { polled: 0, failed: 0 };
@@ -1099,7 +1214,7 @@ function createAgentRuntime({
       emitter.emit('scheduled-probes-submitted', { results, response });
       return true;
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+      if (err.code === 'TOKEN_REJECTED') { handleTokenRejected(); return false; }
       // A 400 refuses the WHOLE batch — typically one result an older server
       // does not know (a probe type added after it shipped). Resubmit one by
       // one so the rest of the cycle still lands; only the refused result is
@@ -1123,7 +1238,7 @@ function createAgentRuntime({
         await api.postProbeResults([result]);
         accepted.push(result);
       } catch (err) {
-        if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+        if (err.code === 'TOKEN_REJECTED') { handleTokenRejected(); return false; }
         refused.push({ type: result && result.type, target: result && result.target, error: err.message });
       }
     }
@@ -1162,6 +1277,9 @@ function createAgentRuntime({
 
   client.on('open', () => {
     emitter.emit('open');
+    // A connection that opened means the token was accepted, so a pause taken
+    // over a 401 is over.
+    resumeAfterAuth();
     // On (re)connect, re-report capabilities AND refresh config. Re-reporting
     // capabilities converges the server's stored agent version onto the running
     // one — after a self-update/restart, or when the one-shot bootstrap report
@@ -1199,6 +1317,24 @@ function createAgentRuntime({
 
   client.on('connected', (m) => { armReleaseConfirmation(); emitter.emit('connected', m); });
   client.on('close', (code) => emitter.emit('close', code));
+  // The WS saw the 401 first (the handshake carries the token). Pause the same
+  // way a REST 401 does, so nothing keeps measuring into a server that refuses
+  // this agent.
+  client.on('auth-rejected', ({ reason, retryInMs }) => {
+    handleTokenRejected(reason);
+    emitter.emit('auth-rejected', { reason, retryInMs });
+  });
+  // The connection was open but the peer had stopped answering. Worth surfacing:
+  // it is the difference between "the network broke" and "the socket closed".
+  client.on('stale', (info) => {
+    actions.log('connection.stale', { staleMs: info.staleMs, serverUrl: info.serverUrl });
+    emitter.emit('stale', info);
+  });
+  client.on('server-url', (url) => {
+    logger.warn(`Server URL failover: now using ${url}.`);
+    actions.log('connection.failover', { serverUrl: url });
+    emitter.emit('server-url', url);
+  });
   // A WS-origin fatal (e.g. 401 handshake) must fully shut the runtime down too
   // — stop reporting + mark fatal — not just re-emit, so no timers linger.
   client.on('fatal', (reason) => handleFatal(reason));
@@ -1218,6 +1354,12 @@ function createAgentRuntime({
       intervalMs: effectiveIntervalMs,
       lastReportAt: lastReportAt ? new Date(lastReportAt).toISOString() : null,
       collector: stats ? { kind, ...stats } : null,
+      // What is waiting to be delivered, and how old the oldest is. The
+      // difference between "this agent stopped measuring" and "this agent cannot
+      // get its measurements to me", answerable without host access.
+      spool: typeof spool.stats === 'function' ? spool.stats() : null,
+      // Which of the configured ways in it is using, so a failover is visible.
+      serverUrl: typeof client.activeServerUrl === 'function' ? client.activeServerUrl() : config.serverUrl,
       hsflowd: lastHsflowdState ? { state: lastHsflowdState.state, detail: lastHsflowdState.detail || null } : null,
       // Same question as the flow pipeline, one layer over: are device events
       // arriving at all, are they being refused by the rate limit, and is the
@@ -1318,16 +1460,20 @@ function createAgentRuntime({
     if (!authorizeCommand(command, { log: 'update', audit: 'upgrade' })) return;
     const managed = capabilities.managed;
     const auditId = command && command.auditId;
-    if (managed !== 'systemd') {
+    // systemd, a Windows service and a launchd job can all be restarted onto new
+    // code. Docker rebuilds its image and nothing restarts an unmanaged process,
+    // so those two still decline — with the reason, so the dashboard can say why
+    // instead of showing an update that quietly never happens.
+    if (!isSelfUpdatable(managed)) {
       const reason = managed === 'docker' ? 'docker-managed' : 'unmanaged';
       client.send({ type: 'ack', id: command && command.id, accepted: false, runtime: managed || 'unmanaged', reason });
       actions.log('update.declined', { runtime: managed || 'unmanaged', reason });
       if (auditId != null) client.send({ type: 'action-result', auditId, action: 'upgrade', ok: false, detail: reason });
-      logger.warn(`Ignoring update command: runtime '${managed}' is not self-updatable (systemd only).`);
+      logger.warn(`Ignoring update command: runtime '${managed}' cannot be restarted onto new code.`);
       emitter.emit('update-skipped', { managed, reason });
       return;
     }
-    client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: 'systemd' });
+    client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: managed });
     const targetVersion = (command && command.version) || null;
     const signed = !!(command && command.signature);
     actions.log('update.start', { version: targetVersion, signed });
@@ -1355,7 +1501,12 @@ function createAgentRuntime({
       const restarted = updater.restart();
       if (restarted && restarted.ok === false) {
         const unit = process.env.BLUEEYE_SERVICE_NAME || 'blueeye-agent';
-        const detail = `installed v${targetVersion || '?'} but the service restart failed (${restarted.detail}) — run: systemctl restart ${unit}`;
+        const hint = managed === 'windows-service'
+          ? `Restart-Service ${unit}`
+          : (managed === 'launchd'
+            ? `launchctl kickstart -k system/${process.env.BLUEEYE_LAUNCHD_LABEL || 'com.blueeye.agent'}`
+            : `systemctl restart ${unit}`);
+        const detail = `installed v${targetVersion || '?'} but the service restart failed (${restarted.detail}) — run: ${hint}`;
         actions.log('update.restart-failed', { version: targetVersion, error: restarted.detail });
         logger.error(`Self-update: ${detail}`);
         client.send({ type: 'command-result', id: command && command.id, ok: false, error: detail });
@@ -1617,7 +1768,7 @@ function createAgentRuntime({
       emitter.emit('speedtest-submitted', { result, response });
       return true;
     } catch (err) {
-      if (err.code === 'TOKEN_REJECTED') { handleFatal(); return false; }
+      if (err.code === 'TOKEN_REJECTED') { handleTokenRejected(); return false; }
       logger.error(`Speed test failed: ${err.message}`);
       reportError('speedtest', err);
       emitter.emit('command-error', err);

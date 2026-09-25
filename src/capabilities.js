@@ -37,17 +37,38 @@ function detectCapabilities({
   return { sources, unavailable, agentVersion: version, managed };
 }
 
+// Which service managers can restart this agent onto new code. Docker rebuilds
+// the image instead, and nothing restarts an unmanaged process, so those two are
+// the ones a one-click update has to decline.
+const SELF_UPDATABLE = ['systemd', 'windows-service', 'launchd'];
+const RUNTIMES = [...SELF_UPDATABLE, 'docker', 'unmanaged'];
+
 // How this agent is supervised, which decides whether it can self-update:
 //   - explicit BLUEEYE_RUNTIME (set by the installer) wins;
 //   - a Docker container is detected via /.dockerenv or $container;
 //   - a systemd service sets $INVOCATION_ID;
+//   - a launchd job gets $XPC_SERVICE_NAME (and it is not the placeholder
+//     launchd hands an interactive shell);
 //   - otherwise 'unmanaged' (a bare `node src/index.js` nothing would restart).
+//
+// A Windows service cannot be detected from the environment — the process looks
+// like any other — so there it is the installer's BLUEEYE_RUNTIME that says so.
+// Without it a Windows agent reports 'unmanaged' and declines updates, which is
+// the old behaviour and the safe one.
 function detectManaged({ env = process.env, fileExists = defaultFileExists } = {}) {
   const explicit = String(env.BLUEEYE_RUNTIME || '').toLowerCase();
-  if (explicit === 'docker' || explicit === 'systemd' || explicit === 'unmanaged') return explicit;
+  if (RUNTIMES.includes(explicit)) return explicit;
   if (fileExists('/.dockerenv') || env.container) return 'docker';
   if (env.INVOCATION_ID) return 'systemd';
+  const xpc = String(env.XPC_SERVICE_NAME || '');
+  if (xpc && xpc !== '0' && !/^com\.apple\.xpc\.launchd\.oneshot/.test(xpc)) return 'launchd';
   return 'unmanaged';
+}
+
+// Can the server push code to this agent at all? Used by the update handler and
+// reported to the server so the dashboard does not offer what cannot work.
+function isSelfUpdatable(managed) {
+  return SELF_UPDATABLE.includes(String(managed || '').toLowerCase());
 }
 
 function defaultFileExists(p) {
@@ -84,4 +105,4 @@ function readVersion() {
   }
 }
 
-module.exports = { detectCapabilities, detectManaged };
+module.exports = { SELF_UPDATABLE, isSelfUpdatable, detectCapabilities, detectManaged };

@@ -3,10 +3,14 @@
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
-const { normalizeFingerprint } = require('./fingerprint');
+const { normalizeFingerprint, normalizeFingerprints } = require('./fingerprint');
 
-// Compares a peer certificate against an expected SHA-256 fingerprint. Returns
-// an Error on a mismatch, or undefined to accept (incl. when no pin is set).
+// Compares a peer certificate against the expected SHA-256 fingerprint(s).
+// Returns an Error on a mismatch, or undefined to accept (incl. when no pin is
+// set). `expected` may be one fingerprint or several (array, or one string
+// listing them) — several is what lets a certificate be RENEWED without locking
+// every pinned agent out: the next certificate's pin is added before the
+// renewal, the old one removed after.
 //
 // We pin the EXACT leaf certificate rather than trusting the CA chain — that's
 // stricter for our case (an on-prem server or reverse proxy, often with a
@@ -14,12 +18,14 @@ const { normalizeFingerprint } = require('./fingerprint');
 // rejectUnauthorized is false, callers verify on the socket's 'secureConnect'
 // (see verifyPeerOrDestroy) instead of via checkServerIdentity.
 function checkPin(expected) {
-  const want = normalizeFingerprint(expected);
+  const want = normalizeFingerprints(expected);
   return (_host, cert) => {
-    if (!want) return undefined; // no pin configured -> accept
+    if (!want.length) return undefined; // no pin configured -> accept
     const got = normalizeFingerprint(cert && cert.fingerprint256);
-    if (!got || got !== want) {
-      const err = new Error(`Server certificate fingerprint mismatch (expected ${want}, got ${got || 'none'})`);
+    if (!got || !want.includes(got)) {
+      const err = new Error(
+        `Server certificate fingerprint mismatch (expected ${want.join(' or ')}, got ${got || 'none'})`
+      );
       err.code = 'CERT_FINGERPRINT_MISMATCH';
       return err;
     }
@@ -70,8 +76,8 @@ function requestJson({ url, method = 'GET', headers = {}, body, fingerprint, tim
         ...headers,
       },
     };
-    const wantFp = isHttps ? normalizeFingerprint(fingerprint) : '';
-    if (wantFp) opts.rejectUnauthorized = false; // trust = the pinned fingerprint, verified on secureConnect
+    const wantFp = isHttps ? normalizeFingerprints(fingerprint) : [];
+    if (wantFp.length) opts.rejectUnauthorized = false; // trust = the pinned fingerprint(s), verified on secureConnect
 
     const req = lib.request(opts, (res) => {
       const chunks = [];
@@ -86,7 +92,7 @@ function requestJson({ url, method = 'GET', headers = {}, body, fingerprint, tim
     });
     // Pin the leaf cert as soon as the TLS handshake completes, before the
     // request body (which may carry the enrollment code) is flushed.
-    if (wantFp) {
+    if (wantFp.length) {
       req.on('socket', (socket) => socket.on('secureConnect', () => verifyPeerOrDestroy(socket, wantFp)));
     }
     req.on('error', reject);

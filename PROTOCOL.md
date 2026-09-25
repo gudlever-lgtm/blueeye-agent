@@ -74,8 +74,21 @@ key-order-independently) — an unchanged config restarts nothing.
 
 ```jsonc
 // 200 response
-{ "agentId": 42, "monitorConfig": { "source": "proc" } }
+{ "agentId": 42, "monitorConfig": { "source": "proc" },
+  // server ≥ 0.198.0; omitted when the server offers no agent version
+  "updates": { "agentVersion": "0.44.0", "auto": false, "window": "02:00-04:00" } }
 ```
+
+`updates` (server ≥ 0.198.0, absent from older servers) is how an agent learns it
+is behind. `agentVersion` is the version the server offers; `auto` is whether its
+policy lets an agent update ITSELF; `window` is a maintenance window as
+`HH:MM-HH:MM` in the AGENT's local time (empty = any time, and it may wrap
+midnight). When `auto` is true, the agent is behind, its runtime can be restarted
+onto new code and the local `BLUEEYE_AUTO_UPDATE` opt-out is not set, the agent
+sends an `update-request` frame (§2.2) — once per offered version, so a reconnect
+loop is not an update loop. `auto` is a PERMISSION, not an instruction: the server
+re-checks every one of those conditions, and rate-limits the request, before it
+pushes anything.
 
 The agent uses `body.monitorConfig || { source: 'proc' }`. The `monitorConfig`
 shape (validated server-side in `validation/agentValidation.js
@@ -588,13 +601,14 @@ to take a monitoring agent off a host nobody is watching.
 | --- | --- | --- |
 | `heartbeat` | `{ type:'heartbeat', ts:<ms epoch> }` | not parsed; refreshes `last_seen` like any frame |
 | `ack` (ping) | `{ type:'ack', id, ok:true, agentVersion, sources, managed }` | resolves the pending waiter for `id`; `POST /agents/:id/ping` returns `agentVersion`/`sources`/`managed` |
-| `ack` (update/delete/install-tool) | `{ type:'ack', id, accepted:bool, runtime:'systemd'\|'docker'\|'unmanaged', reason?:'docker-managed'\|'unmanaged' }` | resolves the waiter; `accepted:false` marks the audit row failed with `reason` |
+| `ack` (update/delete/install-tool) | `{ type:'ack', id, accepted:bool, runtime:'systemd'\|'windows-service'\|'launchd'\|'docker'\|'unmanaged', reason?:'docker-managed'\|'unmanaged' }` | resolves the waiter; `accepted:false` marks the audit row failed with `reason` |
 | `command-result` | `{ type:'command-result', id, ok:true, diagnostic }` (diagnose) · `{ type:'command-result', id, ok:false, error }` (update failure) | resolves the waiter for `id` (diagnose reads `reply.diagnostic`); an update-failure result usually arrives after the waiter timed out/was resolved by the ack, so it is dropped — the failure reaches the server via `action-result` instead |
 | `action-result` | `{ type:'action-result', auditId, action:'upgrade'\|'delete'\|'install-tool', ok:bool, version?, tool?, package?, manager?, detail? }` | completes the `agent_action_audit` row (`completed`/`failed`, detail ≤ 300 chars or `"version X"`); `action:'install-tool'` adds an `agent.install-tool` audit event; `action:'delete', ok:true` **deletes the agent row** (tokens cascade) and notifies the dashboard |
 | `sflow.status` | `{ type:'sflow.status', state, detail\|null }` | `state` validated against `active\|inactive\|failed\|not_installed\|install_failed\|permission_denied\|unknown` (else `unknown`), `detail` ≤ 300; kept in-memory per agent (repopulated on reconnect), shown on the agents list, pushed to the dashboard |
 | `agent.error` | `{ type:'agent.error', category, code\|null, message }` | recorded as a recurring `agent.error` audit event, deduped per `(agent, category, code)`; `category` ≤ 48, `code` ≤ 48, `message` → `reason` ≤ 300; pushed to the dashboard |
 | `transaction_result` | `{ type:'transaction_result', results:[{ test_id, time, status, latency_ms, step_timings?, step_phases?, step_failed?, detail? }] }` | batch-inserted into `transaction_results` after being checked against the agent's assignments. `step_phases[i]` is the dns/tcp/tls/ttfb/transfer split of `step_timings[i]` — see §2.5 |
 | `transaction_capture` | `{ type:'transaction_capture', test_id, time, capture:{ reason, iface, filter, snaplen, duration_ms, observed, dropped, foreign, truncated, packets:[…] } }` | stored in `transaction_captures`, keyed by `(test_id, agent_id, time)` — the same key the result row carries, so neither frame has to arrive first. Headers only; see §2.5 |
+| `update-request` | `{ type:'update-request', currentVersion, offeredVersion }` | the agent read `updates` out of §1.3, found itself behind and is asking. The server re-checks the policy, that the agent really is behind, and a per-agent cooldown (30 min), then pushes an `update` command; it answers `{ type:'update-request-result', accepted, reason }` either way (`auto-update-disabled`, `not-behind`, `cooldown`, `no-source`, `send-failed`). Ignored by a server that has no update service wired |
 
 `agent.error` categories currently emitted (`src/runtime.js reportError`):
 `capabilities`, `config`, `device-events`, `discovery`, `probe`,
@@ -750,28 +764,44 @@ collector port, the reporting interval, and whether to self-provision hsflowd.
 
 ## 4. Server-initiated flows
 
-### 4.1 Upgrade (self-update; systemd-managed agents only)
+### 4.1 Upgrade (self-update; any agent under a service manager that can restart it)
 
-1. Operator hits `POST /agents/:id/update` (admin). Server picks the latest
-   **signed release** (version+sha256+signature) or falls back to the source
-   bundle (sha256 only), records an `agent_action_audit` row (`requested`), and
-   pushes `{name:'update', id, auditId, version?, sha256, signature?}`
-   (8 s wait).
+0. Three things can START an update, and all three produce the same command:
+   an admin's `POST /agents/:id/update`, a fleet rollout
+   (`POST /agents/updates/fleet`, one batch at a time), and the agent's own
+   `update-request` (§2.2) after it read `updates` out of §1.3. When the agent is
+   NOT connected the server queues the command and delivers it on the agent's next
+   connect — stored unsigned and signed at delivery, because a command signature
+   carries `issuedAt` and §2.3 refuses one more than five minutes old.
+1. Server picks the latest **signed release** (version+sha256+signature) or falls
+   back to the source bundle (sha256 only), records an `agent_action_audit` row
+   (`requested`), and pushes `{name:'update', id, auditId, version?, sha256,
+   signature?}` (8 s wait).
 2. Agent (`src/runtime.js handleUpdate`):
-   - non-systemd ⇒ `ack {accepted:false, runtime, reason}` +
-     `action-result {ok:false, detail:reason}`; server marks the audit failed.
-   - systemd ⇒ `ack {accepted:true, runtime:'systemd'}` immediately.
+   - a runtime nothing can restart (`docker`, `unmanaged`) ⇒
+     `ack {accepted:false, runtime, reason}` + `action-result {ok:false,
+     detail:reason}`; server marks the audit failed.
+   - `systemd`, `windows-service` or `launchd` ⇒ `ack {accepted:true, runtime}`
+     immediately.
 3. Download from `/enroll/agent-release.tgz` (signed) or
    `/enroll/agent-source.tgz` (legacy) — §1.8 verification, fail-closed.
 4. `assertSafeTar` (reject absolute / `..` members), then install:
    - **Atomic layout** (`BLUEEYE_RELEASES_DIR` + `BLUEEYE_CURRENT_LINK` + known
      version): extract to `releases/<version>`, `npm ci --omit=dev` (fallback
-     `npm install`), atomically repoint `current` (symlink + rename), record
+     `npm install`), repoint `current` (a symlink + rename on POSIX, which is
+     atomic; a remove + junction on Windows, which has no rename-onto-an-existing-
+     junction — the gap is covered by the old process still serving), record
      `.previous` for `rollback()`, prune to 3 releases.
    - otherwise: in-place extract over the install dir + npm install.
 5. `action-result {auditId, action:'upgrade', ok:true, version}` is sent
-   **before** restarting (after restart the old process can't speak), then
-   `systemctl --no-block restart <service>`.
+   **before** restarting (after restart the old process can't speak), then the
+   restart, per runtime: `systemctl --no-block restart <service>`,
+   `launchctl kickstart -k system/<label>`, or on Windows a DETACHED `cmd` that
+   stops and starts the service — a service cannot stop itself in the foreground,
+   because the stop ends the process that was going to issue the start.
+   Under systemd the rollback guard runs as `ExecStartPre`; a Windows service and
+   a launchd job have no such hook, so the agent runs the guard itself at startup
+   and EXITS after a rollback, so the service manager starts the restored release.
 6. On failure: `command-result {id, ok:false, error}` +
    `action-result {ok:false, detail}`; the audit row completes as failed.
 7. After restart the agent reconnects and re-posts capabilities, which

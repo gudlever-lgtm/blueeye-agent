@@ -12,6 +12,7 @@ const { resolveEffectiveServerUrl } = require('./serverUrl');
 const { closeNetworkHandles } = require('./shutdown');
 const { installCrashGuards } = require('./lib/crashGuard');
 const releaseGuard = require('./release/releaseGuard');
+const { detectManaged } = require('./capabilities');
 
 // Exit cleanly on every platform.
 //
@@ -89,6 +90,29 @@ async function main() {
     `BlueEyes agent starting on ${systemInfo.hostname} (${systemInfo.platform}/${systemInfo.arch}).`
   );
 
+  // Roll back an update that cannot come up, on the hosts where nothing runs
+  // before us. Under systemd the sh guard does this as ExecStartPre, so by the
+  // time this code runs the decision is already made; a Windows service and a
+  // launchd job have no equivalent hook, so the agent judges its own release
+  // here — and when it rolls back it must EXIT, because the process that would
+  // run the restored release is the next one, not this one.
+  const managed = detectManaged();
+  if (managed === 'windows-service' || managed === 'launchd') {
+    const verdict = releaseGuard.enforceStartup({});
+    if (verdict.action === 'rolled-back') {
+      logger.error(
+        `Release ${verdict.version} failed to confirm after ${verdict.attempts} starts; rolled back to ${verdict.previous}. Exiting so the service manager starts the restored release.`
+      );
+      await exit(1);
+      return;
+    }
+    if (verdict.action === 'exhausted') {
+      logger.error(`Release ${verdict.version} failed to confirm after ${verdict.attempts} starts, and no previous release is kept.`);
+    } else if (verdict.action === 'counted') {
+      logger.info(`Release ${verdict.version} is unproven (start ${verdict.attempts}).`);
+    }
+  }
+
   // Self-heal an http:// URL against an HTTPS-forcing server: if the server
   // redirects to https on the same host, adopt it now so the WebSocket uses wss://
   // (it won't follow a redirect) and the REST auth header isn't dropped on the
@@ -122,7 +146,11 @@ async function main() {
   // itself. Every agent in the field predates it, so the agent installs it
   // itself rather than waiting for a re-install. Best-effort: no systemd, no
   // root or no blue/green layout simply means no guard.
-  const guardState = releaseGuard.ensureInstalled({});
+  // Only systemd has an ExecStartPre to wire it to; elsewhere enforceStartup
+  // above is the guard, and installing an sh script nothing runs is noise.
+  const guardState = managed === 'systemd' || managed === 'unmanaged'
+    ? releaseGuard.ensureInstalled({})
+    : { ok: true, changed: false, reason: `no ExecStartPre under ${managed}; the in-process guard runs instead` };
   if (guardState.changed) logger.info('Release guard installed (rolls back an update that never comes up).');
   else if (!guardState.ok) logger.warn(`Release guard not installed: ${guardState.reason}`);
 
