@@ -206,7 +206,12 @@ Server → agent commands ([`command.js`](src/command.js)):
 - **update** (PRIVILEGED) → download the release the server named
   ([`selfUpdate.js`](src/selfUpdate.js)): a SIGNED one is verified against the pinned
   release key (Ed25519 over the manifest + sha256 + version, fail-closed), a legacy
-  source bundle against its sha256 only; then extract (tar-slip + link members refused),
+  source bundle against its sha256 only. The download asks for `Accept-Encoding:
+  identity`: Node's `fetch` otherwise offers gzip and transparently DECODES the
+  response, so a proxy labelling the already-gzipped release `Content-Encoding: gzip`
+  left the agent hashing the inner tar and reporting a checksum mismatch for ever. A
+  mismatch now names its cause (bytes altered in transit vs a server serving something
+  other than what it signed). Then extract (tar-slip + link members refused),
   `npm ci --omit=dev`, atomically repoint `current`, and ask systemd to restart. **The
   restart is checked**: when it fails the new code is on disk but this old process is
   still the one running, so the agent reports the action FAILED with
