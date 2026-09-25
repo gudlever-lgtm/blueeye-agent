@@ -230,7 +230,10 @@ drain()` + `src/netflow/aggregate.js`): flow summary since the last drain.
   "source": "netflow" | "sflow",
   "packets": 12, "droppedPackets": 0,        // netflow naming
   "datagrams": 12, "droppedDatagrams": 0, "sampled": true,   // sflow naming
-  "totals": { "bytes": 0, "packets": 0, "flows": 0 },
+  "totals": { "bytes": 0, "packets": 0, "flows": 0,
+              "rxBytes": 0, "txBytes": 0, "unattributedBytes": 0,     // direction split, see below
+              "elapsedSec": 60, "bytesPerSec": 0,                      // rates over the real interval
+              "rxBytesPerSec": 0, "txBytesPerSec": 0 },
   "byPort":     [ { "port": 443, "bytes": 0, "packets": 0, "flows": 0 }, ... ],      // top 50 by bytes
   "byProtocol": [ { "protocol": "tcp", "bytes": 0, "packets": 0, "flows": 0 }, ... ], // top 50
   "topTalkers": [ { "pair": "10.0.0.1->93.184.216.34", "bytes": 0, "packets": 0, "flows": 0 }, ... ], // top 50
@@ -248,6 +251,22 @@ drain()` + `src/netflow/aggregate.js`): flow summary since the last drain.
                   "removed": { "flows": 71 } }                       // room for the counters' floor
 }
 ```
+
+`totals` rates: `elapsedSec` is the time that actually passed between drains
+(not the interval the agent was asked for), and the four per-second fields are
+the byte counts over it. `rxBytesPerSec`/`txBytesPerSec` are the same fields
+the `proc` and `snmp` samplers report, so the dashboard's bandwidth columns read
+one shape for every source — a flow-sourced agent used to have no rate at all
+and showed a permanent 0 B/s.
+
+Direction is relative to the **host the agent runs on**: a flow whose
+destination is one of its own addresses is `rx`, one whose source is, `tx`.
+A flow matching neither end (a switch exporting its own ports) or both (two of
+this host's addresses talking) is counted in `unattributedBytes` and in no
+direction — `rxBytes + txBytes + unattributedBytes === bytes`, always.
+`bytesPerSec` covers the whole interval either way, so a switch-sourced agent
+still reports a real rate while saying its direction is unknown. Additive: an
+older server reads the byte counts and ignores the rest.
 
 `sflowExporters`: the distinct exporter addresses (the sFlow agent address in
 the datagram header, IPv6 compressed as in `sflowCounters[].agent`) heard from

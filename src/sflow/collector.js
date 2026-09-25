@@ -4,6 +4,7 @@ const dgram = require('dgram');
 const { parseSflow, ETHERNET_FIELDS } = require('./parse');
 const { aggregateFlows } = require('../netflow/aggregate');
 const { fitToBudget, bytesOf } = require('../resultBudget');
+const { collectLocalIps } = require('../localIps');
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -52,6 +53,12 @@ const COUNTERS_STALE_MS = 10 * 60 * 1000;
 // the rate-scaled flow records decoded from sampled packet headers. drain()
 // returns an aggregated snapshot (same shape as the NetFlow collector) and
 // clears the buffer. The socket factory is injectable for tests.
+//
+// `localIps` is read at every drain (not once at construction) so an address
+// that changes — DHCP, a new interface — is picked up without a restart; it is
+// what lets the snapshot say which way the traffic went (aggregate.js). A
+// switch exporting its own ports matches neither end of a flow, and the
+// snapshot says so rather than inventing a direction.
 function createSflowCollector({
   port = 6343,
   bindAddress = '0.0.0.0',
@@ -59,6 +66,7 @@ function createSflowCollector({
   logger = silentLogger,
   createSocket = () => dgram.createSocket('udp4'),
   now = () => Date.now(),
+  localIps = () => collectLocalIps(),
 } = {}) {
   let socket = null;
   let buffer = [];
@@ -81,6 +89,10 @@ function createSflowCollector({
   // sends flow samples (counter polling off, a common default) was never
   // named anywhere, and the server could not tell it was reporting at all.
   let exporters = new Set();
+  // When the interval now being drained began. The rate is measured over the
+  // time actually elapsed, not the interval the caller asked for: a slow
+  // sample or a restarted loop would otherwise overstate the bandwidth.
+  let lastDrainAt = now();
 
   function handlePacket(msg) {
     lastAt = now();
@@ -204,10 +216,26 @@ function createSflowCollector({
     });
   }
 
+  // Closes the interval: how long it ran, and whose addresses to measure it
+  // against. A failure to read the host's addresses costs the direction split,
+  // never the snapshot.
+  function intervalOpts() {
+    const at = now();
+    const elapsedSec = Math.max((at - lastDrainAt) / 1000, 0.001);
+    lastDrainAt = at;
+    let ips = null;
+    try {
+      ips = localIps();
+    } catch (err) {
+      logger.debug(`sFlow: could not read local addresses (${err.message})`);
+    }
+    return { elapsedSec, localIps: Array.isArray(ips) ? ips : null };
+  }
+
   function drain(opts) {
     const flows = buffer;
     buffer = [];
-    const agg = aggregateFlows(flows, opts);
+    const agg = aggregateFlows(flows, { ...opts, ...intervalOpts() });
     let snapshot = { source: 'sflow', datagrams: received, droppedDatagrams: dropped, sampled: true, ...agg };
     // Additive, like sflowCounters: an older server ignores the key, and an
     // interval with no datagrams does not carry it.
