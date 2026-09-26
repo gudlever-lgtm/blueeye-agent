@@ -215,12 +215,16 @@ Server → agent commands ([`command.js`](src/command.js)):
   `npm ci --omit=dev`, repoint `current`, and ask the service manager to restart. **The
   restart is checked**: when it fails the new code is on disk but this old process is
   still the one running, so the agent reports the action FAILED with the command to run
-  rather than a success whose version never changes. **systemd, a Windows service and a
-  launchd job** are all restartable (`capabilities.managed`, `isSelfUpdatable`);
-  docker and unmanaged decline. The restart differs per runtime: `systemctl --no-block
-  restart`, `launchctl kickstart -k`, and on Windows a DETACHED `cmd` that stops and
-  starts the service — a service cannot stop itself in the foreground, because the stop
-  ends the process that was going to issue the start. The `current` swap is atomic on
+  rather than a success whose version never changes. **systemd, a Windows service, a Windows
+  SCHEDULED TASK and a launchd job** are all restartable (`capabilities.managed`,
+  `isSelfUpdatable`); docker and unmanaged decline. The restart differs per runtime:
+  `systemctl --no-block restart`, `launchctl kickstart -k`, and on Windows a DETACHED
+  `cmd` — `net stop`/`net start` for a service, `schtasks /End`//`Run` for a task —
+  because neither can restart itself in the foreground: the stop ends the process that
+  was going to issue the start. **`scheduled-task` is what the Windows installer
+  actually registers**, and it was tagged `unmanaged` until 0.47.2, which is why every
+  Windows agent declined the one-click update and could only be moved by downloading
+  `update.ps1`. The task was supervising the agent all along; it just was not saying so. The `current` swap is atomic on
   POSIX (temp symlink + rename) and a remove-plus-create on Windows, which has no
   rename-onto-an-existing-junction; the gap is covered by when it happens (the old
   process is still serving).
