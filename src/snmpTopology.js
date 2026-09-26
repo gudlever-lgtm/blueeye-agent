@@ -42,6 +42,7 @@ const OID = {
   ifAdminStatus: IF_MIB.ifAdminStatus,
   ifOperStatus: IF_MIB.ifOperStatus,
   ifHighSpeed: IF_MIB.ifHighSpeed,
+  ifMtu: IF_MIB.ifMtu,
   dot1dBasePortIfIndex: BRIDGE.dot1dBasePortIfIndex,
   dot1dTpFdbPort: BRIDGE.dot1dTpFdbPort,
   dot1dTpFdbStatus: BRIDGE.dot1dTpFdbStatus,
@@ -419,7 +420,7 @@ async function defaultReadTables(snmp, {
 
     // --- phase 1: the core tables ------------------------------------------
     const [
-      ifName, ifAlias, ifDescr, ifType, ifPhysAddress, ifAdminStatus, ifOperStatus, ifHighSpeed,
+      ifName, ifAlias, ifDescr, ifType, ifPhysAddress, ifAdminStatus, ifOperStatus, ifHighSpeed, ifMtu,
       basePortIfIndex,
       qFdbPort, qFdbStatus, dFdbPort, dFdbStatus,
       vlanName,
@@ -435,6 +436,11 @@ async function defaultReadTables(snmp, {
       want.has('if') ? safe(OID.ifAdminStatus) : {},
       want.has('if') ? safe(OID.ifOperStatus) : {},
       want.has('if') ? safe(OID.ifHighSpeed) : {},
+      // ifMtu is the port's OWN configured MTU. It is the other half of an MTU
+      // fault: `path_mtu` measures what a path carries end to end, this says
+      // what each port was configured to carry — and a link whose two ends
+      // disagree is the cause that measurement is looking for.
+      want.has('if') ? safe(OID.ifMtu) : {},
       // Without the bridge-port map the forwarding table cannot be resolved to
       // an interface, and an unresolved answer is the one thing this module
       // must not produce silently. An empty result is handled by buildTopology,
@@ -638,7 +644,7 @@ async function defaultReadTables(snmp, {
       sysLocation: toText(about[SYS.sysLocation]),
       sysContact: toText(about[SYS.sysContact]),
       sysObjectId: toText(about[SYS.sysObjectID]),
-      ifName, ifAlias, ifDescr, ifType, ifPhysAddress, ifAdminStatus, ifOperStatus, ifHighSpeed,
+      ifName, ifAlias, ifDescr, ifType, ifPhysAddress, ifAdminStatus, ifOperStatus, ifHighSpeed, ifMtu,
       basePortIfIndex,
       qFdbPort, qFdbStatus, dFdbPort, dFdbStatus,
       vlanFdb,
@@ -982,6 +988,7 @@ function buildTopology(tables, {
   for (const [idx, name] of ifNameByIndex.entries()) {
     const speed = toNum(t.ifHighSpeed ? t.ifHighSpeed[idx] : null);
     const type = toNum(t.ifType ? t.ifType[idx] : null);
+    const mtu = toNum(t.ifMtu ? t.ifMtu[idx] : null);
     interfaces.push({
       ifIndex: idx,
       ifName: name,
@@ -993,6 +1000,14 @@ function buildTopology(tables, {
       // does not know. Null, not 0: "unknown" and "stalled" are different, and
       // a utilisation percentage computed against 0 is not a number.
       speedMbps: Number.isInteger(speed) && speed > 0 ? speed : null,
+      // The port's own configured MTU (ifMtu, RFC 2863). Null when the device
+      // did not answer, never 0 — the same rule speed follows, and it matters
+      // more here: the server compares the two ends of a link, and a 0 would
+      // make every silent port look like a mismatch with its neighbour.
+      // A loopback or tunnel interface reports its own small MTU legitimately,
+      // which is why the comparison server-side is between LINKED ports and not
+      // across a device's ports.
+      mtu: Number.isInteger(mtu) && mtu > 0 ? mtu : null,
       adminStatus: ADMIN_STATUS[toNum(t.ifAdminStatus ? t.ifAdminStatus[idx] : null)] || null,
       operStatus: IF_STATUS[toNum(t.ifOperStatus ? t.ifOperStatus[idx] : null)] || null,
       physAddress: toMac(t.ifPhysAddress ? t.ifPhysAddress[idx] : null),
