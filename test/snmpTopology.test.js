@@ -399,6 +399,30 @@ test('a speed of zero is NULL, not zero', () => {
   assert.equal(out.interfaces[0].speedMbps, null);
 });
 
+test('ifMtu is carried per port, and an unanswered one is NULL', () => {
+  // The port's own configured MTU. It is the other half of an MTU fault: the
+  // path_mtu probe measures what a path carries, this says what each port was
+  // told to carry, and the server compares the two ends of a link.
+  //
+  // Null and not 0 for the port that did not answer, because the server's
+  // comparison is "these two ends disagree" — a 0 would make every silent port
+  // look like a mismatch with its neighbour, which is the loudest possible way
+  // to be wrong.
+  const out = buildTopology({
+    ifName: { 1: 'Gi0/1', 2: 'Gi0/2', 3: 'Gi0/3' },
+    ifMtu: { 1: 1500, 2: 9216, 3: 0 },
+  });
+  const byName = Object.fromEntries(out.interfaces.map((i) => [i.ifName, i]));
+  assert.equal(byName['Gi0/1'].mtu, 1500);
+  assert.equal(byName['Gi0/2'].mtu, 9216, 'a jumbo port reports its own');
+  assert.equal(byName['Gi0/3'].mtu, null, 'zero is "did not say", not an MTU');
+});
+
+test('a device that implements no ifMtu column reports null, not a guess', () => {
+  const out = buildTopology({ ifName: { 1: 'Gi0/1' } });
+  assert.equal(out.interfaces[0].mtu, null);
+});
+
 test('ifPhysAddress is rendered once, and only when it is six bytes', () => {
   const out = buildTopology({
     ifName: { 1: 'Gi0/1', 2: 'Gi0/2' },
