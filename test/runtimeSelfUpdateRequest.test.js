@@ -162,8 +162,8 @@ test('a runtime nothing can restart does not ask', async () => {
   }
 });
 
-test('a Windows service and a launchd job DO ask', async () => {
-  for (const managed of ['windows-service', 'launchd']) {
+test('a Windows service, a Windows scheduled task and a launchd job DO ask', async () => {
+  for (const managed of ['windows-service', 'scheduled-task', 'launchd']) {
     const server = await startFakeServer({
       validTokens: ['valid'],
       updates: { agentVersion: '1.0.0', auto: true, window: '' },
