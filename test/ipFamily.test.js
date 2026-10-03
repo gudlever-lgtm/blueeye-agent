@@ -15,6 +15,7 @@ const assert = require('node:assert/strict');
 const {
   FAMILIES, HEADER_OVERHEAD, MSS_OVERHEAD, MIN_PACKET_SIZE,
   familyOf, resolveFamily, findAddress, pingCommand, tracerouteCommands,
+  dfOptionRefused, dfUnsupportedReason,
 } = require('../src/probes/ipFamily');
 const { parseTraceroute, traceroute } = require('../src/probes/traceroute');
 
@@ -248,4 +249,41 @@ test('the IPv4 traceroute is unchanged: one binary, no -6, same argv', async () 
   assert.deepEqual(seen, ['-n', '-m', '20', '-q', '3', '-w', '2', '--', 'example.com']);
   assert.equal(res.ipVersion, 4);
   assert.equal(res.hops[0].ip, '10.0.0.1');
+});
+
+// ---- Which ping is this? ---------------------------------------------------
+// There is more than one `ping` on Linux. iputils' takes `-M do`; BusyBox's —
+// Alpine, OpenWrt, most minimal containers — has no don't-fragment option at
+// all. Recognising its refusal is what turns "ping failed: unrecognized option:
+// M" into a sentence with a remedy in it.
+test('a refused don\'t-fragment flag is recognised, in every spelling', () => {
+  for (const line of [
+    'ping: unrecognized option: M',
+    "ping: invalid option -- 'M'",
+    'ping: unknown option -- M',
+    'ping: bad option -M',
+  ]) assert.equal(dfOptionRefused(line, 'linux'), true, line);
+
+  // macOS and Windows spell the flag differently, so the letter follows the
+  // platform — otherwise a BSD ping refusing -D would read as fine.
+  assert.equal(dfOptionRefused("ping: invalid option -- 'D'", 'darwin'), true);
+  assert.equal(dfOptionRefused("ping: invalid option -- 'D'", 'linux'), false);
+  assert.equal(dfOptionRefused('Bad option -f.', 'win32'), true);
+});
+
+test('a complaint about some OTHER option is not mistaken for it', () => {
+  // Guessing wrong here sends the operator to install a package they have.
+  for (const line of [
+    'ping: unrecognized option: s',
+    "ping: invalid option -- '6'",
+    'ping: socket: Operation not permitted',
+    '',
+  ]) assert.equal(dfOptionRefused(line, 'linux'), false, line);
+});
+
+test('the remedy names the package, not the flag', () => {
+  const r = dfUnsupportedReason('linux');
+  assert.match(r, /iputils-ping/);
+  assert.match(r, /apk add/, 'Alpine is where this actually bites');
+  assert.doesNotMatch(r, /-M/, 'the flag letter is not the operator\'s problem');
 });

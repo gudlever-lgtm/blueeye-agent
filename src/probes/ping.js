@@ -2,6 +2,7 @@
 
 const { execFile } = require('child_process');
 const { fail, round, safeHost, clampInt } = require('./stats');
+const { dfOptionRefused, dfUnsupportedReason } = require('./ipFamily');
 
 // ICMP ping probe via the system `ping`. Parses packet-loss% and the
 // min/avg/max/mdev RTT summary (Linux/macOS and Windows formats). `exec` is
@@ -127,8 +128,13 @@ function pingOnce({ host, count, size, df, exec, platform, deadlineSec = 10, tim
       if (!parsed) {
         // No summary line at all. Either the local stack refused the payload, or
         // the binary is missing / the run was killed. Both are "not measured".
+        // The don't-fragment flag refused is its own answer, and the only one
+        // of these the operator can fix. It reaches this branch as a generic
+        // "ping failed: unrecognized option: M" otherwise — a flag letter they
+        // never typed, about a size sweep they did ask for.
         const reason = isLocalTooLong(text) ? 'payload exceeds the local interface MTU'
           : err && err.code === 'ENOENT' ? 'ping not installed'
+          : df && dfOptionRefused(text, platform) ? dfUnsupportedReason(platform)
           : err && err.killed ? 'ping timed out'
           : err ? String(err.message || 'ping failed').split('\n')[0].slice(0, 120)
           : 'unparseable output';

@@ -121,6 +121,46 @@ function findAllAddresses(line) {
   return out;
 }
 
+// DID THIS `ping` REFUSE THE DON'T-FRAGMENT FLAG?
+//
+// There is more than one `ping` on Linux. iputils' takes `-M do`; BusyBox's —
+// what Alpine, OpenWrt and most minimal containers ship — has no
+// don't-fragment option at all, and answers `ping: unrecognized option: M`.
+// inetutils' is the same story with a different spelling.
+//
+// This matters more than a missing flag usually would: without DF, an oversized
+// packet is simply fragmented and arrives, so a path-MTU search would walk all
+// the way to its ceiling and report a path that carries 9000 bytes. Failing to
+// measure is correct; measuring the wrong number confidently is not. So the
+// complaint is recognised, named, and turned into something an operator can act
+// on instead of a flag letter they never typed.
+//
+// The letter is checked, not just "unrecognized option": a ping refusing `-s`
+// or `-6` is a different problem and must not be reported as this one.
+const DF_FLAG = { linux: 'M', darwin: 'D', win32: 'f' };
+
+function dfOptionRefused(text, platform = process.platform) {
+  const s = String(text == null ? '' : text);
+  const letter = DF_FLAG[platform === 'win32' || platform === 'darwin' ? platform : 'linux'];
+  // BusyBox: "unrecognized option: M" · getopt: "invalid option -- 'M'" ·
+  // others: "unknown option -- M" / "illegal option -- M".
+  const re = new RegExp(
+    String.raw`(?:unrecognized|unknown|invalid|illegal|bad)\s+option[:\s-]*'?-{0,2}${letter}'?`,
+    'i',
+  );
+  return re.test(s);
+}
+
+// What to tell the operator when that happens: the remedy, not the flag.
+function dfUnsupportedReason(platform = process.platform) {
+  if (platform === 'win32' || platform === 'darwin') {
+    return 'this host\'s ping does not support the don\'t-fragment flag, so path MTU cannot be measured';
+  }
+  return 'this host\'s ping has no don\'t-fragment option (BusyBox or inetutils ping), '
+    + 'so path MTU cannot be measured — install iputils-ping '
+    + '(Alpine: apk add iputils-ping · Debian/Ubuntu: apt install iputils-ping)';
+}
+
 // argv for one sized ping, optionally limited to `ttl` hops.
 //
 // The flags differ by more than spelling, which is the entire reason this is one
@@ -230,4 +270,5 @@ module.exports = {
   pingCommand,
   tracerouteCommands,
   TRACE_WAIT_MS,
+  dfOptionRefused, dfUnsupportedReason,
 };
