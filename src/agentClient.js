@@ -91,6 +91,26 @@ function createAgentClient({
     return urls[urlIndex % urls.length];
   }
 
+  // Adopts a redirect target in place of the URL that produced it, and only
+  // when it is the same host over https. A redirect to ANOTHER host is a
+  // different server — following it would hand this agent's token to whatever
+  // answered, so it is reported and not followed.
+  function adoptHttpsRedirect(location) {
+    if (!location) return false;
+    let target;
+    let current;
+    try {
+      current = new URL(activeServerUrl());
+      target = new URL(String(location), current);
+    } catch { return false; }
+    if (target.protocol !== 'https:' || current.protocol !== 'http:') return false;
+    if (target.hostname !== current.hostname) return false;
+    const adopted = target.origin;
+    if (urls[urlIndex % urls.length] === adopted) return false;
+    urls[urlIndex % urls.length] = adopted;
+    return true;
+  }
+
   function startHeartbeat() {
     stopHeartbeat();
     heartbeatTimer = setInterval(() => {
@@ -322,6 +342,20 @@ function createAgentClient({
         // condition that cannot clear by itself, so the remedy goes out on the
         // first one and the rest stay a one-line warning.
         const location = (res && res.headers && (res.headers.location || res.headers.Location)) || '';
+        // SELF-HEAL, NOT JUST A BETTER MESSAGE. The agent probes for this at
+        // startup (src/serverUrl.js), but a redirect that appears while it is
+        // already running is never seen again: the host that found this had
+        // been up since before its server moved to https, and spent a day on
+        // the old URL. So adopt the target here too — SAME HOST, http→https
+        // only, which is the one redirect that is an upgrade of this
+        // connection rather than a different destination.
+        if (adoptHttpsRedirect(location)) {
+          logger.warn(`Server redirects to HTTPS; switching this connection to ${activeServerUrl()}. `
+            + 'Set BLUEEYE_SERVER_URL to the https URL so this is not rediscovered on every start.');
+          opened = true;
+          ended(true);
+          return;
+        }
         if (!redirectReported) {
           redirectReported = true;
           const target = location ? String(location).replace(/\/ws\/agent.*$/, '') : '';

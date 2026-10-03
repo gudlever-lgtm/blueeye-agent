@@ -30,7 +30,10 @@ test('loadConfig: defaults are safe; env beats file beats defaults; numbers/bool
   const configPath = path.join(dir, 'c.json');
   fs.writeFileSync(configPath, JSON.stringify({ serverUrl: 'http://file', heartbeatMs: 5000, probeGateway: false, probeTargets: 'ping:1.1.1.1' }));
   const fromFile = loadConfig({ env: { BLUEEYE_AGENT_CONFIG: configPath } });
-  assert.equal(fromFile.serverUrl, 'http://file');
+  // https://, not http:// — an http server URL that is not loopback is
+  // upgraded unless BLUEEYE_ALLOW_HTTP says otherwise (test/config.test.js
+  // covers the rule). What this case pins is that the FILE was read at all.
+  assert.equal(fromFile.serverUrl, 'https://file');
   assert.equal(fromFile.heartbeatMs, 5000);
   assert.equal(fromFile.probeAutoGateway, false);
   assert.deepEqual(fromFile.probeTargets, [{ type: 'ping', host: '1.1.1.1' }]);

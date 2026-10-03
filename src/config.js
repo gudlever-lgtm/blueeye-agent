@@ -109,14 +109,27 @@ function loadConfig({ env = process.env, platform = process.platform } = {}) {
   const configPath = configPathFrom(env, platform);
   const file = readConfigFile(configPath);
 
-  const serverUrl = env.BLUEEYE_SERVER_URL || file.serverUrl || 'http://localhost:3000';
+  // Deliberate plain HTTP: a flag somebody set, not a URL somebody inherited.
+  // See secureUrl() below for why that distinction is the whole rule.
+  const allowHttp = /^(1|true|yes|on)$/i.test(String(env.BLUEEYE_ALLOW_HTTP ?? (file.allowHttp ? '1' : '')).trim());
+  const configuredServerUrl = env.BLUEEYE_SERVER_URL || file.serverUrl || 'http://localhost:3000';
+  const secured = secureUrl(configuredServerUrl, { allowHttp });
+  const serverUrl = secured.url;
   // Alternative ways in to the SAME server, tried in order when the first cannot
   // be reached — a second DNS name, the internal address behind the proxy, a
   // spare ingress. One name or one reverse proxy is otherwise a single point of
   // failure that no amount of reconnecting gets past. `serverUrl` is always the
   // first candidate; the others are extras, never a different server (they share
   // the agent's token and its pins).
-  const serverUrls = parseServerUrls(serverUrl, env.BLUEEYE_SERVER_URLS ?? file.serverUrls);
+  // What was upgraded, for the one log line that says so at startup. The
+  // primary URL is reported here too, so a host whose launcher still says
+  // http:// can be recognised from its own log rather than by reading a file
+  // on it.
+  const upgradedFromHttp = secured.upgraded ? [configuredServerUrl] : [];
+  const serverUrls = parseServerUrls(serverUrl, env.BLUEEYE_SERVER_URLS ?? file.serverUrls, {
+    allowHttp,
+    onUpgrade: (from) => { if (!upgradedFromHttp.includes(from)) upgradedFromHttp.push(from); },
+  });
   const enrollmentCode = env.BLUEEYE_ENROLLMENT_CODE || file.enrollmentCode || null;
   // SHA-256 of the server's (or its reverse proxy's) TLS leaf cert. When set and
   // the server is https, the agent pins it and refuses a mismatching cert.
@@ -250,6 +263,10 @@ function loadConfig({ env = process.env, platform = process.platform } = {}) {
     configPath,
     serverUrl,
     serverUrls,
+    // The http:// URLs this agent was configured with and upgraded away from.
+    // Empty on every host that was already correct.
+    upgradedFromHttp,
+    allowHttp,
     enrollmentCode,
     serverCertFingerprint,
     serverCertFingerprints,
@@ -323,17 +340,65 @@ function writeConfigValues(config, values = {}) {
   return true;
 }
 
+// HTTPS IS THE DEFAULT, WHATEVER THE CONFIG SAYS.
+//
+// An agent carries a bearer token on every request and a stream of the
+// customer's network metadata on its socket. Plain HTTP puts both on the wire,
+// and in practice nobody chooses it — it is inherited: an install.ps1 generated
+// before the server had a certificate bakes `http://` into the launcher, and
+// there it stays until somebody edits a file on every host in the fleet.
+//
+// The failure that made this a rule: a server moved to https, its proxy began
+// redirecting, and the fleet spent a day logging `handshake failed: HTTP 301`
+// — a WebSocket handshake does not follow redirects, and the hop would have
+// dropped the Authorization header if it had.
+//
+// So an http:// server URL is upgraded to https:// before anything is dialled.
+// Two exceptions, both narrow:
+//
+//   * LOOPBACK stays as it is. `http://localhost:3000` is the development
+//     server, the test suite and `npm start` on a laptop; there is no transport
+//     to protect and no certificate to present.
+//   * BLUEEYE_ALLOW_HTTP=1 (or `allowHttp: true` in the config file) turns the
+//     upgrade off, for a deliberate plain-HTTP deployment on an internal
+//     network. Deliberate — a flag somebody set, not a URL somebody inherited.
+//
+// A port is NOT rewritten: an operator who put :3000 in the URL meant :3000,
+// and guessing 443 would break the one deployment that spelled it out.
+const LOOPBACK = /^(localhost|127(\.\d{1,3}){3}|\[?::1\]?|0\.0\.0\.0)$/i;
+
+function isLoopback(hostname) {
+  return LOOPBACK.test(String(hostname || '').trim());
+}
+
+// Returns the URL to actually use, and whether it was changed — the caller
+// says so in the log once, so a host that silently started speaking https is
+// not a mystery to whoever reads it next.
+function secureUrl(raw, { allowHttp = false } = {}) {
+  const value = String(raw == null ? '' : raw).trim();
+  if (!value) return { url: value, upgraded: false };
+  let parsed;
+  try { parsed = new URL(value); } catch { return { url: value, upgraded: false }; }
+  if (parsed.protocol !== 'http:') return { url: value, upgraded: false };
+  if (allowHttp || isLoopback(parsed.hostname)) return { url: value, upgraded: false };
+  parsed.protocol = 'https:';
+  return { url: parsed.toString().replace(/\/+$/, ''), upgraded: true };
+}
+
 // Builds the ordered list of server URLs to try. `primary` always leads (it is
 // what enrollment, the pins and every existing deployment mean by "the server");
 // `extra` may be an array or one string listing URLs separated by comma,
 // semicolon or whitespace. Unparseable entries and duplicates are dropped, so a
 // typo in the extras can never displace the URL that works.
-function parseServerUrls(primary, extra) {
+function parseServerUrls(primary, extra, { allowHttp = false, onUpgrade = null } = {}) {
   const out = [];
   const add = (value) => {
-    const url = String(value || '').trim().replace(/\/+$/, '');
-    if (!url) return;
-    try { new URL(url); } catch { return; }
+    const trimmed = String(value || '').trim().replace(/\/+$/, '');
+    if (!trimmed) return;
+    try { new URL(trimmed); } catch { return; }
+    const secured = secureUrl(trimmed, { allowHttp });
+    if (secured.upgraded && typeof onUpgrade === 'function') onUpgrade(trimmed);
+    const url = secured.url;
     if (!out.includes(url)) out.push(url);
   };
   add(primary);
@@ -342,4 +407,4 @@ function parseServerUrls(primary, extra) {
   return out;
 }
 
-module.exports = { loadConfig, clearEnrollmentCode, writeConfigValues, configPathFrom };
+module.exports = { loadConfig, clearEnrollmentCode, writeConfigValues, configPathFrom, secureUrl };

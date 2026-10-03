@@ -274,18 +274,43 @@ test('a 301 on the handshake says what to change, once, and keeps retrying', asy
     });
     const first = lines.find((l) => /redirect/i.test(l));
     assert.ok(first, `no redirect line: ${lines.join(' | ')}`);
-    assert.match(first, /https:\/\/server\.test/, 'the remedy names where to point it');
-    assert.match(first, /BLUEEYE_SERVER_URL|re-enroll/, 'the remedy names how to change it');
-    assert.match(first, /does not follow redirects/, 'and why it will not fix itself');
+    assert.match(first, /https:\/\/server\.test/, 'the remedy names where it switched to');
+    assert.match(first, /BLUEEYE_SERVER_URL/, 'and how to make it permanent');
 
-    // It still re-dials — the server may be fixed while the agent runs.
+    // SELF-HEALED: the next dial is wss://, without a restart. The startup
+    // probe only runs at startup, and the host that found this had been up
+    // since before its server moved to https.
     await new Promise((resolve) => setTimeout(resolve, 40));
     assert.ok(FakeWS.urls.length >= 2, 'it stopped trying');
+    assert.ok(FakeWS.urls.slice(1).every((u) => u.startsWith('wss://')),
+      `it kept dialling ws:// after the redirect: ${FakeWS.urls.join(' ')}`);
+  } finally {
+    client.stop();
+  }
+});
 
-    // The second 301 does not repeat the whole explanation.
-    FakeWS.last.emit('unexpected-response', {}, { statusCode: 301, headers: { location: 'https://server.test/ws/agent' } });
-    const explained = lines.filter((l) => /does not follow redirects/.test(l));
-    assert.equal(explained.length, 1, 'the explanation was logged more than once');
+test('a redirect to ANOTHER host is reported, never followed', async () => {
+  // Following it would hand this agent's token to whatever answered.
+  FakeWS.urls = [];
+  const { logger, lines } = quietLogger();
+  const client = createAgentClient({
+    serverUrl: 'http://server.test',
+    token: 'tok',
+    logger,
+    WebSocketImpl: FakeWS,
+    heartbeatMs: 100000,
+    backoff: { baseMs: 5, maxMs: 5 },
+  });
+  client.start();
+  try {
+    FakeWS.last.emit('unexpected-response', {}, {
+      statusCode: 302,
+      headers: { location: 'https://somewhere-else.test/ws/agent' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.ok(FakeWS.urls.every((u) => u.includes('server.test')),
+      `it followed a redirect off its own host: ${FakeWS.urls.join(' ')}`);
+    assert.ok(lines.some((l) => /does not follow redirects/.test(l)), 'and it said nothing about it');
   } finally {
     client.stop();
   }

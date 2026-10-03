@@ -123,6 +123,14 @@ async function main() {
     logger,
   });
   logger.info(`Server: ${config.serverUrl}`);
+  // A host whose launcher still says http:// says so in its own log, once per
+  // start. Without it the upgrade is invisible: the agent works, and the file
+  // that is wrong stays wrong until the next person reads it.
+  if (Array.isArray(config.upgradedFromHttp) && config.upgradedFromHttp.length) {
+    logger.warn(`Configured over plain HTTP (${config.upgradedFromHttp.join(', ')}) — using https instead. `
+      + 'An agent carries its token and the network metadata it reports on that connection. '
+      + 'Update BLUEEYE_SERVER_URL on this host, or set BLUEEYE_ALLOW_HTTP=1 if plain HTTP is deliberate here.');
+  }
 
   // Pin the server's cert on the enrollment request too (it carries the one-time
   // code and receives the permanent token). Mirrors runtime's REST pinning; falls
