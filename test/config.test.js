@@ -108,3 +108,36 @@ test('configRefreshIntervalMs: 300 s by default, file then env, 0 disables', () 
     0,
   );
 });
+
+// ---- Finding an installed agent's own config from a plain prompt -----------
+// The service gets BLUEEYE_AGENT_CONFIG and BLUEEYE_TOKEN_PATH from its
+// launcher (run-agent.cmd on Windows, the systemd unit on Linux). A PERSON
+// opening a prompt to run `blueeye-agent doctor` gets neither — and doctor then
+// read no config and no token, and reported "Server URL: http://localhost:3000"
+// and "not enrolled" about a host that was enrolled and reconnecting every
+// twenty seconds. The defaults look in the install location too.
+test('the Windows install location is searched when nothing names a config', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blueeye-pd-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const agentDir = path.join(dir, 'BlueEyes', 'agent');
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.writeFileSync(path.join(agentDir, 'blueeye-agent.config.json'),
+    JSON.stringify({ serverUrl: 'https://blueeye.example.dk' }));
+
+  const cfg = loadConfig({ env: { ProgramData: dir }, platform: 'win32' });
+  assert.equal(cfg.serverUrl, 'https://blueeye.example.dk',
+    'the installed config was not found, so doctor diagnoses the defaults');
+});
+
+test('an explicit BLUEEYE_AGENT_CONFIG still wins over the install location', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blueeye-pd-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const agentDir = path.join(dir, 'BlueEyes', 'agent');
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.writeFileSync(path.join(agentDir, 'blueeye-agent.config.json'), JSON.stringify({ serverUrl: 'https://wrong.example' }));
+  const explicit = path.join(dir, 'explicit.json');
+  fs.writeFileSync(explicit, JSON.stringify({ serverUrl: 'https://right.example' }));
+
+  const cfg = loadConfig({ env: { ProgramData: dir, BLUEEYE_AGENT_CONFIG: explicit }, platform: 'win32' });
+  assert.equal(cfg.serverUrl, 'https://right.example');
+});

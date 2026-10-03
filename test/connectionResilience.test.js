@@ -247,3 +247,46 @@ test('a connection that opened and then dropped keeps the same URL', async () =>
     client.stop();
   }
 });
+
+// ---- A redirect on the handshake ------------------------------------------
+// Seen in the field: an agent enrolled against http:// while the server moved
+// to https. The WebSocket handshake does not follow redirects (and an
+// http→https hop drops the Authorization header anyway), so the agent logged
+// "WebSocket handshake failed: HTTP 301" 342 times in a row — none of the 342
+// lines saying what to change. The condition cannot clear by itself, so the
+// remedy goes out once and the rest stay short.
+test('a 301 on the handshake says what to change, once, and keeps retrying', async () => {
+  FakeWS.urls = [];
+  const { logger, lines } = quietLogger();
+  const client = createAgentClient({
+    serverUrl: 'http://server.test',
+    token: 'tok',
+    logger,
+    WebSocketImpl: FakeWS,
+    heartbeatMs: 100000,
+    backoff: { baseMs: 5, maxMs: 5 },
+  });
+  client.start();
+  try {
+    FakeWS.last.emit('unexpected-response', {}, {
+      statusCode: 301,
+      headers: { location: 'https://server.test/ws/agent' },
+    });
+    const first = lines.find((l) => /redirect/i.test(l));
+    assert.ok(first, `no redirect line: ${lines.join(' | ')}`);
+    assert.match(first, /https:\/\/server\.test/, 'the remedy names where to point it');
+    assert.match(first, /BLUEEYE_SERVER_URL|re-enroll/, 'the remedy names how to change it');
+    assert.match(first, /does not follow redirects/, 'and why it will not fix itself');
+
+    // It still re-dials — the server may be fixed while the agent runs.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.ok(FakeWS.urls.length >= 2, 'it stopped trying');
+
+    // The second 301 does not repeat the whole explanation.
+    FakeWS.last.emit('unexpected-response', {}, { statusCode: 301, headers: { location: 'https://server.test/ws/agent' } });
+    const explained = lines.filter((l) => /does not follow redirects/.test(l));
+    assert.equal(explained.length, 1, 'the explanation was logged more than once');
+  } finally {
+    client.stop();
+  }
+});

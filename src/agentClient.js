@@ -80,6 +80,9 @@ function createAgentClient({
   let attempts = 0;
   let stopped = false;
   let fatal = false;
+  // Per CLIENT, not per attempt: a redirect cannot clear by itself, so the
+  // sentence explaining it belongs in the log once, not on all 342 retries.
+  let redirectReported = false;
   // Index into `urls`. Sticky: a URL that worked is kept until it stops
   // working, so a fleet does not drift onto the spare ingress and stay there.
   let urlIndex = 0;
@@ -307,6 +310,31 @@ function createAgentClient({
         opened = true;
         const retrying = rejectAuth('WebSocket authentication rejected (HTTP 401)');
         ended(retrying, authRetryMs);
+      } else if (status >= 300 && status < 400) {
+        // A REDIRECT IS NOT A TRANSIENT FAILURE, and it is the one handshake
+        // answer that names its own fix. A WebSocket handshake does not follow
+        // redirects (and an http→https hop drops the Authorization header
+        // anyway), so an agent pointed at http:// against a server that forces
+        // https retries this exact 301 for ever: 342 identical warnings in one
+        // log, none of them saying what to change.
+        //
+        // Logged ONCE per connection attempt is still once too often for a
+        // condition that cannot clear by itself, so the remedy goes out on the
+        // first one and the rest stay a one-line warning.
+        const location = (res && res.headers && (res.headers.location || res.headers.Location)) || '';
+        if (!redirectReported) {
+          redirectReported = true;
+          const target = location ? String(location).replace(/\/ws\/agent.*$/, '') : '';
+          logger.warn(`WebSocket handshake redirected: HTTP ${status}${location ? ` -> ${location}` : ''}. `
+            + 'A WebSocket handshake does not follow redirects, so this will not clear on its own. '
+            + `Re-point the agent at ${target || 'the https:// URL'} `
+            + '(BLUEEYE_SERVER_URL, or re-enroll with --server <url>) — over an http:// URL the agent speaks ws://, '
+            + 'and the redirect to https also drops the Authorization header.');
+        } else {
+          logger.warn(`WebSocket handshake failed: HTTP ${status} (redirect — see the first one for what to change).`);
+        }
+        opened = true;
+        ended(true);
       } else {
         logger.warn(`WebSocket handshake failed: HTTP ${status}.`);
         // Same reasoning: an HTTP status came back, so the URL is not the problem.
