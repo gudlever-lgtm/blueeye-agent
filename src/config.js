@@ -72,15 +72,25 @@ function firstExisting(candidates) {
   return candidates[0];
 }
 
+// Both names, because the installers and a hand-made config disagree about it:
+// a flat checkout keeps `blueeye-agent.config.json` next to package.json, and
+// BOTH installers (install.sh and the Windows install.ps1) write `config.json`
+// into the state directory. Looking for the long name alone meant the install
+// directories added above were searched for a file that is never there, so
+// `doctor` run by hand still found no config and still diagnosed the defaults —
+// "Server URL: http://localhost:3000", about an enrolled host. The directories
+// were the easy half of that fix; the file name is the other half.
 function configPathFrom(env, platform = process.platform) {
   if (env.BLUEEYE_AGENT_CONFIG) return env.BLUEEYE_AGENT_CONFIG;
   const state = installStateDir(env, platform);
-  return firstExisting([
-    path.join(__dirname, '..', 'blueeye-agent.config.json'),
-    path.join(state, 'agent', 'blueeye-agent.config.json'),
-    path.join(state, 'blueeye-agent.config.json'),
-    path.join(state, 'state', 'blueeye-agent.config.json'),
-  ]);
+  const names = ['blueeye-agent.config.json', 'config.json'];
+  const candidates = [path.join(__dirname, '..', 'blueeye-agent.config.json')];
+  // State dir first (what an installed agent actually uses), then the two
+  // historical layouts, each tried under both names.
+  for (const dir of [path.join(state, 'state'), state, path.join(state, 'agent')]) {
+    for (const name of names) candidates.push(path.join(dir, name));
+  }
+  return firstExisting(candidates);
 }
 
 // The token the installer wrote. Same reasoning, same order.
