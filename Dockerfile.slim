@@ -8,8 +8,12 @@
 # it in the build context as `blueeye-agent-linux` before running docker build.
 FROM debian:12-slim
 
+# debian:12-slim ships NEITHER ping NOR traceroute, so every probe that shells
+# out to one reported "not installed" from this image — the ping, path-MTU and
+# traceroute probes, which is most of what an agent is for. iputils-ping is also
+# the one with the don't-fragment option (`-M do`) the path-MTU search needs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ethtool curl ca-certificates \
+      ethtool curl ca-certificates iputils-ping traceroute \
     && rm -rf /var/lib/apt/lists/*
 
 COPY blueeye-agent-linux /usr/local/bin/blueeye-agent

@@ -7,7 +7,15 @@ WORKDIR /app
 # fleet firmware-drift inventory. Tiny, optional: the collector degrades to []
 # when it's absent. Needs `network_mode: host` to see the host's real NICs.
 # curl powers the `curl` content-verification probe (HTTP status/body/headers).
-RUN apk add --no-cache ethtool curl
+#
+# iputils-ping IS NOT OPTIONAL. Alpine's ping is BusyBox's, and BusyBox has no
+# don't-fragment option — it answers `ping: unrecognized option: M`. Every
+# path-MTU measurement from a container on this image failed with that line,
+# which names a flag the operator never typed. Without DF an oversized packet is
+# simply fragmented and arrives, so there is no measuring around it: the probe
+# needs a ping that can set the bit. /usr/bin/ping (iputils) comes before
+# /bin/ping (BusyBox) on PATH, so installing it is all it takes.
+RUN apk add --no-cache ethtool curl iputils-ping
 
 # Install production dependencies first (better layer caching).
 COPY package*.json ./

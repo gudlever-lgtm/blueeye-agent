@@ -6,6 +6,7 @@ const { clampInt, round, safeHost } = require('./stats');
 const { traceroute } = require('./traceroute');
 const {
   HEADER_OVERHEAD, MSS_OVERHEAD, MIN_PACKET_SIZE, resolveFamily, pingCommand, findAddress,
+  dfOptionRefused, dfUnsupportedReason,
 } = require('./ipFamily');
 
 // Path-MTU probe: finds the largest packet that survives the path from this
@@ -254,7 +255,7 @@ async function pathMtuProbe(spec, {
   // frag-needed arrived DURING it. A flag would leak the end-to-end run's
   // frag-needed into the first hop's verdict and turn a plain `reduced` into a
   // reported blackhole — the one mistake this whole probe exists to avoid.
-  const state = { fragCount: 0, missing: null, toolError: null };
+  const state = { fragCount: 0, missing: null, toolError: null, dfUnsupported: false };
 
   // Runs one probe of one size, optionally TTL-limited. `probes_per_size`
   // separates an MTU limit from ordinary loss: a size passes if ANY attempt
@@ -273,7 +274,16 @@ async function pathMtuProbe(spec, {
       if (last.outcome === OUTCOME.LOCAL_ERROR) break;
       // The tool refused. Retrying cannot change that, and continuing would
       // turn a setup problem into a fabricated measurement.
-      if (last.outcome === OUTCOME.TOOL_ERROR) { state.toolError = state.toolError || last.reason; break; }
+      if (last.outcome === OUTCOME.TOOL_ERROR) {
+        // A ping with no don't-fragment option is not a tool that "failed" —
+        // it is a tool that cannot do this measurement at all, and saying so
+        // with the remedy beats handing back the flag letter. Checked on the
+        // whole run, not the parsed complaint: the refusal may be printed as a
+        // usage block rather than a `ping:` line.
+        if (dfOptionRefused(run.text, platform)) state.dfUnsupported = true;
+        state.toolError = state.toolError || last.reason;
+        break;
+      }
       if (last.outcome === OUTCOME.REPLY || last.outcome === OUTCOME.TTL_EXCEEDED) break;
     }
     const pass = last.outcome === OUTCOME.REPLY || last.outcome === OUTCOME.TTL_EXCEEDED;
@@ -370,6 +380,7 @@ async function pathMtuProbe(spec, {
   if (state.missing) return failure(host, `${state.missing} not installed`, { ip_version: opts.ipVersion });
   // A tool that would not run is reported as a failure to MEASURE, never as a
   // path with no answer. The operator gets ping's own words back.
+  if (state.dfUnsupported) return failure(host, dfUnsupportedReason(platform), { ip_version: opts.ipVersion });
   if (state.toolError) return failure(host, `ping failed: ${state.toolError}`, { ip_version: opts.ipVersion });
 
   const hops = [];

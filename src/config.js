@@ -40,8 +40,68 @@ function toList(v) {
 // config persisted post-enroll (serverUrl / discovered cert fingerprint) would be
 // abandoned on the next atomic swap. The __dirname default is for the flat enroll
 // layout (/opt/blueeye-agent, no symlink), where it IS the stable dir.
-function configPathFrom(env) {
-  return env.BLUEEYE_AGENT_CONFIG || path.join(__dirname, '..', 'blueeye-agent.config.json');
+// WHERE AN INSTALLED AGENT KEEPS ITS STATE, per platform.
+//
+// The service knows: the Windows launcher (run-agent.cmd) and the systemd unit
+// both set BLUEEYE_AGENT_CONFIG and BLUEEYE_TOKEN_PATH before starting the
+// agent. A PERSON does not. Someone opening a prompt to run `blueeye-agent
+// doctor` — the one command whose whole job is to say why a host is not
+// reporting — got none of that environment, so doctor read no config, no token,
+// and dutifully diagnosed the defaults: "Server URL: http://localhost:3000",
+// "not enrolled". Both false, about a host that was enrolled and reconnecting
+// every twenty seconds.
+//
+// So the defaults look in the install location too, after the agent's own
+// directory and only when nothing else named a path. Nothing changes for a
+// service that sets the environment, or for a flat install that keeps its
+// config next to package.json.
+function installStateDir(env = process.env, platform = process.platform) {
+  if (platform === 'win32') {
+    const base = env.ProgramData || env.PROGRAMDATA || 'C:\\ProgramData';
+    return path.join(base, 'BlueEyes');
+  }
+  return '/var/lib/blueeye-agent';
+}
+
+// The first path that exists, else the first candidate — so a missing file is
+// still reported against the place it was meant to be.
+function firstExisting(candidates) {
+  for (const c of candidates) {
+    try { if (c && fs.existsSync(c)) return c; } catch { /* unreadable: try the next */ }
+  }
+  return candidates[0];
+}
+
+// Both names, because the installers and a hand-made config disagree about it:
+// a flat checkout keeps `blueeye-agent.config.json` next to package.json, and
+// BOTH installers (install.sh and the Windows install.ps1) write `config.json`
+// into the state directory. Looking for the long name alone meant the install
+// directories added above were searched for a file that is never there, so
+// `doctor` run by hand still found no config and still diagnosed the defaults —
+// "Server URL: http://localhost:3000", about an enrolled host. The directories
+// were the easy half of that fix; the file name is the other half.
+function configPathFrom(env, platform = process.platform) {
+  if (env.BLUEEYE_AGENT_CONFIG) return env.BLUEEYE_AGENT_CONFIG;
+  const state = installStateDir(env, platform);
+  const names = ['blueeye-agent.config.json', 'config.json'];
+  const candidates = [path.join(__dirname, '..', 'blueeye-agent.config.json')];
+  // State dir first (what an installed agent actually uses), then the two
+  // historical layouts, each tried under both names.
+  for (const dir of [path.join(state, 'state'), state, path.join(state, 'agent')]) {
+    for (const name of names) candidates.push(path.join(dir, name));
+  }
+  return firstExisting(candidates);
+}
+
+// The token the installer wrote. Same reasoning, same order.
+function tokenPathFrom(env, platform = process.platform) {
+  const state = installStateDir(env, platform);
+  return firstExisting([
+    path.join(__dirname, '..', '.blueeye-agent', 'token'),
+    path.join(state, 'state', 'token'),
+    path.join(state, 'token'),
+    path.join(state, 'agent', '.blueeye-agent', 'token'),
+  ]);
 }
 
 function readConfigFile(configPath) {
@@ -55,8 +115,8 @@ function readConfigFile(configPath) {
 
 // Loads configuration, merging (lowest to highest precedence):
 //   built-in defaults  <  JSON config file  <  environment variables
-function loadConfig({ env = process.env } = {}) {
-  const configPath = configPathFrom(env);
+function loadConfig({ env = process.env, platform = process.platform } = {}) {
+  const configPath = configPathFrom(env, platform);
   const file = readConfigFile(configPath);
 
   const serverUrl = env.BLUEEYE_SERVER_URL || file.serverUrl || 'http://localhost:3000';
@@ -88,7 +148,7 @@ function loadConfig({ env = process.env } = {}) {
   const tokenPath =
     env.BLUEEYE_TOKEN_PATH ||
     file.tokenPath ||
-    path.join(__dirname, '..', '.blueeye-agent', 'token');
+    tokenPathFrom(env, platform);
   const heartbeatMs = toInt(env.BLUEEYE_HEARTBEAT_MS, file.heartbeatMs ?? 15000);
   const backoff = {
     baseMs: toInt(env.BLUEEYE_RECONNECT_BASE_MS, file.reconnectBaseMs ?? 1000),

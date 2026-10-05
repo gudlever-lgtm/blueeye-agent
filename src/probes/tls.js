@@ -2,6 +2,7 @@
 
 const tls = require('tls');
 const { clampInt, round, fail, safeHost } = require('./stats');
+const { checkRevocation, ocspMode } = require('./ocsp');
 
 // TLS / certificate probe: what certificate does this port present, is it
 // trusted, and how long is it good for?
@@ -15,7 +16,14 @@ const { clampInt, round, fail, safeHost } = require('./stats');
 //   * EXPIRY — days left, which is the one that gets diarised
 //   * TRUST  — does the chain validate against the host's trust store
 //   * NAME   — is the certificate actually for the host we asked for
+//   * REVOCATION — has the issuer killed it (OCSP; see src/probes/ocsp.js)
 //   * VERSION/CIPHER — what was negotiated, for the audit that asks
+//
+// Revocation is the one of those that the certificate cannot answer on its own:
+// a revoked certificate is still signed, still in date and still for the right
+// name. The handshake therefore asks for a stapled OCSP response by default
+// (free — it rides the handshake), and `ocsp: 'fetch'` goes to the issuer's
+// responder when there is no staple. `ocsp: false` turns the question off.
 //
 // The connection is opened with `rejectUnauthorized: false` DELIBERATELY. The
 // point is to REPORT an untrusted or mismatched certificate, and a connection
@@ -25,13 +33,14 @@ const { clampInt, round, fail, safeHost } = require('./stats');
 //
 // Privacy: metadata only. Subject, issuer, validity dates, the SAN list and the
 // negotiated parameters — never traffic.
-async function tlsProbe(spec, { connect = tls.connect, now = () => Date.now() } = {}) {
+async function tlsProbe(spec, { connect = tls.connect, now = () => Date.now(), revocation = checkRevocation, ocspFetch } = {}) {
   const host = safeHost(spec && (spec.host || spec.target));
   const port = spec && spec.port != null ? Number(spec.port) : 443;
   if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
     return fail('tls', `${(spec && (spec.host || spec.target)) || ''}:${(spec && spec.port) ?? ''}`, 'invalid host/port');
   }
   const timeoutMs = clampInt(spec && spec.timeoutMs, 10000, 100, 60000);
+  const ocsp = ocspMode(spec && spec.ocsp);
   // SNI: which name to ask for. Defaults to the host, which is what a client
   // does; an explicit servername is how you check the certificate a particular
   // virtual host presents on a shared address.
@@ -50,7 +59,7 @@ async function tlsProbe(spec, { connect = tls.connect, now = () => Date.now() } 
   const t0 = now();
   let result;
   try {
-    result = await handshake({ connect, host, port, servername, timeoutMs });
+    result = await handshake({ connect, host, port, servername, timeoutMs, ocsp });
   } catch (err) {
     return fail('tls', target, `tls handshake failed: ${String((err && (err.code || err.message)) || err)}`);
   }
@@ -96,8 +105,28 @@ async function tlsProbe(spec, { connect = tls.connect, now = () => Date.now() } 
   // alongside IP-only SANs).
   if (checkName && nameRejected) nameMatches = false;
 
-  const ok = chainTrusted && !expired && !notYetValid && nameMatches !== false;
-  const detail = describe({ expiryDays, expired, notYetValid, trustError, nameMatches, host: checkName || host, cert, protocol });
+  // Asked AFTER the handshake, and never allowed to take the probe down with
+  // it: a responder that is slow, down or unreachable is a gap in what we know
+  // about the certificate, not a fault in the service being probed.
+  let revoked = null;
+  try {
+    revoked = await revocation({
+      cert,
+      staple: result.ocspResponse || null,
+      mode: ocsp,
+      timeoutMs,
+      now,
+      ...(ocspFetch ? { fetch: ocspFetch } : {}),
+    });
+  } catch (err) {
+    revoked = { checked: false, source: null, status: 'error', revoked: false, error: String((err && err.message) || err) };
+  }
+  // Whatever happened, the rest of this function reads a block: a check that
+  // answered with nothing is "nobody asked", not a crash in the probe.
+  if (!revoked || typeof revoked !== 'object') revoked = { checked: false, source: null, status: 'unchecked', revoked: false, error: 'the revocation check answered nothing' };
+
+  const ok = chainTrusted && !expired && !notYetValid && nameMatches !== false && !revoked.revoked;
+  const detail = describe({ expiryDays, expired, notYetValid, trustError, nameMatches, host: checkName || host, cert, protocol, revoked });
 
   return {
     type: 'tls',
@@ -141,14 +170,22 @@ async function tlsProbe(spec, { connect = tls.connect, now = () => Date.now() } 
       fingerprint256: cert.fingerprint256 ? String(cert.fingerprint256).slice(0, 128) : null,
       chainLength: chainLength(cert),
       selfSigned: isSelfSigned(cert),
+      // Revocation (agent 0.47+). One flag for the fault, the whole answer
+      // beside it — including HOW it was learned and whether the response's
+      // signature checked out, because an unverified "good" is not a good.
+      revoked: revoked.revoked === true,
+      revocation: revoked,
     },
   };
 }
 
-function handshake({ connect, host, port, servername, timeoutMs }) {
+function handshake({ connect, host, port, servername, timeoutMs, ocsp = 'staple' }) {
   return new Promise((resolve, reject) => {
     let socket;
     let done = false;
+    // The staple arrives on its own event, BEFORE the handshake completes, so
+    // it has to be caught as it goes past.
+    let ocspResponse = null;
     const finish = (fn, arg) => {
       if (done) return;
       done = true;
@@ -161,11 +198,16 @@ function handshake({ connect, host, port, servername, timeoutMs }) {
         port,
         servername,
         timeout: timeoutMs,
+        // Ask the server for the issuer's signed status alongside the
+        // certificate. Costs nothing when the server has it, and a server that
+        // does not staple simply never fires the event.
+        requestOCSP: ocsp !== 'off',
         // See the module comment: reporting WHY a certificate is unacceptable
         // is the job, and a refused handshake cannot say which fault it was.
         rejectUnauthorized: false,
       }, () => {
         finish(resolve, {
+          ocspResponse,
           cert: socket.getPeerCertificate ? socket.getPeerCertificate(true) : null,
           authorized: socket.authorized,
           authorizationError: socket.authorizationError,
@@ -174,20 +216,31 @@ function handshake({ connect, host, port, servername, timeoutMs }) {
         });
       });
     } catch (err) { reject(err); return; }
+    socket.on('OCSPResponse', (der) => { if (Buffer.isBuffer(der) && der.length) ocspResponse = der; });
     socket.once('error', (err) => finish(reject, err));
     socket.once('timeout', () => finish(reject, new Error('tls timeout')));
   });
 }
 
 // One line an operator can act on, worst fault first.
-function describe({ expiryDays, expired, notYetValid, trustError, nameMatches, host, cert, protocol }) {
+function describe({ expiryDays, expired, notYetValid, trustError, nameMatches, host, cert, protocol, revoked }) {
   const issuer = nameOf(cert.issuer);
   const parts = [];
+  // Worst first, and nothing is worse than revoked: the certificate is not
+  // merely wrong, somebody withdrew it.
+  if (revoked && revoked.revoked) {
+    parts.push(`certificate REVOKED${revoked.reason ? ` (${revoked.reason})` : ''}${revoked.revokedAt ? ` on ${String(revoked.revokedAt).slice(0, 10)}` : ''}`);
+  }
   if (expired) parts.push(`certificate EXPIRED ${Math.abs(expiryDays)}d ago`);
   else if (notYetValid) parts.push('certificate is not valid yet');
   else if (expiryDays != null) parts.push(`expires in ${expiryDays}d`);
   if (nameMatches === false) parts.push(`name mismatch — not valid for ${host}`);
   if (trustError) parts.push(`chain not trusted: ${trustError}`);
+  // Only worth a word when it says something: a verified `good` is the quiet
+  // case, and an operator reading a line does not need to be told.
+  if (revoked && revoked.status === 'unverified') parts.push('revocation status unverified');
+  else if (revoked && revoked.status === 'unknown') parts.push('revocation status unknown to the issuer');
+  else if (revoked && revoked.stale) parts.push('revocation status is stale');
   if (issuer) parts.push(`issuer ${issuer}`);
   if (protocol) parts.push(protocol);
   return parts.join(' · ') || null;

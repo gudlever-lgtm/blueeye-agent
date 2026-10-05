@@ -144,3 +144,20 @@ test('a hostile host is rejected before it reaches argv', async () => {
   assert.equal(res.ok, false);
   assert.equal(calls.length, 0);
 });
+
+// A BusyBox ping (Alpine, OpenWrt, most minimal containers) has no
+// don't-fragment option: `ping: unrecognized option: M`. The sweep is the one
+// part of this probe that needs it, so that size must come back unmeasured with
+// the remedy rather than with the flag letter.
+test('a ping with no don\'t-fragment option says so, and says what to install', async () => {
+  const exec = (bin, args, opts, cb) => {
+    if (args.includes('-M')) return cb(new Error('Command failed'), '', 'ping: unrecognized option: M\n');
+    return cb(null, okOutput(1), '');
+  };
+  const res = await pingProbe({ host: 'h', count: 1, sizes: [64, 1472], df: true }, { exec, platform: 'linux' });
+  const big = res.sizes.find((s) => s.bytes === 1472);
+  assert.equal(big.lossPct, 100, 'nothing was sent, so nothing arrived');
+  assert.match(big.error, /don't-fragment/i, `the size names the real problem: ${big.error}`);
+  assert.match(big.error, /iputils-ping/, 'the size carries the remedy');
+  assert.doesNotMatch(big.error, /Command failed/);
+});

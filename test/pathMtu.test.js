@@ -640,3 +640,39 @@ test('the result carries every field of the documented schema', async () => {
     assert.ok(Object.values(HOP_STATUS).includes(h.status));
   }
 });
+
+// ---- A ping with no don't-fragment option ---------------------------------
+// Alpine, OpenWrt and most minimal containers ship BusyBox's ping, which has no
+// DF option at all and answers `ping: unrecognized option: M`. That reached the
+// operator as "ping failed: unrecognized option: M" — a flag letter nobody
+// typed, about a measurement they did ask for.
+//
+// It must stay a FAILURE TO MEASURE. Without DF an oversized packet is simply
+// fragmented and arrives, so carrying on would walk the search to its ceiling
+// and report a path that carries 9000 bytes.
+const BUSYBOX_REFUSAL = 'ping: unrecognized option: M\nBusyBox v1.36.1 (2024-01-01) multi-call binary.\n';
+
+test('a BusyBox ping is reported as "cannot measure", with the remedy, not as a flag error', async () => {
+  const refuse = (bin, args, opts, cb) => cb(new Error('Command failed'), '', BUSYBOX_REFUSAL);
+  const r = await pathMtuProbe({ host: '10.20.30.40', per_hop: false }, {
+    exec: refuse, platform: 'linux', tracerouteFn: async () => ({ hops: [] }),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.path_mtu, null, 'nothing was measured, so nothing may be reported');
+  assert.equal(r.blackhole_detected, false, 'our own tooling is not a path fault');
+  assert.match(r.error, /don't-fragment/i, `the error names the real problem: ${r.error}`);
+  assert.match(r.error, /iputils-ping/, 'the error carries the remedy');
+  assert.doesNotMatch(r.error, /unrecognized option/, 'the flag letter is not the operator\'s problem');
+});
+
+test('a ping refusing some OTHER option is still reported in its own words', async () => {
+  // The DF check must not swallow every complaint: a ping that will not take
+  // `-s` is a different problem, and guessing it is the DF one would send the
+  // operator to install a package they already have.
+  const refuse = (bin, args, opts, cb) => cb(new Error('Command failed'), '', 'ping: unrecognized option: s\n');
+  const r = await pathMtuProbe({ host: '10.20.30.40', per_hop: false }, {
+    exec: refuse, platform: 'linux', tracerouteFn: async () => ({ hops: [] }),
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /ping failed: unrecognized option: s/);
+});
