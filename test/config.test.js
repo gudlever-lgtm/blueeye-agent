@@ -129,6 +129,44 @@ test('the Windows install location is searched when nothing names a config', (t)
     'the installed config was not found, so doctor diagnoses the defaults');
 });
 
+// ...under the name the INSTALLER writes, which is the half that was missed.
+// install.sh and install.ps1 both write `config.json` into the state directory
+// (`/var/lib/blueeye-agent`, `C:\\ProgramData\\BlueEyes\\state`) — never
+// `blueeye-agent.config.json`, which is the flat-checkout name. Searching the
+// right directories for a file name that is never in them found nothing, so
+// doctor still reported localhost:3000 about an enrolled host.
+test('the installed config is found under the name the installer writes', (t) => {
+  for (const [platform, envFor, stateDir] of [
+    ['win32', (dir) => ({ ProgramData: dir }), (dir) => path.join(dir, 'BlueEyes', 'state')],
+    ['linux', () => ({}), null],
+  ]) {
+    if (!stateDir) continue; // the linux state dir is absolute and not writable in a test
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blueeye-pd-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const state = stateDir(dir);
+    fs.mkdirSync(state, { recursive: true });
+    fs.writeFileSync(path.join(state, 'config.json'), JSON.stringify({ serverUrl: 'https://blueeye.example.dk' }));
+
+    const cfg = loadConfig({ env: envFor(dir), platform });
+    assert.equal(cfg.serverUrl, 'https://blueeye.example.dk',
+      `${platform}: the installed config.json was not found, so doctor diagnoses the defaults`);
+  }
+});
+
+// A host that has both keeps using the one it used before: the long name in the
+// state dir is what a hand-written config is called, and renaming somebody's
+// configuration out from under them by changing a search order is not a fix.
+test('the long name wins over config.json in the same directory', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blueeye-pd-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const state = path.join(dir, 'BlueEyes', 'state');
+  fs.mkdirSync(state, { recursive: true });
+  fs.writeFileSync(path.join(state, 'blueeye-agent.config.json'), JSON.stringify({ serverUrl: 'https://long.example' }));
+  fs.writeFileSync(path.join(state, 'config.json'), JSON.stringify({ serverUrl: 'https://short.example' }));
+
+  assert.equal(loadConfig({ env: { ProgramData: dir }, platform: 'win32' }).serverUrl, 'https://long.example');
+});
+
 test('an explicit BLUEEYE_AGENT_CONFIG still wins over the install location', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blueeye-pd-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
