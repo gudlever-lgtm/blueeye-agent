@@ -128,7 +128,7 @@ diffed against the previous snapshot — only a real change writes a
 { "capabilities": {
     "sources": ["proc", "snmp", "netflow", "sflow"],  // required: array of strings
     "agentVersion": "0.9.0",                           // package.json version
-    "managed": "systemd" | "docker" | "unmanaged",     // supervision (decides self-update/delete)
+    "managed": "systemd" | "windows-service" | "scheduled-task" | "launchd" | "docker" | "unmanaged",  // supervision (decides self-update/delete)
     "nic": [ {                                         // optional; omitted when empty/unreadable
       "iface": "eth0", "driver": "e1000e", "driverVersion": "...",
       "firmwareVersion": "...", "busInfo": "0000:00:1f.6", "pciId": "8086:15b8"
@@ -589,7 +589,7 @@ the canonical names shown):
 | `run-test` | `intervalMs?` (1..86400000) | measure traffic+system, POST `/agents/results` | — (REST only) |
 | `run-probe` | `probe: <spec>` (required object) | run probe, POST `/agents/probe-results` | — (REST only) |
 | `speedtest` (alias: speed-test) | `bytes?` | down/up transfer, POST `/speedtest/results` | — (REST only) |
-| `update` (aliases: self-update, upgrade) | `id`, `auditId?`, `version?`, `sha256?`, `signature?` | systemd only: download+verify+install+restart; docker/unmanaged decline | `ack {id, accepted, runtime, reason?}`, then `action-result`; on failure also `command-result {id, ok:false, error}` |
+| `update` (aliases: self-update, upgrade) | `id`, `auditId?`, `version?`, `sha256?`, `signature?` | systemd, windows-service, scheduled-task, launchd: download+verify+install+restart; docker/unmanaged decline | `ack {id, accepted, runtime, reason?}`, then `action-result`; on failure also `command-result {id, ok:false, error}` |
 | `delete` (aliases: self-delete, uninstall) | `id`, `auditId?` | wipe token + detached `uninstall.sh`; docker declines | `ack {id, accepted, runtime, reason?}`, then `action-result` |
 | `install-tool` | `id`, `auditId?`, `tool` (required string) | install from agent's own allowlist (traceroute/mtr/tcptraceroute); docker declines | `ack {id, accepted, runtime, reason?}`, then `action-result` |
 | `rekey` (aliases: re-key, rotate-key, repin, re-pin) | `id`, `auditId?`, `publicKey` (required PEM) | replace the pinned release trust anchor, in memory and on disk. **Strict by default** — see §2.3 | `ack {id, accepted, runtime}`, `command-result {id, ok, fingerprint?}`, `action-result` |
@@ -620,7 +620,7 @@ to take a monitoring agent off a host nobody is watching.
 | --- | --- | --- |
 | `heartbeat` | `{ type:'heartbeat', ts:<ms epoch> }` | not parsed; refreshes `last_seen` like any frame |
 | `ack` (ping) | `{ type:'ack', id, ok:true, agentVersion, sources, managed }` | resolves the pending waiter for `id`; `POST /agents/:id/ping` returns `agentVersion`/`sources`/`managed` |
-| `ack` (update/delete/install-tool) | `{ type:'ack', id, accepted:bool, runtime:'systemd'\|'windows-service'\|'launchd'\|'docker'\|'unmanaged', reason?:'docker-managed'\|'unmanaged' }` | resolves the waiter; `accepted:false` marks the audit row failed with `reason` |
+| `ack` (update/delete/install-tool) | `{ type:'ack', id, accepted:bool, runtime:'systemd'\|'windows-service'\|'scheduled-task'\|'launchd'\|'docker'\|'unmanaged', reason?:'docker-managed'\|'unmanaged' }` | resolves the waiter; `accepted:false` marks the audit row failed with `reason` |
 | `command-result` | `{ type:'command-result', id, ok:true, diagnostic }` (diagnose) · `{ type:'command-result', id, ok:false, error }` (update failure) | resolves the waiter for `id` (diagnose reads `reply.diagnostic`); an update-failure result usually arrives after the waiter timed out/was resolved by the ack, so it is dropped — the failure reaches the server via `action-result` instead |
 | `action-result` | `{ type:'action-result', auditId, action:'upgrade'\|'delete'\|'install-tool', ok:bool, version?, tool?, package?, manager?, detail? }` | completes the `agent_action_audit` row (`completed`/`failed`, detail ≤ 300 chars or `"version X"`); `action:'install-tool'` adds an `agent.install-tool` audit event; `action:'delete', ok:true` **deletes the agent row** (tokens cascade) and notifies the dashboard |
 | `sflow.status` | `{ type:'sflow.status', state, detail\|null }` | `state` validated against `active\|inactive\|failed\|not_installed\|install_failed\|permission_denied\|unknown` (else `unknown`), `detail` ≤ 300; kept in-memory per agent (repopulated on reconnect), shown on the agents list, pushed to the dashboard |
@@ -766,7 +766,7 @@ survives release swaps).
 | `BLUEEYE_SERVICE_NAME` | — | `blueeye-agent` | systemd unit for restart/uninstall (`src/selfUpdate.js`, `src/selfDelete.js`) |
 | `BLUEEYE_RELEASES_DIR` | — | — | versioned-release layout root (`src/selfUpdate.js`) |
 | `BLUEEYE_CURRENT_LINK` | — | — | `current` symlink path (`src/selfUpdate.js`, `src/selfDelete.js`) |
-| `BLUEEYE_RUNTIME` | — | auto-detect | force `docker`/`systemd`/`unmanaged` (`src/capabilities.js`; else `/.dockerenv`/`$container` ⇒ docker, `$INVOCATION_ID` ⇒ systemd) |
+| `BLUEEYE_RUNTIME` | — | auto-detect | force `systemd`/`windows-service`/`scheduled-task`/`launchd`/`docker`/`unmanaged` (`src/capabilities.js`; else `/.dockerenv`/`$container` ⇒ docker, `$INVOCATION_ID` ⇒ systemd, `$XPC_SERVICE_NAME` ⇒ launchd). Neither Windows form can be detected from the environment, so there the installer sets it; an unrecognised value falls back to `unmanaged` |
 | `BLUEEYE_RELEASE_PUBLIC_KEY` | — | embedded placeholder | release trust anchor, PEM or base64-of-PEM (`src/release/publicKey.js`); unset/placeholder ⇒ signed updates refused |
 
 Config **writes** by the agent: token file at enrollment; `enrollmentCode`
@@ -800,7 +800,7 @@ collector port, the reporting interval, and whether to self-provision hsflowd.
    - a runtime nothing can restart (`docker`, `unmanaged`) ⇒
      `ack {accepted:false, runtime, reason}` + `action-result {ok:false,
      detail:reason}`; server marks the audit failed.
-   - `systemd`, `windows-service` or `launchd` ⇒ `ack {accepted:true, runtime}`
+   - `systemd`, `windows-service`, `scheduled-task` or `launchd` ⇒ `ack {accepted:true, runtime}`
      immediately.
 3. Download from `/enroll/agent-release.tgz` (signed) or
    `/enroll/agent-source.tgz` (legacy) — §1.8 verification, fail-closed.

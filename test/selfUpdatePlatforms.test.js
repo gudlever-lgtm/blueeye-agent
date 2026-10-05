@@ -18,6 +18,7 @@ const silent = { info() {}, warn() {}, error() {} };
 test('the restart target follows the runtime, then the platform', () => {
   const mk = (over) => createSelfUpdater({ logger: silent, ...over });
   assert.equal(mk({ runtime: 'systemd', platform: 'win32' }).restartKind(), 'systemd', 'an explicit runtime wins');
+  assert.equal(mk({ runtime: 'scheduled-task', platform: 'win32' }).restartKind(), 'scheduled-task');
   assert.equal(mk({ platform: 'win32' }).restartKind(), 'windows-service');
   assert.equal(mk({ platform: 'darwin' }).restartKind(), 'launchd');
   assert.equal(mk({ platform: 'linux' }).restartKind(), 'systemd');
@@ -54,6 +55,63 @@ test('a Windows service is restarted by a detached child, because it cannot stop
   assert.ok(spawned[0].args.join(' ').includes('net stop "BlueEyeAgent"'));
   assert.ok(spawned[0].args.join(' ').includes('net start "BlueEyeAgent"'));
   assert.equal(unrefs, 1, 'and must not hold the event loop open');
+});
+
+test('a Scheduled Task is ended and re-run by a detached child, for the same reason', () => {
+  // This is what the Windows installer actually registers. It used to be tagged
+  // 'unmanaged', so every Windows agent declined the one-click update and the
+  // only way to move one was a downloaded PowerShell script.
+  const spawned = [];
+  let unrefs = 0;
+  const updater = createSelfUpdater({
+    logger: silent,
+    platform: 'win32',
+    runtime: 'scheduled-task',
+    serviceName: 'blueeye-agent',
+    spawnImpl: (cmd, args, opts) => { spawned.push({ cmd, args, opts }); return { unref: () => { unrefs += 1; } }; },
+    exec: () => { throw new Error('the foreground path must not be used for a scheduled task'); },
+  });
+  const r = updater.restart();
+  assert.equal(r.ok, true);
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].cmd, 'cmd.exe');
+  assert.equal(spawned[0].opts.detached, true, '/End kills the process that would issue the /Run');
+  const line = spawned[0].args.join(' ');
+  assert.ok(line.includes('schtasks /End /TN "blueeye-agent"'), line);
+  assert.ok(line.includes('schtasks /Run /TN "blueeye-agent"'), line);
+  assert.ok(!line.includes('powershell'), 'schtasks.exe is everywhere; the PowerShell module is a separate component');
+  assert.equal(unrefs, 1);
+});
+
+test('a task name carrying a quote cannot break out of the schtasks argument', () => {
+  // The name comes from BLUEEYE_SERVICE_NAME, which the installer sets — not from
+  // anything the server sends. Stripping the quote anyway is cheap, and the whole
+  // string is built into ONE cmd line, where a stray quote would end the /TN
+  // argument and leave the rest to be parsed as commands.
+  const spawned = [];
+  const updater = createSelfUpdater({
+    logger: silent,
+    platform: 'win32',
+    runtime: 'scheduled-task',
+    serviceName: 'agent" & calc.exe & "',
+    spawnImpl: (cmd, args, opts) => { spawned.push({ cmd, args, opts }); return { unref() {} }; },
+  });
+  updater.restart();
+  const line = spawned[0].args.join(' ');
+  assert.equal((line.match(/"/g) || []).length, 4, 'exactly the two quoted /TN arguments, no stray quote');
+  assert.ok(line.includes('/TN "agent & calc.exe & "'), 'the payload stays INSIDE the quotes, where cmd does not split on &');
+});
+
+test('a scheduled task that cannot be spawned at all is reported, not swallowed', () => {
+  const updater = createSelfUpdater({
+    logger: silent,
+    platform: 'win32',
+    runtime: 'scheduled-task',
+    spawnImpl: () => { throw new Error('EPERM'); },
+  });
+  const r = updater.restart();
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /EPERM/);
 });
 
 test('a restart that cannot even be launched is reported, not swallowed', () => {
@@ -143,6 +201,8 @@ test('a launchd job is detected, and Windows waits for the installer to say so',
   assert.equal(detectManaged({ env: { BLUEEYE_RUNTIME: 'windows-service' }, fileExists: noFiles }), 'windows-service');
   assert.equal(detectManaged({ env: {}, fileExists: noFiles }), 'unmanaged', 'a Windows host without the marker declines updates, as before');
   assert.equal(isSelfUpdatable('windows-service'), true);
+  assert.equal(detectManaged({ env: { BLUEEYE_RUNTIME: 'scheduled-task' }, fileExists: noFiles }), 'scheduled-task');
+  assert.equal(isSelfUpdatable('scheduled-task'), true, 'the Windows installer registers a task, and a task can be restarted');
   assert.equal(isSelfUpdatable('launchd'), true);
   assert.equal(isSelfUpdatable('docker'), false);
   assert.equal(isSelfUpdatable('unmanaged'), false);

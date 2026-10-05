@@ -22,19 +22,25 @@ const releaseGuard = require('./release/releaseGuard');
 //
 // Docker/unmanaged agents are not updated here (the host rebuilds those) — the
 // caller checks `managed` first. Everything is injectable for tests.
+// The runtimes restart() knows a command for. Kept beside the switch it feeds so
+// the two cannot drift; capabilities.js decides separately which of them the
+// SERVER may push an update to, and that list is the narrower promise.
+const RESTARTABLE = ['systemd', 'windows-service', 'scheduled-task', 'launchd'];
+
 function createSelfUpdater({
   installDir = path.join(__dirname, '..'),
   serviceName = process.env.BLUEEYE_SERVICE_NAME || 'blueeye-agent',
   // Which service manager restarts us. Decides the restart command and nothing
   // else — download, verification and the blue/green install are identical
-  // everywhere. 'systemd' | 'windows-service' | 'launchd'.
+  // everywhere.
+  // 'systemd' | 'windows-service' | 'scheduled-task' | 'launchd'.
   runtime = String(process.env.BLUEEYE_RUNTIME || '').toLowerCase() || '',
   platform = process.platform,
   // launchd needs the job's label, not the service name.
   launchdLabel = process.env.BLUEEYE_LAUNCHD_LABEL || 'com.blueeye.agent',
-  // Restarting a Windows service from inside that service cannot be done in the
-  // foreground: the stop kills the process issuing the start. So it is handed to
-  // a DETACHED child that outlives us.
+  // Restarting a Windows service — or a Scheduled Task — from inside it cannot be
+  // done in the foreground: the stop kills the process issuing the start. So it
+  // is handed to a DETACHED child that outlives us.
   spawnImpl = spawn,
   // Atomic, rollback-able layout (set by the systemd installer): versioned
   // release dirs + a `current` symlink the service runs from. When BOTH are set
@@ -324,7 +330,12 @@ function createSelfUpdater({
   // installer sets it); otherwise the platform decides, which keeps every agent
   // in the field working without a re-provision.
   function restartKind() {
-    if (runtime === 'systemd' || runtime === 'windows-service' || runtime === 'launchd') return runtime;
+    if (RESTARTABLE.includes(runtime)) return runtime;
+    // No explicit runtime: guess from the platform, which keeps every agent in
+    // the field working without a re-provision. Windows guesses 'windows-service'
+    // rather than 'scheduled-task' because that is what it has always guessed,
+    // and a host whose installer never set BLUEEYE_RUNTIME is reporting
+    // 'unmanaged' anyway — the server does not send it an update to restart from.
     if (platform === 'win32') return 'windows-service';
     if (platform === 'darwin') return 'launchd';
     return 'systemd';
@@ -341,6 +352,7 @@ function createSelfUpdater({
     const kind = restartKind();
     logger.info(`[update] requesting restart of ${serviceName} (${kind})`);
     if (kind === 'windows-service') return restartWindowsService();
+    if (kind === 'scheduled-task') return restartScheduledTask();
     if (kind === 'launchd') return run('launchctl', ['kickstart', '-k', `system/${launchdLabel}`]);
     // --no-block enqueues the job in PID 1, so it completes even though this
     // process is terminated during the stop phase (systemd then starts a fresh
@@ -380,6 +392,36 @@ function createSelfUpdater({
       return { ok: true, detail: null, result: child };
     } catch (err) {
       logger.error(`[update] restart of ${serviceName} FAILED: ${err.message}`);
+      return { ok: false, detail: err.message, result: null };
+    }
+  }
+
+  // The Scheduled Task the Windows installer actually registers. Same problem and
+  // same shape as the service above — a task cannot end and re-run itself, because
+  // /End kills the process that was going to issue the /Run — so the pair goes to
+  // a detached `cmd` that outlives us.
+  //
+  // `schtasks /End` rather than `Stop-ScheduledTask`: schtasks.exe is present on
+  // every supported Windows, where the ScheduledTasks PowerShell module is a
+  // separate component, and spawning powershell.exe from a service costs seconds
+  // of module load for a two-word command.
+  //
+  // There is no status to check: success is that this process is killed shortly
+  // afterwards. A spawn that fails to launch at all IS reportable, and is.
+  function restartScheduledTask() {
+    const name = serviceName.replace(/"/g, '');
+    const command = `timeout /t 2 /nobreak >nul & schtasks /End /TN "${name}" >nul 2>&1 & schtasks /Run /TN "${name}" >nul 2>&1`;
+    try {
+      const child = spawnImpl('cmd.exe', ['/d', '/s', '/c', command], {
+        detached: true,
+        stdio: 'ignore',
+        windowsVerbatimArguments: true,
+      });
+      if (child && typeof child.unref === 'function') child.unref();
+      if (child && child.error) throw child.error;
+      return { ok: true, detail: null, result: child };
+    } catch (err) {
+      logger.error(`[update] restart of scheduled task ${serviceName} FAILED: ${err.message}`);
       return { ok: false, detail: err.message, result: null };
     }
   }

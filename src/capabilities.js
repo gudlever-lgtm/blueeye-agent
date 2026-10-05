@@ -40,7 +40,17 @@ function detectCapabilities({
 // Which service managers can restart this agent onto new code. Docker rebuilds
 // the image instead, and nothing restarts an unmanaged process, so those two are
 // the ones a one-click update has to decline.
-const SELF_UPDATABLE = ['systemd', 'windows-service', 'launchd'];
+//
+// 'scheduled-task' is the Windows installer's actual supervisor. It writes a
+// Scheduled Task rather than a service, because a real Windows service needs a
+// service wrapper the agent does not ship — and because the task needed no extra
+// dependency it was tagged 'unmanaged', which made every Windows agent in the
+// field decline the one-click update and left `/enroll/update.ps1` as the only
+// way to move one. A task CAN be stopped and started (schtasks /End, /Run), so
+// 'unmanaged' was understating what the host can do, and the whole fleet paid
+// for it by being updated through a downloaded script instead of the signed,
+// command-authenticated channel that already existed.
+const SELF_UPDATABLE = ['systemd', 'windows-service', 'scheduled-task', 'launchd'];
 const RUNTIMES = [...SELF_UPDATABLE, 'docker', 'unmanaged'];
 
 // How this agent is supervised, which decides whether it can self-update:
@@ -51,10 +61,10 @@ const RUNTIMES = [...SELF_UPDATABLE, 'docker', 'unmanaged'];
 //     launchd hands an interactive shell);
 //   - otherwise 'unmanaged' (a bare `node src/index.js` nothing would restart).
 //
-// A Windows service cannot be detected from the environment — the process looks
-// like any other — so there it is the installer's BLUEEYE_RUNTIME that says so.
-// Without it a Windows agent reports 'unmanaged' and declines updates, which is
-// the old behaviour and the safe one.
+// Neither a Windows service nor a Scheduled Task can be detected from the
+// environment — the process looks like any other — so there it is the
+// installer's BLUEEYE_RUNTIME that says so. Without it a Windows agent reports
+// 'unmanaged' and declines updates, which is the old behaviour and the safe one.
 function detectManaged({ env = process.env, fileExists = defaultFileExists } = {}) {
   const explicit = String(env.BLUEEYE_RUNTIME || '').toLowerCase();
   if (RUNTIMES.includes(explicit)) return explicit;
