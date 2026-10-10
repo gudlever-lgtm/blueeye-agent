@@ -652,6 +652,8 @@ can, and the agent verifies (`src/commandAuth.js`).
 | `commandSignature` | base64 Ed25519 over `canonicalize(command minus commandSignature and id)`, made with the **release key** the agent already pins for signed updates. Not `signature`, which on an `update` signs the release manifest — the payload to install, not the instruction to install it. |
 | `agentId` | binds the signature to one agent, so a captured command cannot be replayed across the fleet. Required on any signed command. |
 | `issuedAt` | ISO timestamp; the agent accepts ±5 minutes. Required on any signed command. |
+| `commandId` | a per-command nonce (UUID). The agent remembers the ids it has carried out for as long as they could still be valid and refuses the second delivery, so a captured command cannot be replayed at the SAME agent inside its window. **Required on any signed command** — one without it is refused, because a replay of it could not be detected. |
+| `expiresAt` | ISO timestamp, stated by the server rather than left to the agent's skew window. Checked in addition to the ±5 min window, never instead of it, so a long `expiresAt` cannot stretch the window. |
 
 Policy:
 
@@ -659,6 +661,9 @@ Policy:
 | --- | --- |
 | signed, verifies against the pinned key | accepted |
 | signed, does not verify (or no key pinned) | **refused** — a signature that cannot be checked is worse than none |
+| signed, already carried out once (same `commandId`) | **refused** — replay |
+| signed, past its `expiresAt` | refused |
+| signed, no `commandId` | **refused** — the server signs but does not stamp a nonce, so replay could not be detected; it needs an update |
 | unsigned, `BLUEEYE_REQUIRE_SIGNED_COMMANDS=1` | refused |
 | unsigned, default, `update`/`delete`/`install-tool` | accepted (backward compatible with a server that cannot sign) |
 | unsigned `rekey`, agent already holds a key | **refused by default.** `rekey` replaces the anchor every later signature is checked against, so accepting an unsigned one turns one moment of socket access into permanent, silent code execution. A legitimate rotation is signed with the key being replaced. |

@@ -113,6 +113,32 @@ function allowUnsignedRekey(env = process.env) {
   return TRUTHY.test(String(env.BLUEEYE_ALLOW_UNSIGNED_REKEY || '').trim());
 }
 
+// Remembers the commandIds this agent has already accepted, so a captured
+// signed command cannot be replayed against the SAME agent inside its validity
+// window (the agentId binding only stops replay against the REST of the fleet).
+// Ids are forgotten once they can no longer be valid, which keeps the set the
+// size of "privileged commands in the last few minutes" — single digits.
+//
+// ponytail: in-memory. A restart forgets the ids, so a replay that lands in the
+// seconds after a restart is still possible; persist to the state dir beside the
+// pinned key if that window ever matters.
+function createReplayGuard({ now = () => Date.now() } = {}) {
+  const seen = new Map(); // commandId -> ms after which it can no longer be valid
+
+  // True the FIRST time an id is seen, false every time after. Recording and
+  // checking are one step on purpose: two steps is how a check-then-use race
+  // lets a replay through.
+  function accept(commandId, notValidAfterMs) {
+    const t = now();
+    for (const [id, expiry] of seen) if (expiry <= t) seen.delete(id);
+    if (seen.has(commandId)) return false;
+    seen.set(commandId, notValidAfterMs);
+    return true;
+  }
+
+  return { accept, get size() { return seen.size; } };
+}
+
 // Returns { ok: true, signed } or { ok: false, reason }. Never throws — the
 // caller turns a refusal into a declined command, not a crash.
 function verifyCommand(command, {
@@ -125,6 +151,10 @@ function verifyCommand(command, {
   allowUnsignedRekeyOverride = allowUnsignedRekey(),
   now = () => Date.now(),
   maxSkewMs = MAX_SKEW_MS,
+  // The agent's replay guard (createReplayGuard above). Without one a signed
+  // command is still checked for freshness, but not for having been seen
+  // before — so the runtime always passes one.
+  replayGuard = null,
 } = {}) {
   const signature = command && command.commandSignature;
   if (!signature) {
@@ -163,7 +193,32 @@ function verifyCommand(command, {
   if (Math.abs(now() - issuedAt) > maxSkewMs) {
     return { ok: false, reason: 'refused: signed command is outside the accepted time window (replay?)' };
   }
+  // The server states its own expiry rather than leaving the lifetime to
+  // whatever skew window this agent happens to allow. Checked IN ADDITION to
+  // the skew window, never instead of it: the field is inside the signature, so
+  // a long expiresAt is the server's choice to make, but it cannot stretch the
+  // window past the agent's own tolerance.
+  if (command.expiresAt != null) {
+    const expiresAt = Date.parse(command.expiresAt);
+    if (!Number.isFinite(expiresAt)) return { ok: false, reason: 'refused: signed command has an unreadable expiresAt' };
+    if (now() > expiresAt) return { ok: false, reason: 'refused: signed command has expired' };
+  }
+  // A signed command with no nonce is replayable against this agent for the
+  // length of the window. Required, not tolerated: accepting one would be a
+  // silent downgrade of exactly the protection the nonce exists for. A server
+  // old enough not to send it is also old enough not to sign at all, and its
+  // unsigned commands still follow the lenient/strict policy above.
+  if (!command.commandId) {
+    return {
+      ok: false,
+      reason: 'refused: signed command carries no commandId, so a replay of it could not be detected. '
+        + 'The server needs an update (it signs commands but does not stamp them with a unique id).',
+    };
+  }
+  if (replayGuard && !replayGuard.accept(String(command.commandId), issuedAt + maxSkewMs)) {
+    return { ok: false, reason: 'refused: this command has already been carried out (replay)' };
+  }
   return { ok: true, signed: true };
 }
 
-module.exports = { verifyCommand, requireSignedCommands, allowUnsignedRekey, signedPayload, MAX_SKEW_MS };
+module.exports = { verifyCommand, requireSignedCommands, allowUnsignedRekey, createReplayGuard, signedPayload, MAX_SKEW_MS };

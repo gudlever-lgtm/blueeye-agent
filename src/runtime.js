@@ -10,7 +10,7 @@ const { createEvidenceCollector } = require('./evidenceCollector');
 const { verifyManifest } = require('./release/verifyManifest');
 const fs = require('fs');
 const { createSelfUpdater } = require('./selfUpdate');
-const { verifyCommand, requireSignedCommands, allowUnsignedRekey: allowUnsignedRekeyEnv } = require('./commandAuth');
+const { verifyCommand, requireSignedCommands, createReplayGuard, allowUnsignedRekey: allowUnsignedRekeyEnv } = require('./commandAuth');
 const { createSelfDeleter } = require('./selfDelete');
 const { createToolInstaller } = require('./toolInstaller');
 const { createActionLog } = require('./actionLog');
@@ -191,6 +191,9 @@ function createAgentRuntime({
   // replaces it while the agent runs: the update that follows it must verify
   // against the new key without waiting for a restart.
   let pinnedKey = releasePublicKey;
+  // One per runtime: the commandIds already carried out, so a captured signed
+  // command cannot be replayed at this agent inside its validity window.
+  const replayGuard = createReplayGuard();
   const updater = selfUpdater || createSelfUpdater({ logger, runtime: capabilities.managed });
   // The deleter must wipe the token the runtime actually uses: tokenPath can be
   // set via the config FILE (not just env), and selfDelete's own default only
@@ -1430,6 +1433,7 @@ function createAgentRuntime({
       strict: strictCommands,
       isRekey: names.log === 'rekey',
       allowUnsignedRekeyOverride: allowUnsignedRekey,
+      replayGuard,
     });
     if (verdict.ok) {
       // The server just proved it can sign. Latch it: from now on an unsigned

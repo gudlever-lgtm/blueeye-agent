@@ -39,7 +39,7 @@ function makeSigner() {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const publicPem = publicKey.export({ type: 'spki', format: 'pem' });
   const sign = (agentId, cmd, issuedAt = new Date().toISOString()) => {
-    const body = { ...cmd, agentId, issuedAt };
+    const body = { ...cmd, agentId, commandId: crypto.randomUUID(), issuedAt };
     return { ...body, commandSignature: crypto.sign(null, Buffer.from(canonicalize(signedPayload(body))), privateKey).toString('base64') };
   };
   return { publicPem, sign };

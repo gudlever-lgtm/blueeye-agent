@@ -4,17 +4,26 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 
-const { verifyCommand, requireSignedCommands } = require('../src/commandAuth');
+const { verifyCommand, requireSignedCommands, createReplayGuard } = require('../src/commandAuth');
 const { canonicalize } = require('../src/release/canonicalize');
 
 // Mints a key pair and a signer that mirrors blueeye-server's commandSigner:
-// agentId + issuedAt are added, then everything except the transport `id` and
-// the signature itself is signed over the canonical bytes.
+// agentId + commandId + issuedAt + expiresAt are added, then everything except
+// the transport `id` and the signature itself is signed over the canonical bytes.
+let nonce = 0;
 function makeSigner() {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
-  const sign = (agentId, command, issuedAt = new Date().toISOString()) => {
-    const payload = { ...command, agentId, issuedAt };
+  const sign = (agentId, command, issuedAt = new Date().toISOString(), overrides = {}) => {
+    const payload = {
+      ...command,
+      agentId,
+      commandId: `cmd-${(nonce += 1)}`,
+      issuedAt,
+      expiresAt: new Date(Date.parse(issuedAt) + 120000).toISOString(),
+      ...overrides,
+    };
+    for (const [k, v] of Object.entries(overrides)) if (v === undefined) delete payload[k];
     const signature = crypto.sign(null, Buffer.from(canonicalize(payload)), privateKey).toString('base64');
     return { ...payload, commandSignature: signature };
   };
@@ -93,10 +102,66 @@ test('a signed command naming no agent is refused', () => {
   const { publicPem } = makeSigner();
   const { privateKey } = crypto.generateKeyPairSync('ed25519');
   // Signed, well-formed, but with nothing binding it to one agent.
-  const payload = { name: 'delete', issuedAt: new Date().toISOString() };
+  const payload = { name: 'delete', commandId: 'cmd-no-agent', issuedAt: new Date().toISOString() };
   const command = { ...payload, commandSignature: crypto.sign(null, Buffer.from(canonicalize(payload)), privateKey).toString('base64') };
   const v = verifyCommand(command, { publicKey: publicPem, agentId: 3 });
   assert.equal(v.ok, false);
+});
+
+test('a signed command replayed at the SAME agent is refused the second time', () => {
+  const { publicPem, sign } = makeSigner();
+  const replayGuard = createReplayGuard();
+  const command = sign(3, { name: 'delete', auditId: 7 });
+  const opts = { publicKey: publicPem, agentId: 3, strict: true, replayGuard };
+
+  assert.equal(verifyCommand(command, opts).ok, true, 'first delivery is carried out');
+  const second = verifyCommand(command, opts);
+  assert.equal(second.ok, false, 'the same signed bytes must not be carried out twice');
+  assert.match(second.reason, /already been carried out/);
+
+  // A genuinely new command from the same server still goes through.
+  assert.equal(verifyCommand(sign(3, { name: 'delete', auditId: 8 }), opts).ok, true);
+});
+
+test('a signed command with no commandId is refused — replay could not be detected', () => {
+  const { publicPem, sign } = makeSigner();
+  const command = sign(3, { name: 'delete' }, new Date().toISOString(), { commandId: undefined });
+  const v = verifyCommand(command, { publicKey: publicPem, agentId: 3, replayGuard: createReplayGuard() });
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /no commandId/);
+});
+
+test('expiresAt is honoured, and cannot stretch past the agent\'s own window', () => {
+  const { publicPem, sign } = makeSigner();
+  const now = Date.now();
+
+  // Expired by the server's own statement, while still inside the skew window.
+  const expired = sign(3, { name: 'delete' }, new Date(now - 1000).toISOString(), { expiresAt: new Date(now - 500).toISOString() });
+  const v = verifyCommand(expired, { publicKey: publicPem, agentId: 3, replayGuard: createReplayGuard() });
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /expired/);
+
+  // An unreadable expiry is a refusal, not something to ignore.
+  const garbled = sign(3, { name: 'delete' }, new Date(now).toISOString(), { expiresAt: 'soon' });
+  assert.equal(verifyCommand(garbled, { publicKey: publicPem, agentId: 3 }).ok, false);
+
+  // A server asking for a week does not get one: the skew window still applies.
+  const greedy = sign(3, { name: 'delete' }, new Date(now - 60 * 60 * 1000).toISOString(), {
+    expiresAt: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString(),
+  });
+  const stretched = verifyCommand(greedy, { publicKey: publicPem, agentId: 3 });
+  assert.equal(stretched.ok, false);
+  assert.match(stretched.reason, /time window/);
+});
+
+test('the replay guard forgets ids it can no longer accept', () => {
+  let clock = 1000;
+  const guard = createReplayGuard({ now: () => clock });
+  assert.equal(guard.accept('a', clock + 100), true);
+  assert.equal(guard.accept('a', clock + 100), false);
+  clock += 1000; // 'a' can no longer be valid on freshness alone
+  guard.accept('b', clock + 100);
+  assert.equal(guard.size, 1, 'the set stays the size of the live window, not of all history');
 });
 
 test('requireSignedCommands reads the env flag', () => {

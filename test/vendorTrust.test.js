@@ -340,7 +340,7 @@ test('MANDATORY: a compromised server cannot re-anchor an agent to a key of its 
   // the attacker has the server's private key, after all. Still refused: once
   // vendor-rooted, only the vendor decides.
   const signedRefusal = server.waitForWsMessage((m) => m.type === 'action-result' && m.action === 'rekey' && m.ok === false && m.auditId === 2);
-  const cmd = { name: 'rekey', auditId: 2, publicKey: ATTACKER.pem, agentId: 1, issuedAt: new Date().toISOString() };
+  const cmd = { name: 'rekey', auditId: 2, publicKey: ATTACKER.pem, agentId: 1, commandId: crypto.randomUUID(), issuedAt: new Date().toISOString() };
   cmd.commandSignature = crypto.sign(null, Buffer.from(canonicalize(signedPayload(cmd)), 'utf8'), SERVER.privateKey).toString('base64');
   server.sendCommandToAll({ ...cmd, id: 'x2' });
   const second = await withTimeout(signedRefusal, 4000, 'no refusal for the signed attempt');
@@ -413,7 +413,7 @@ test('an agent that has never been vendor-rooted still accepts the old signed ro
 
   const rotated = keyPair();
   const applied = server.waitForWsMessage((m) => m.type === 'action-result' && m.action === 'rekey' && m.ok === true);
-  const cmd = { name: 'rekey', auditId: 11, publicKey: rotated.pem, agentId: 1, issuedAt: new Date().toISOString() };
+  const cmd = { name: 'rekey', auditId: 11, publicKey: rotated.pem, agentId: 1, commandId: crypto.randomUUID(), issuedAt: new Date().toISOString() };
   cmd.commandSignature = crypto.sign(null, Buffer.from(canonicalize(signedPayload(cmd)), 'utf8'), SERVER.privateKey).toString('base64');
   server.sendCommandToAll({ ...cmd, id: 'l1' });
 

@@ -46,7 +46,7 @@ function keyPair() {
 // key — so most of these tests now build their commands through here.
 function signWith(command, privateKey) {
   const { canonicalize } = require('../src/release/canonicalize');
-  const full = { ...command, agentId: 1, issuedAt: new Date().toISOString() };
+  const full = { ...command, agentId: 1, commandId: crypto.randomUUID(), issuedAt: new Date().toISOString() };
   full.commandSignature = crypto.sign(null, Buffer.from(canonicalize(signedPayload(full))), privateKey).toString('base64');
   return full;
 }
@@ -101,7 +101,7 @@ test('a rekey command replaces the pinned key in memory and on disk', async (t) 
   // against the NEW key without waiting for a restart. Proof: a privileged
   // command signed with the OLD key is now refused.
   const { canonicalize } = require('../src/release/canonicalize');
-  const stale = { name: 'update', auditId: 60, agentId: 1, issuedAt: new Date().toISOString() };
+  const stale = { name: 'update', auditId: 60, agentId: 1, commandId: crypto.randomUUID(), issuedAt: new Date().toISOString() };
   stale.commandSignature = crypto.sign(null, Buffer.from(canonicalize(signedPayload(stale))), oldKey.privateKey).toString('base64');
   const refused = server.waitForWsMessage((m) => m.type === 'action-result' && m.action === 'upgrade' && m.ok === false);
   server.sendCommandToAll({ ...stale, id: 'u1' });
@@ -123,7 +123,7 @@ test('a rekey the server signs with the key being replaced is a proper rotation'
   runtime.start();
   await withTimeout(onceEvent(runtime, 'config'), 4000, 'no config');
 
-  const command = { name: 'rekey', auditId: 56, publicKey: newKey.pem, agentId: 1, issuedAt: new Date().toISOString() };
+  const command = { name: 'rekey', auditId: 56, publicKey: newKey.pem, agentId: 1, commandId: crypto.randomUUID(), issuedAt: new Date().toISOString() };
   const { canonicalize } = require('../src/release/canonicalize');
   command.commandSignature = crypto.sign(null, Buffer.from(canonicalize(signedPayload(command))), oldKey.privateKey).toString('base64');
   server.sendCommandToAll({ ...command, id: 'k2' });
