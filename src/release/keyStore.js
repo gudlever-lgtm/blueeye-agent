@@ -48,6 +48,11 @@ const COMMAND_FILE_NAME = 'command-key.pem';
 // Once one has arrived, nothing but a vendor authorisation is ever accepted
 // again, and no server can clear the latch: it is only ever set, never unset.
 const TRUST_STATE_FILE = 'release-trust.json';
+// The command ids this agent has already accepted, so a captured signed command
+// cannot be replayed in the seconds after a restart. Beside the key rather than
+// in the trust state: it changes on every privileged command, and the trust
+// state is a document that must not be rewritten on a hot path.
+const REPLAY_STATE_FILE = 'command-replay.json';
 
 function looksLikePem(value) {
   return typeof value === 'string' && value.includes('BEGIN PUBLIC KEY');
@@ -75,6 +80,12 @@ function keyPathFor(pinnedPath, purpose) {
 
 function stateDir(tokenPath) {
   return tokenPath ? path.dirname(String(tokenPath)) : path.join(__dirname, '..', '..', '.blueeye-agent');
+}
+
+// Derived from the release key's path, the same way the trust state is — a test
+// injecting a scratch directory gets its replay file there too.
+function replayStatePath(pinnedPath) {
+  return path.join(path.dirname(String(pinnedPath || '')), REPLAY_STATE_FILE);
 }
 
 function trustStatePath(pinnedPath) {
@@ -257,9 +268,9 @@ function fingerprintOf(pem) {
 }
 
 module.exports = {
-  FILE_NAME, COMMAND_FILE_NAME, TRUST_STATE_FILE,
+  FILE_NAME, COMMAND_FILE_NAME, TRUST_STATE_FILE, REPLAY_STATE_FILE,
   pinnedKeyPath, commandKeyPath, keyPathFor,
-  trustStatePath, readTrustState, writeTrustState, markCommandsSigned,
+  trustStatePath, replayStatePath, readTrustState, writeTrustState, markCommandsSigned,
   normalizePem, validatePublicKey, readPinnedKey,
   writePinnedKey, syncSystemdDropIn, fingerprintOf, looksLikePem, tmpdir: os.tmpdir,
 };

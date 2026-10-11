@@ -208,8 +208,13 @@ function createAgentRuntime({
   // because "which anchor applies" must not be answerable differently in two.
   const commandKey = () => pinnedCommandKey || pinnedKey;
   // One per runtime: the commandIds already carried out, so a captured signed
-  // command cannot be replayed at this agent inside its validity window.
-  const replayGuard = createReplayGuard();
+  // command cannot be replayed at this agent inside its validity window. Backed
+  // by a file beside the pinned key, so a restart does not forget them — the
+  // window right after a restart is where an in-memory set let a replay through.
+  const replayGuard = createReplayGuard({
+    file: keys.replayStatePath(pinnedKeyPath),
+    onWarn: (m) => logger.warn(m),
+  });
   const updater = selfUpdater || createSelfUpdater({ logger, runtime: capabilities.managed });
   // The deleter must wipe the token the runtime actually uses: tokenPath can be
   // set via the config FILE (not just env), and selfDelete's own default only

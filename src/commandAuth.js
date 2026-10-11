@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const { verifyManifest, purposeOk } = require('./release/verifyManifest');
 
 // Authenticity of a server -> agent COMMAND.
@@ -119,20 +121,67 @@ function allowUnsignedRekey(env = process.env) {
 // Ids are forgotten once they can no longer be valid, which keeps the set the
 // size of "privileged commands in the last few minutes" — single digits.
 //
-// ponytail: in-memory. A restart forgets the ids, so a replay that lands in the
-// seconds after a restart is still possible; persist to the state dir beside the
-// pinned key if that window ever matters.
-function createReplayGuard({ now = () => Date.now() } = {}) {
+// Backed by a file when one is given (the runtime gives it the state dir beside
+// the pinned key), so the ids survive a restart — a captured command whose
+// validity window outlives a restart is exactly the case an in-memory set
+// missed. Without a file the guard is memory-only, which is what the tests and
+// a read-only install get.
+//
+// A write that fails does NOT refuse the command: the signature verified and
+// the id is fresh, so refusing would turn a full disk into a fleet that cannot
+// be managed. The guard degrades to in-memory for that command and says so.
+function createReplayGuard({ now = () => Date.now(), file = null, fsImpl = fs, onWarn = null } = {}) {
   const seen = new Map(); // commandId -> ms after which it can no longer be valid
+  let loaded = false;
+
+  function prune(t) {
+    for (const [id, expiry] of seen) if (expiry <= t) seen.delete(id);
+  }
+
+  // Read once, lazily — an agent that never gets a privileged command never
+  // touches the disk. An unreadable or corrupt file reads as "nothing seen",
+  // the same safe direction the trust state takes: it can let a replay through
+  // in the window after a restart, which is where we already were, and it can
+  // never lock a legitimate command out.
+  function load(t) {
+    loaded = true;
+    if (!file) return;
+    try {
+      const raw = JSON.parse(fsImpl.readFileSync(file, 'utf8'));
+      const ids = raw && typeof raw === 'object' ? raw.ids : null;
+      if (!ids || typeof ids !== 'object') return;
+      for (const [id, expiry] of Object.entries(ids)) {
+        const ms = Number(expiry);
+        if (typeof id === 'string' && id && Number.isFinite(ms) && ms > t) seen.set(id, ms);
+      }
+    } catch { /* nothing seen */ }
+  }
+
+  function persist() {
+    if (!file) return;
+    const body = JSON.stringify({ ids: Object.fromEntries(seen) });
+    try {
+      fsImpl.mkdirSync(path.dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      fsImpl.writeFileSync(tmp, `${body}\n`, { mode: 0o600 });
+      fsImpl.renameSync(tmp, file);
+    } catch (e) {
+      // Said once per failure, not swallowed: an agent whose guard is only
+      // in-memory should be visible in its log.
+      if (onWarn) onWarn(`command replay guard could not be persisted (${e.message}); replay protection is in-memory until this is fixed`);
+    }
+  }
 
   // True the FIRST time an id is seen, false every time after. Recording and
   // checking are one step on purpose: two steps is how a check-then-use race
   // lets a replay through.
   function accept(commandId, notValidAfterMs) {
     const t = now();
-    for (const [id, expiry] of seen) if (expiry <= t) seen.delete(id);
+    if (!loaded) load(t);
+    prune(t);
     if (seen.has(commandId)) return false;
     seen.set(commandId, notValidAfterMs);
+    persist();
     return true;
   }
 

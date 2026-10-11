@@ -358,3 +358,64 @@ test('the host-side rekey break-glass survives strict mode', () => {
   );
   assert.equal(refused.ok, false);
 });
+
+// The replay guard survives a restart. Without the file, the seconds after a
+// restart were a window where a captured command still inside its validity
+// period would be carried out a second time.
+test('a replayed command is still refused by a guard that has just restarted', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'replay-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'state', 'command-replay.json');
+  let clock = 1000;
+
+  const before = createReplayGuard({ now: () => clock, file });
+  assert.equal(before.accept('cmd-1', clock + 5000), true);
+  assert.equal(before.accept('cmd-1', clock + 5000), false, 'same process still refuses it');
+
+  // A new guard is a restarted agent: nothing in memory, everything on disk.
+  const after = createReplayGuard({ now: () => clock, file });
+  assert.equal(after.accept('cmd-1', clock + 5000), false, 'the id must survive the restart');
+  assert.equal(after.accept('cmd-2', clock + 5000), true, 'a fresh id is still accepted');
+
+  // And the file does not grow forever: ids past their validity are dropped.
+  clock += 100000;
+  const later = createReplayGuard({ now: () => clock, file });
+  later.accept('cmd-3', clock + 5000);
+  assert.equal(later.size, 1);
+  assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(file, 'utf8')).ids), ['cmd-3']);
+});
+
+test('a corrupt or missing replay file reads as "nothing seen", never as a lockout', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'replay-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'command-replay.json');
+
+  // Missing.
+  assert.equal(createReplayGuard({ file }).accept('a', Date.now() + 5000), true);
+  // Corrupt.
+  fs.writeFileSync(file, '{not json');
+  assert.equal(createReplayGuard({ file }).accept('b', Date.now() + 5000), true);
+  // Right shape, wrong types — ignored entry by entry.
+  fs.writeFileSync(file, JSON.stringify({ ids: { c: 'soon', d: null } }));
+  assert.equal(createReplayGuard({ file }).accept('c', Date.now() + 5000), true);
+});
+
+test('a guard that cannot write still accepts the command, and says so once', () => {
+  const warnings = [];
+  const guard = createReplayGuard({
+    file: '/proc/definitely-not-writable/command-replay.json',
+    fsImpl: {
+      readFileSync: () => { throw new Error('ENOENT'); },
+      mkdirSync: () => { throw new Error('EROFS: read-only file system'); },
+      writeFileSync: () => {},
+      renameSync: () => {},
+    },
+    onWarn: (m) => warnings.push(m),
+  });
+  // A full disk must not turn into a fleet that cannot be managed.
+  assert.equal(guard.accept('a', Date.now() + 5000), true);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /in-memory/);
+  // ...and it still protects within this process.
+  assert.equal(guard.accept('a', Date.now() + 5000), false);
+});
