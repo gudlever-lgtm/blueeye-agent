@@ -19,4 +19,35 @@ function verifyManifest(manifest, signatureBase64, publicKey) {
   }
 }
 
-module.exports = { verifyManifest };
+// WHAT A SIGNATURE IS FOR.
+//
+// One key signs four different things on this chain: a release manifest, a
+// privileged command, an evidence request and (on the server side) a NIS2
+// export. Nothing in a bare Ed25519 signature says which, so a signature made
+// for one purpose is cryptographically indistinguishable from one made for
+// another — and the only reason that has not been exploitable is that the four
+// payload SHAPES happen to differ. "Happens to differ" is not a security
+// property; it is one refactor away from not being true.
+//
+// So the purpose rides INSIDE the signed payload, and every verifier states
+// which one it is checking. A captured command signature can then never satisfy
+// a release check, whatever shape the attacker gives the bytes.
+//
+// `required` is the compatibility seam, and it differs per shape on purpose:
+//   * commands — required. This agent already refuses a signed command with no
+//     commandId (0.48.0), so a server new enough to sign is new enough to stamp
+//     both.
+//   * release manifests — NOT required. Releases already published and cached
+//     on servers were signed without it, and refusing them would mean a fleet
+//     that cannot update to anything that already exists. A WRONG purpose is
+//     still refused, which is the part that matters.
+//   * evidence — not required, same reason, and the payload is rebuilt here
+//     from the command's own fields, so it carries the purpose exactly when the
+//     server sent one.
+function purposeOk(payload, expected, { required = false } = {}) {
+  const claimed = payload && payload.purpose;
+  if (claimed == null) return !required;
+  return claimed === expected;
+}
+
+module.exports = { verifyManifest, purposeOk };

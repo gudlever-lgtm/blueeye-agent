@@ -7,7 +7,7 @@ const { isRunTestCommand, isRunProbeCommand, isPingCommand, isUpdateCommand, isS
 const { createScanner, DiscoveryScopeError } = require('./discovery/scanner');
 const { collectLocalCidrs } = require('./localIps');
 const { createEvidenceCollector } = require('./evidenceCollector');
-const { verifyManifest } = require('./release/verifyManifest');
+const { verifyManifest, purposeOk } = require('./release/verifyManifest');
 const fs = require('fs');
 const { createSelfUpdater } = require('./selfUpdate');
 const { verifyCommand, requireSignedCommands, createReplayGuard, allowUnsignedRekey: allowUnsignedRekeyEnv } = require('./commandAuth');
@@ -1810,9 +1810,21 @@ function createAgentRuntime({
         name: command.name, snapshotId: command.snapshotId, clusterId: command.clusterId,
         commandSetVersion: command.commandSetVersion, items: command.items,
       };
+      // The purpose is rebuilt only when the server sent one, so a snapshot
+      // from an older server still verifies over the bytes it actually signed.
+      if (command.purpose != null) payload.purpose = command.purpose;
       if (!verifyManifest(payload, command.signature, pinnedKey)) {
         actions.log('evidence.refused', { reason: 'bad-signature', snapshotId: command.snapshotId });
         client.send({ type: 'command-result', id: command.id, ok: false, error: 'evidence command signature verification failed' });
+        return;
+      }
+      // …and a signature made for anything OTHER than evidence is refused, even
+      // though it verifies: this path reads files off the host, and the one
+      // thing standing between it and a captured release signature is the
+      // payload shape.
+      if (!purposeOk(payload, 'evidence')) {
+        actions.log('evidence.refused', { reason: 'wrong-purpose', snapshotId: command.snapshotId });
+        client.send({ type: 'command-result', id: command.id, ok: false, error: `this signature is not for an evidence request (purpose: ${payload.purpose})` });
         return;
       }
     }

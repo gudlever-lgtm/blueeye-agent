@@ -17,6 +17,7 @@ function makeSigner() {
   const sign = (agentId, command, issuedAt = new Date().toISOString(), overrides = {}) => {
     const payload = {
       ...command,
+      purpose: 'command',
       agentId,
       commandId: `cmd-${(nonce += 1)}`,
       issuedAt,
@@ -102,7 +103,7 @@ test('a signed command naming no agent is refused', () => {
   const { publicPem } = makeSigner();
   const { privateKey } = crypto.generateKeyPairSync('ed25519');
   // Signed, well-formed, but with nothing binding it to one agent.
-  const payload = { name: 'delete', commandId: 'cmd-no-agent', issuedAt: new Date().toISOString() };
+  const payload = { name: 'delete', purpose: 'command', commandId: 'cmd-no-agent', issuedAt: new Date().toISOString() };
   const command = { ...payload, commandSignature: crypto.sign(null, Buffer.from(canonicalize(payload)), privateKey).toString('base64') };
   const v = verifyCommand(command, { publicKey: publicPem, agentId: 3 });
   assert.equal(v.ok, false);
@@ -162,6 +163,43 @@ test('the replay guard forgets ids it can no longer accept', () => {
   clock += 1000; // 'a' can no longer be valid on freshness alone
   guard.accept('b', clock + 100);
   assert.equal(guard.size, 1, 'the set stays the size of the live window, not of all history');
+});
+
+test('a signature made for something else is refused, even though it verifies', () => {
+  // One key signs releases, commands, evidence requests and NIS2 exports. The
+  // only thing that kept a captured release signature from being offered as an
+  // instruction to this host was that the payload shapes happen to differ —
+  // which is not a security property. The purpose is inside the signed bytes.
+  const { publicPem, sign } = makeSigner();
+
+  const asRelease = sign(3, { name: 'delete' }, new Date().toISOString(), { purpose: 'release' });
+  const v = verifyCommand(asRelease, { publicKey: publicPem, agentId: 3, replayGuard: createReplayGuard() });
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /not for a command/);
+  assert.match(v.reason, /release/, 'the refusal must name what the signature WAS for');
+
+  // And a signed command with no purpose at all: required here, because this
+  // agent already refuses one with no commandId — a server new enough to sign
+  // is new enough to stamp both.
+  const bare = sign(3, { name: 'delete' }, new Date().toISOString(), { purpose: undefined });
+  const w = verifyCommand(bare, { publicKey: publicPem, agentId: 3 });
+  assert.equal(w.ok, false);
+  assert.match(w.reason, /not for a command/);
+  assert.match(w.reason, /none/);
+});
+
+test('purposeOk is one-way on the compatibility seam', () => {
+  const { purposeOk } = require('../src/release/verifyManifest');
+  // A release manifest signed before the field existed stays installable: a
+  // fleet that cannot update to anything already published is not a safer
+  // fleet.
+  assert.equal(purposeOk({ version: '1.0.0' }, 'release'), true);
+  // A WRONG purpose is refused whether it is required or not.
+  assert.equal(purposeOk({ purpose: 'command' }, 'release'), false);
+  assert.equal(purposeOk({ purpose: 'release' }, 'release'), true);
+  // Required: absent is a refusal.
+  assert.equal(purposeOk({}, 'command', { required: true }), false);
+  assert.equal(purposeOk({ purpose: 'command' }, 'command', { required: true }), true);
 });
 
 test('requireSignedCommands reads the env flag', () => {

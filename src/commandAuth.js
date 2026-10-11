@@ -1,6 +1,6 @@
 'use strict';
 
-const { verifyManifest } = require('./release/verifyManifest');
+const { verifyManifest, purposeOk } = require('./release/verifyManifest');
 
 // Authenticity of a server -> agent COMMAND.
 //
@@ -179,8 +179,19 @@ function verifyCommand(command, {
   // A signature we cannot check is worse than none: fail closed rather than
   // accept it because it "looks signed".
   if (!publicKey) return { ok: false, reason: 'refused: command is signed but no release public key is configured' };
-  if (!verifyManifest(signedPayload(command), signature, publicKey)) {
+  const payload = signedPayload(command);
+  if (!verifyManifest(payload, signature, publicKey)) {
     return { ok: false, reason: 'refused: command signature verification failed' };
+  }
+  // What the signature is FOR. Required here: this agent already refuses a
+  // signed command with no commandId, so a server new enough to sign is new
+  // enough to stamp both — and a signature the server made over a release
+  // manifest must not be presentable as an instruction to this host.
+  if (!purposeOk(payload, 'command', { required: true })) {
+    return {
+      ok: false,
+      reason: `refused: this signature is not for a command (purpose: ${payload.purpose == null ? 'none' : String(payload.purpose)})`,
+    };
   }
   // A valid signature over a payload naming neither an agent nor a time is
   // replayable at every other agent, for ever. Require both.

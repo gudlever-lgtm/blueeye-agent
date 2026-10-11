@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync, spawn } = require('child_process');
-const { verifyManifest } = require('./release/verifyManifest');
+const { verifyManifest, purposeOk } = require('./release/verifyManifest');
 const releaseGuard = require('./release/releaseGuard');
 
 // Self-update for agents under a service manager that can restart them:
@@ -149,6 +149,14 @@ function createSelfUpdater({
       }
       if (!verifyManifest(manifest, sig, publicKey)) {
         throw fail('SIGNATURE_INVALID', 'release signature did not verify — refusing to install');
+      }
+      // What the signature is FOR. A manifest with no purpose is one signed
+      // before the field existed and is still installable — refusing those
+      // would mean a fleet that cannot update to anything already published.
+      // A manifest claiming a DIFFERENT purpose is refused: that is a signature
+      // the server made over something else, offered here as code to run.
+      if (!purposeOk(manifest, 'release')) {
+        throw fail('SIGNATURE_INVALID', `this signature is not for a release (purpose: ${manifest.purpose}) — refusing to install`);
       }
       if (manifest.sha256 !== sha) {
         throw fail('CHECKSUM_MISMATCH', `checksum mismatch (manifest ${manifest.sha256}, got ${sha}) — refusing to install${why(String(manifest.sha256).toLowerCase())}`);
