@@ -656,6 +656,28 @@ can, and the agent verifies (`src/commandAuth.js`).
 | `commandId` | a per-command nonce (UUID). The agent remembers the ids it has carried out for as long as they could still be valid and refuses the second delivery, so a captured command cannot be replayed at the SAME agent inside its window. **Required on any signed command** — one without it is refused, because a replay of it could not be detected. |
 | `expiresAt` | ISO timestamp, stated by the server rather than left to the agent's skew window. Checked in addition to the ±5 min window, never instead of it, so a long `expiresAt` cannot stretch the window. |
 
+### Which key a command is checked against
+
+Two anchors, and the normal state is one.
+
+| the agent has pinned | commands are checked against | how it got there |
+| --- | --- | --- |
+| a release key only | the release key | every agent in the field; the installer bakes it in |
+| a release key **and** a command key | the **command key** | a `rekey` carrying `keyPurpose: "command"` and a vendor proof whose `trust.server.command_key` authorises it |
+
+The second file (`command-key.pem`, beside the token) is written only by such a
+rekey. There is deliberately **no environment variable** for it: the installer
+can bake in a release key for trust-on-first-use, and an env var for the command
+key would be a way to introduce one without a vendor authorisation.
+
+`keyPurpose` is the field, **not** `purpose`: `purpose` already says what the
+SIGNATURE is for (always `"command"` on a rekey, since a rekey is a command).
+
+A proof that authorises no `command_key` authorises nothing for that purpose —
+it does not fall back to the release key, because that would let a release-key
+authorisation stand in for a command-key one. The fallback is one level up: an
+agent that has pinned no command key checks commands against the release key.
+
 Policy:
 
 | situation | outcome |

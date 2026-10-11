@@ -37,6 +37,9 @@ const ATTACKER = keyPair();
 // A proof exactly as blueeye-licens signs one.
 function proofFor({
   key = SERVER.pem,
+  // The SECOND authorised key, when the vendor has split them. Absent by
+  // default, which is what every licence and every agent in the field has.
+  commandKey = null,
   sequence = 1,
   licenseId = '7',
   customerId = '42',
@@ -60,7 +63,13 @@ function proofFor({
     valid_until: new Date(issuedAt + validForMs).toISOString(),
     trust: {
       license: { id: licenseId, customer_id: customerId },
-      server: { id: serverId, release_key: { algorithm: 'Ed25519', fingerprint: publicKeyFingerprint(key) } },
+      server: {
+        id: serverId,
+        release_key: { algorithm: 'Ed25519', fingerprint: publicKeyFingerprint(key) },
+        ...(commandKey
+          ? { command_key: { algorithm: 'Ed25519', fingerprint: publicKeyFingerprint(commandKey) } }
+          : {}),
+      },
       sequence,
     },
   };
@@ -421,4 +430,79 @@ test('an agent that has never been vendor-rooted still accepts the old signed ro
   assert.equal(fs.readFileSync(pinnedKeyPath, 'utf8').trim(), rotated.pem.trim());
   // Still not latched: no vendor proof has been seen.
   assert.equal(keyStore.readTrustState(pinnedKeyPath).vendorRooted, false);
+});
+
+// ---- the SECOND key: commands, separate from releases ----------------------
+//
+// One key signing both the code this agent installs and the instructions it
+// obeys means a compromise of that key yields both. The vendor authorises a
+// second one in the same proof — and the agent's authority still comes from
+// that proof, never from the server presenting the key.
+
+const COMMAND = keyPair();
+
+test('a proof that authorises a command key authorises it for commands only', () => {
+  const proof = proofFor({ key: SERVER.pem, commandKey: COMMAND.pem });
+
+  // Each purpose reads its own field.
+  const asCommand = verify({ proof, offeredKey: COMMAND.pem, purpose: 'command' });
+  assert.equal(asCommand.ok, true, asCommand.detail);
+  assert.equal(asCommand.purpose, 'command');
+  assert.equal(asCommand.fingerprint, publicKeyFingerprint(COMMAND.pem));
+
+  const asRelease = verify({ proof, offeredKey: SERVER.pem, purpose: 'release' });
+  assert.equal(asRelease.ok, true, asRelease.detail);
+  assert.equal(asRelease.purpose, 'release');
+});
+
+test('the release key cannot stand in for the command key, or the split is theatre', () => {
+  const proof = proofFor({ key: SERVER.pem, commandKey: COMMAND.pem });
+  // The server offers the RELEASE key for the command slot. It is a key the
+  // vendor authorised — just not for this.
+  const v = verify({ proof, offeredKey: SERVER.pem, purpose: 'command' });
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'SERVER_KEY_MISMATCH');
+
+  // And the reverse: the command key is not authorised to sign code.
+  const w = verify({ proof, offeredKey: COMMAND.pem, purpose: 'release' });
+  assert.equal(w.ok, false);
+  assert.equal(w.code, 'SERVER_KEY_MISMATCH');
+});
+
+test('a proof with no command key authorises NOTHING for that purpose', () => {
+  // There is deliberately no falling back to the release key here: that would
+  // let a release-key authorisation stand in for a command-key one, which is
+  // the whole thing the split exists to prevent. The fallback lives one level
+  // up — an agent that has pinned no command key CHECKS commands against the
+  // release key, which is what the whole field does today.
+  const proof = proofFor({ key: SERVER.pem });
+  const v = verify({ proof, offeredKey: SERVER.pem, purpose: 'command' });
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'LICENSE_PROOF_INVALID');
+  assert.match(v.detail, /not authorised a separate command key/);
+});
+
+test('every other check still applies to a command-key authorisation', () => {
+  const attacker = keyPair();
+  // Signed by somebody who is not the vendor.
+  const forged = proofFor({ key: SERVER.pem, commandKey: attacker.pem, signer: attacker.privateKey });
+  assert.equal(verify({ proof: forged, offeredKey: attacker.pem, purpose: 'command' }).code, 'LICENSE_PROOF_INVALID');
+
+  // Another customer's proof.
+  const foreign = proofFor({ key: SERVER.pem, commandKey: COMMAND.pem, licenseId: '9', customerId: '99' });
+  assert.equal(
+    verify({ proof: foreign, offeredKey: COMMAND.pem, purpose: 'command', expected: { licenseId: '7', customerId: '42' } }).code,
+    'LICENSE_CUSTOMER_MISMATCH'
+  );
+
+  // An older proof cannot re-authorise a retired command key.
+  const old = proofFor({ key: SERVER.pem, commandKey: COMMAND.pem, sequence: 2 });
+  assert.equal(
+    verify({ proof: old, offeredKey: COMMAND.pem, purpose: 'command', expected: { sequence: 5 } }).code,
+    'LICENSE_PROOF_ROLLBACK'
+  );
+
+  // And an expired one.
+  const stale = proofFor({ key: SERVER.pem, commandKey: COMMAND.pem, issuedAt: Date.now() - 72 * 60 * 60 * 1000 });
+  assert.equal(verify({ proof: stale, offeredKey: COMMAND.pem, purpose: 'command' }).code, 'LICENSE_PROOF_EXPIRED');
 });

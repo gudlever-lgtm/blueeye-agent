@@ -191,6 +191,22 @@ function createAgentRuntime({
   // replaces it while the agent runs: the update that follows it must verify
   // against the new key without waiting for a restart.
   let pinnedKey = releasePublicKey;
+  // The SECOND anchor, and the normal state is not to have one.
+  //
+  // When the vendor has authorised a separate command key for this licence, a
+  // rekey with `purpose: 'command'` pins it here and privileged commands are
+  // checked against it instead of the release key. Until then this is empty and
+  // commands are checked against the release key — which is what every agent in
+  // the field does, and is why the split can be rolled out without a flag day.
+  //
+  // Read from the file only. There is no environment override on purpose: the
+  // installer bakes in a release key for trust-on-first-use, but a command key
+  // only ever arrives with a vendor authorisation, and an env var would be a way
+  // to introduce one without it.
+  let pinnedCommandKey = keys.readPinnedKey(keys.commandKeyPath(pinnedKeyPath)) || '';
+  // Which key a privileged command's signature must verify against. One place,
+  // because "which anchor applies" must not be answerable differently in two.
+  const commandKey = () => pinnedCommandKey || pinnedKey;
   // One per runtime: the commandIds already carried out, so a captured signed
   // command cannot be replayed at this agent inside its validity window.
   const replayGuard = createReplayGuard();
@@ -1428,7 +1444,9 @@ function createAgentRuntime({
     // `rekey` does not follow the lenient default — it replaces the trust
     // anchor every later signature is checked against. See src/commandAuth.js.
     const verdict = verifyCommand(command, {
-      publicKey: pinnedKey,
+      // The command anchor, which is the release key until a vendor-authorised
+      // command key has been pinned here.
+      publicKey: commandKey(),
       agentId,
       strict: strictCommands,
       isRekey: names.log === 'rekey',
@@ -1551,12 +1569,28 @@ function createAgentRuntime({
       sequence: verdict.sequence,
       licenseId: verdict.licenseId,
       customerId: verdict.customerId,
-      fingerprint: verdict.fingerprint,
+      // The fingerprint is recorded under the purpose it was authorised for,
+      // so a command-key rotation never overwrites what this agent believes
+      // about its release anchor.
+      ...(verdict.purpose === 'command'
+        ? { commandFingerprint: verdict.fingerprint }
+        : { fingerprint: verdict.fingerprint }),
     });
   }
 
   async function handleRekey(command) {
     const auditId = command && command.auditId;
+    // WHICH anchor this rekey replaces. `release` is the default, because that
+    // is what every rekey meant before there were two and what an older server
+    // still sends.
+    //
+    // The field is `keyPurpose`, NOT `purpose`: `purpose` is already taken on a
+    // signed command and says what the SIGNATURE is for (always 'command' on a
+    // rekey, since a rekey IS a command). Reusing it here read as "this is a
+    // command-key rekey" on every signed rekey ever sent, which would have
+    // written the release key into the command slot and left the release anchor
+    // untouched — the kind of bug two meanings for one field is for.
+    const purpose = command && command.keyPurpose === 'command' ? 'command' : 'release';
 
     // What this host has already accepted from the vendor. `vendorRooted` is a
     // one-way latch: once a vendor-authorised key has been accepted here,
@@ -1572,6 +1606,7 @@ function createAgentRuntime({
       const verdict = verifyTrustProof({
         proof: command.vendorProof,
         offeredKey: command.publicKey,
+        purpose,
         expected: {
           licenseId: trustState.licenseId,
           customerId: trustState.customerId,
@@ -1626,40 +1661,54 @@ function createAgentRuntime({
       return;
     }
     client.send({ type: 'ack', id: command && command.id, accepted: true, runtime: capabilities.managed || 'unmanaged' });
-    if (pinnedKey && pinnedKey.trim() === parsed.pem.trim()) {
+    // Which anchor is being compared and replaced. The release key is also the
+    // environment-baked one the systemd drop-in carries; the command key is
+    // file-only, so there is no unit to keep in step for it.
+    const current = purpose === 'command' ? pinnedCommandKey : pinnedKey;
+    const targetPath = keys.keyPathFor(pinnedKeyPath, purpose);
+    if (current && current.trim() === parsed.pem.trim()) {
       // Already the key we trust. Still record the authorisation: a re-sent
       // proof with a HIGHER sequence is how the anti-rollback floor rises
       // without the key itself changing.
       if (vendor) recordVendorTrust(vendor);
-      actions.log('rekey.unchanged', { fingerprint: parsed.fingerprint });
+      actions.log('rekey.unchanged', { purpose, fingerprint: parsed.fingerprint });
       if (auditId != null) client.send({ type: 'action-result', auditId, action: 'rekey', ok: true, detail: `unchanged (${parsed.fingerprint.slice(0, 12)}…)` });
-      emitter.emit('rekeyed', { fingerprint: parsed.fingerprint, changed: false });
+      emitter.emit('rekeyed', { purpose, fingerprint: parsed.fingerprint, changed: false });
       return;
     }
     try {
-      keys.writePinnedKey(pinnedKeyPath, parsed.pem);
-      pinnedKey = parsed.pem;
-      // Best-effort: keep the unit's environment in step, so the key a person
-      // reads in the unit is the key the agent uses. A failure here is not a
-      // failed rekey — the stored file is what the agent reads at startup.
-      const unit = keys.syncSystemdDropIn(parsed.pem);
+      keys.writePinnedKey(targetPath, parsed.pem);
+      let unit = { ok: true, path: null };
+      if (purpose === 'command') {
+        pinnedCommandKey = parsed.pem;
+      } else {
+        pinnedKey = parsed.pem;
+        // Best-effort: keep the unit's environment in step, so the key a person
+        // reads in the unit is the key the agent uses. A failure here is not a
+        // failed rekey — the stored file is what the agent reads at startup.
+        // Only the release key: the unit has no variable for the command key,
+        // deliberately, because an env var is a way to introduce one without a
+        // vendor authorisation.
+        unit = keys.syncSystemdDropIn(parsed.pem);
+      }
       // Written AFTER the key, so a crash between the two leaves the agent
       // asking for more proof next time, never less.
       if (vendor) recordVendorTrust(vendor);
       actions.log('rekey.applied', {
+        purpose,
         fingerprint: parsed.fingerprint,
         vendor: vendor ? { sequence: vendor.sequence, license: vendor.licenseId } : null,
         unit: unit.ok ? unit.path : null,
         unitReason: unit.ok ? null : unit.reason,
       });
-      logger.warn(`AGENT_TRUST_ACCEPTED: release anchor replaced (sha256 ${parsed.fingerprint.slice(0, 12)}…)`
+      logger.warn(`AGENT_TRUST_ACCEPTED: ${purpose} anchor replaced (sha256 ${parsed.fingerprint.slice(0, 12)}…)`
         + `${vendor ? `, vendor-authorised seq ${vendor.sequence}` : ' (no vendor authorisation — legacy path)'}`
         + `${unit.ok ? '' : ` — systemd drop-in not updated: ${unit.reason}`}`);
       if (auditId != null) {
         client.send({ type: 'action-result', auditId, action: 'rekey', ok: true, detail: `pinned ${parsed.fingerprint.slice(0, 12)}…` });
       }
-      client.send({ type: 'command-result', id: command && command.id, ok: true, fingerprint: parsed.fingerprint });
-      emitter.emit('rekeyed', { fingerprint: parsed.fingerprint, changed: true });
+      client.send({ type: 'command-result', id: command && command.id, ok: true, purpose, fingerprint: parsed.fingerprint });
+      emitter.emit('rekeyed', { purpose, fingerprint: parsed.fingerprint, changed: true });
     } catch (err) {
       actions.log('rekey.failed', { error: err.message });
       logger.error(`Rekey failed: ${err.message}`);

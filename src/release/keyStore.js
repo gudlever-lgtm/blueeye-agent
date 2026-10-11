@@ -27,6 +27,19 @@ const { spawnSync } = require('child_process');
 // it is only ever written by a rekey this agent accepted.
 
 const FILE_NAME = 'release-key.pem';
+// The SECOND anchor: the key that signs privileged COMMANDS, when the vendor
+// has authorised one separately from the release key.
+//
+// A separate FILE rather than a field in the trust state, for the same reason
+// the release key is a file: it is the thing the agent reads at startup before
+// it trusts anything, and a key that lives inside a document it has to parse
+// first is a key that can be lost by a parse error.
+//
+// Its ABSENCE is meaningful and is the normal state: no command key pinned
+// means commands are checked against the release key, which is what every
+// agent in the field does. It is never written except by a rekey carrying a
+// vendor authorisation for `purpose: 'command'`.
+const COMMAND_FILE_NAME = 'command-key.pem';
 // What this host has accepted from the vendor, beside the key itself:
 //   { sequence, licenseId, customerId, fingerprint, vendorRooted, acceptedAt }
 // `vendorRooted` is a ONE-WAY latch. Until the first vendor-authorised key
@@ -46,6 +59,20 @@ function pinnedKeyPath(tokenPath) {
   return path.join(stateDir(tokenPath), FILE_NAME);
 }
 
+// The command-key path, derived from the RELEASE key's path — the same way
+// trustStatePath is, and for the same reason: the release path is the one the
+// runtime is given (a test injects a scratch directory), so deriving from the
+// token path instead would write the second key somewhere the first one is not.
+function commandKeyPath(pinnedPath) {
+  return path.join(path.dirname(String(pinnedPath || '')), COMMAND_FILE_NAME);
+}
+
+// The pinned file for one purpose, given the release key's path. `release` is
+// the anchor every agent has; `command` is the optional second one.
+function keyPathFor(pinnedPath, purpose) {
+  return purpose === 'command' ? commandKeyPath(pinnedPath) : String(pinnedPath || '');
+}
+
 function stateDir(tokenPath) {
   return tokenPath ? path.dirname(String(tokenPath)) : path.join(__dirname, '..', '..', '.blueeye-agent');
 }
@@ -60,6 +87,7 @@ function trustStatePath(pinnedPath) {
 function readTrustState(pinnedPath, { fsImpl = fs } = {}) {
   const empty = {
     sequence: null, licenseId: null, customerId: null, fingerprint: null,
+    commandFingerprint: null,
     vendorRooted: false, commandsSigned: false, acceptedAt: null,
   };
   if (!pinnedPath) return empty;
@@ -72,6 +100,10 @@ function readTrustState(pinnedPath, { fsImpl = fs } = {}) {
       licenseId: raw.licenseId != null ? String(raw.licenseId) : null,
       customerId: raw.customerId != null ? String(raw.customerId) : null,
       fingerprint: isFingerprintLike(raw.fingerprint) ? raw.fingerprint : null,
+      // The command key's fingerprint, when the vendor has authorised one for
+      // that purpose. Null is the normal state and means "commands are checked
+      // against the release key".
+      commandFingerprint: isFingerprintLike(raw.commandFingerprint) ? raw.commandFingerprint : null,
       // Latched by the data, not by a flag a rewrite could drop: having ever
       // accepted a sequence IS having been vendor-rooted.
       vendorRooted: raw.vendorRooted === true || sequence !== null,
@@ -103,6 +135,8 @@ function writeTrustState(pinnedPath, next, { fsImpl = fs } = {}) {
     licenseId: next.licenseId != null ? String(next.licenseId) : current.licenseId,
     customerId: next.customerId != null ? String(next.customerId) : current.customerId,
     fingerprint: isFingerprintLike(next.fingerprint) ? next.fingerprint : current.fingerprint,
+    commandFingerprint: isFingerprintLike(next.commandFingerprint)
+      ? next.commandFingerprint : current.commandFingerprint,
     // Both latches only ever move one way. `vendorRooted` is true here because
     // this function is only called on an accepted vendor authorisation; the
     // command ratchet keeps whatever it already had unless this call sets it.
@@ -223,7 +257,9 @@ function fingerprintOf(pem) {
 }
 
 module.exports = {
-  FILE_NAME, TRUST_STATE_FILE, pinnedKeyPath, trustStatePath, readTrustState, writeTrustState, markCommandsSigned,
+  FILE_NAME, COMMAND_FILE_NAME, TRUST_STATE_FILE,
+  pinnedKeyPath, commandKeyPath, keyPathFor,
+  trustStatePath, readTrustState, writeTrustState, markCommandsSigned,
   normalizePem, validatePublicKey, readPinnedKey,
   writePinnedKey, syncSystemdDropIn, fingerprintOf, looksLikePem, tmpdir: os.tmpdir,
 };

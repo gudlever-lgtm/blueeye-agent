@@ -291,3 +291,115 @@ test('a fresh agent with NO pinned key still accepts an unsigned rekey (nothing 
   assert.equal(msg.ok, true, msg.detail);
   assert.equal(keyStore.readPinnedKey(sc.pinnedKeyPath).trim(), first.pem.trim());
 });
+
+// ---- the second anchor: a key for COMMANDS only ---------------------------
+//
+// One key signing both the code this agent installs and the instructions it
+// obeys means a compromise of that key yields both. When the vendor authorises
+// a separate command key, a rekey with keyPurpose: 'command' pins it and
+// privileged commands are checked against THAT key from then on.
+//
+// The whole thing is backward compatible by absence: no command key pinned
+// means commands are checked against the release key, which is what every
+// agent in the field does.
+
+const { verifyTrustProof } = require('../src/license/trustProof');
+
+test('keyPurpose: command pins a SECOND key and leaves the release anchor alone', async (t) => {
+  const sc = scratch(t);
+  const release = keyPair();
+  const command = keyPair();
+  const { server, runtime } = await runtimeWith(t, { pinnedKey: release.pem, pinnedKeyPath: sc.pinnedKeyPath });
+
+  const reported = server.waitForWsMessage((m) => m.type === 'action-result' && m.action === 'rekey');
+  runtime.start();
+  await withTimeout(onceEvent(runtime, 'config'), 4000, 'no config');
+  // Signed with the release key, which is the key in force for commands until
+  // a command key exists — this IS the migration step.
+  server.sendCommandToAll(signWith(
+    { name: 'rekey', id: 'c1', auditId: 70, keyPurpose: 'command', publicKey: command.pem },
+    release.privateKey
+  ));
+
+  const msg = await withTimeout(reported, 4000, 'no rekey action-result');
+  assert.equal(msg.ok, true, msg.detail);
+
+  // Two files, two anchors. The command key is written…
+  assert.equal(keyStore.readPinnedKey(keyStore.commandKeyPath(sc.pinnedKeyPath)).trim(), command.pem.trim());
+  // …and the release anchor is not touched at all. This runtime was handed its
+  // release key the way an installer does (the environment), so "untouched"
+  // means no pinned release file was written — a command-key rotation that
+  // wrote one would be overwriting the release anchor with the command key.
+  assert.equal(keyStore.readPinnedKey(sc.pinnedKeyPath), '',
+    'a command-key rotation wrote to the release anchor');
+  // The trust state records them apart, so a restart knows which is which.
+  const state = keyStore.readTrustState(sc.pinnedKeyPath);
+  const { publicKeyFingerprint } = require('../src/release/fingerprint');
+  assert.equal(state.commandFingerprint, null, 'no vendor proof was sent, so nothing is latched');
+  assert.equal(publicKeyFingerprint(command.pem).length, 64);
+});
+
+test('once a command key is pinned, the release key no longer authorises commands', async (t) => {
+  const sc = scratch(t);
+  const release = keyPair();
+  const command = keyPair();
+  // Pin both up front: this is the state after the rotation above, as a restart
+  // would find it.
+  keyStore.writePinnedKey(keyStore.commandKeyPath(sc.pinnedKeyPath), command.pem);
+  const { server, runtime } = await runtimeWith(t, {
+    pinnedKey: release.pem, pinnedKeyPath: sc.pinnedKeyPath, extra: { strictCommands: true },
+  });
+
+  runtime.start();
+  await withTimeout(onceEvent(runtime, 'config'), 4000, 'no config');
+
+  // The release key is still the release anchor, and it is now the WRONG key
+  // for an instruction. That is the separation: compromising the release key no
+  // longer lets the holder tell this host what to do.
+  const refused = server.waitForWsMessage((m) => m.type === 'action-result' && m.action === 'upgrade' && m.ok === false);
+  server.sendCommandToAll(signWith({ name: 'update', id: 'u9', auditId: 71, version: '9.9.9' }, release.privateKey));
+  const no = await withTimeout(refused, 4000, 'a release-key signature still commanded this host');
+  assert.match(no.detail, /signature verification failed/);
+
+  // …and the command key is accepted.
+  const accepted = server.waitForWsMessage((m) => m.type === 'ack' && m.id === 'd9');
+  server.sendCommandToAll(signWith({ name: 'delete', id: 'd9', auditId: 72 }, command.privateKey));
+  const yes = await withTimeout(accepted, 4000, 'the command key was not accepted');
+  assert.equal(yes.accepted, true, yes.reason);
+});
+
+test('a vendor-authorised command rekey is verified against the command_key field', async (t) => {
+  // Proof that the runtime passes the purpose down: a proof authorising the
+  // command key for `release` would be a SERVER_KEY_MISMATCH, and vice versa.
+  // trustProof is pure, so this is asserted directly rather than through a
+  // socket — the runtime's job is only to pass `purpose` through, and the test
+  // above covers that it pins what it accepted.
+  const vendor = keyPair();
+  const release = keyPair();
+  const command = keyPair();
+  const { publicKeyFingerprint } = require('../src/release/fingerprint');
+  const { canonicalize } = require('../src/release/canonicalize');
+  const payload = {
+    valid: true, expiry: null, limits: { max_agents: 10 }, plan: 'professional', features: null,
+    serverId: 's', issued_at: '2026-01-01T00:00:00.000Z', nonce: 'n', releases: null,
+    proof_issued_at: new Date().toISOString(),
+    valid_until: new Date(Date.now() + 36 * 3600 * 1000).toISOString(),
+    trust: {
+      license: { id: '7', customer_id: '42' },
+      server: {
+        id: 's',
+        release_key: { algorithm: 'Ed25519', fingerprint: publicKeyFingerprint(release.pem) },
+        command_key: { algorithm: 'Ed25519', fingerprint: publicKeyFingerprint(command.pem) },
+      },
+      sequence: 3,
+    },
+  };
+  const proof = {
+    payload,
+    signature: crypto.sign(null, Buffer.from(canonicalize(payload), 'utf8'), vendor.privateKey).toString('base64'),
+  };
+  const opts = { vendorRoot: vendor.pem, proof };
+  assert.equal(verifyTrustProof({ ...opts, offeredKey: command.pem, purpose: 'command' }).ok, true);
+  assert.equal(verifyTrustProof({ ...opts, offeredKey: command.pem, purpose: 'release' }).code, 'SERVER_KEY_MISMATCH');
+  assert.equal(verifyTrustProof({ ...opts, offeredKey: release.pem, purpose: 'command' }).code, 'SERVER_KEY_MISMATCH');
+});

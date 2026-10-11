@@ -3,6 +3,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const { verifyCommand, requireSignedCommands, createReplayGuard } = require('../src/commandAuth');
 const { canonicalize } = require('../src/release/canonicalize');
@@ -223,6 +226,19 @@ function withTimeout(promise, ms, message) {
 }
 const onceEvent = (emitter, name) => new Promise((resolve) => emitter.once(name, resolve));
 const makeConfig = (server) => ({ serverUrl: server.url, heartbeatMs: 10000, backoff: { baseMs: 30, maxMs: 120, factor: 2 } });
+
+// A scratch state directory per runtime.
+//
+// Without one, a runtime falls back to `.blueeye-agent/` IN THE REPO, where it
+// writes the pinned keys and the trust state — and the trust state carries the
+// `commandsSigned` ratchet and now a pinned command key. Either of those left
+// behind by one test silently decides whether the next one accepts a command.
+// That is how a run went green on its own and red after another file had run.
+let scratchSeq = 0;
+function scratch() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `blueeye-cmdauth-${(scratchSeq += 1)}-`));
+  return path.join(dir, 'release-key.pem');
+}
 const noopHsflowd = { enable: async () => ({ state: 'active' }), disable: async () => ({ state: 'inactive' }), status: async () => ({ state: 'unknown' }) };
 const systemd = { sources: ['proc'], agentVersion: '0.2.0', managed: 'systemd' };
 
@@ -233,6 +249,7 @@ test('in strict mode an unsigned delete is refused and nothing is wiped', async 
   const runtime = createAgentRuntime({
     config: makeConfig(server), token: 'valid', agentId: 1, logger: silentLogger,
     hsflowdManager: noopHsflowd, selfDeleter, capabilities: systemd, strictCommands: true,
+    pinnedKeyPath: scratch(),
   });
   try {
     const reported = server.waitForWsMessage((m) => m.type === 'action-result' && m.action === 'delete');
@@ -259,7 +276,7 @@ test('a delete signed by the server is accepted in strict mode', async () => {
   const runtime = createAgentRuntime({
     config: makeConfig(server), token: 'valid', agentId: 1, logger: silentLogger,
     hsflowdManager: noopHsflowd, selfDeleter, capabilities: systemd,
-    strictCommands: true, releasePublicKey: publicPem,
+    strictCommands: true, releasePublicKey: publicPem, pinnedKeyPath: scratch(),
   });
   try {
     const reported = server.waitForWsMessage((m) => m.type === 'action-result' && m.action === 'delete');
@@ -284,6 +301,7 @@ test('an update signed for a DIFFERENT agent is refused without touching the upd
   const runtime = createAgentRuntime({
     config: makeConfig(server), token: 'valid', agentId: 1, logger: silentLogger,
     hsflowdManager: noopHsflowd, selfUpdater, capabilities: systemd, releasePublicKey: publicPem,
+    pinnedKeyPath: scratch(),
   });
   try {
     const reported = server.waitForWsMessage((m) => m.type === 'action-result' && m.action === 'upgrade');

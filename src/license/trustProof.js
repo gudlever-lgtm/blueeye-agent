@@ -47,10 +47,20 @@ function fail(code, detail) {
 //   expected    { licenseId?, customerId?, sequence? } what this agent already
 //               knows: the identity it was provisioned with (or has accepted
 //               before) and the highest sequence it has seen.
+//   purpose     which key is being authorised: 'release' (the code this agent
+//               installs) or 'command' (the instructions it obeys). A proof
+//               that authorises no key for the purpose asked about authorises
+//               NOTHING for it — there is no falling back to the other one
+//               here, because that would let a release-key authorisation stand
+//               in for a command-key one, which is the whole thing the split
+//               exists to prevent. The fallback lives one level up, in the
+//               agent's choice of which key to CHECK a signature against when
+//               it has pinned no command key at all.
 function verifyTrustProof({
   proof,
   offeredKey,
   expected = {},
+  purpose = 'release',
   vendorRoot = resolveVendorRoot(),
   now = () => Date.now(),
   maxSkewMs = MAX_CLOCK_SKEW_MS,
@@ -82,9 +92,14 @@ function verifyTrustProof({
   if (!trust || typeof trust !== 'object') {
     return fail('LICENSE_PROOF_INVALID', 'proof authorises no release key');
   }
-  const authorized = trust.server && trust.server.release_key;
+  const keyField = purpose === 'command' ? 'command_key' : 'release_key';
+  const authorized = trust.server && trust.server[keyField];
   if (!authorized || !isFingerprint(authorized.fingerprint)) {
-    return fail('LICENSE_PROOF_INVALID', 'proof carries no usable key fingerprint');
+    return fail('LICENSE_PROOF_INVALID',
+      `proof carries no usable ${purpose} key fingerprint`
+      + (purpose === 'command'
+        ? ' — the vendor has not authorised a separate command key for this licence'
+        : ''));
   }
   if (authorized.algorithm && authorized.algorithm !== 'Ed25519') {
     return fail('LICENSE_PROOF_INVALID', `unsupported key algorithm ${authorized.algorithm}`);
@@ -136,6 +151,7 @@ function verifyTrustProof({
 
   return {
     ok: true,
+    purpose,
     fingerprint: offeredFingerprint,
     sequence,
     licenseId: license.id != null ? String(license.id) : null,
